@@ -10,3 +10,6 @@ __pycache__/
 .venv/
 .pytest_cache/
 .vscode/
+
+# Local-only notes for coding agents (never committed)
+CLAUDE.local.md
