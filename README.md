@@ -9,7 +9,7 @@ before the film does, never hints at a twist, and never says an actor's name.
 > Built for the Google Cloud AI Builder Cup 2026 (Media, Content & Digital Experiences track).
 > Development started on 2026-10-09, within the hackathon window.
 
-**Live demo: DEMO_URL** — pick a film, pause anywhere, ask. The second tab ("How it works") is an interactive map of
+**Live demo: https://hello-watch-vspuwrubbq-uw.a.run.app** — pick a film, pause anywhere, ask. The second tab ("How it works") is an interactive map of
 the whole pipeline and the Google Cloud services behind it.
 
 ---

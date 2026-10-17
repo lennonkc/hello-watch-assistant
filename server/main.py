@@ -61,6 +61,7 @@ def _title(title_id: str):
 
 
 @app.get("/healthz")
+@app.get("/api/health")                                # Cloud Run reserves /healthz on its front end
 def healthz():
     return {"ok": True, "titles": len(STORE.titles)}
 

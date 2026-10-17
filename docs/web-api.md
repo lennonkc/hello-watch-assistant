@@ -94,7 +94,7 @@ The response is `text/event-stream` (read it with `fetch` + a stream reader; `Ev
 - `frames[].t` → `/api/titles/{id}/frames/{t}.jpg`; every frame is at or before `P`.
 - `guard.rewritten = true` means the output guard caught something and the answer was regenerated or replaced.
 
-### `GET /healthz`
+### `GET /api/health` (also `/healthz` locally; Cloud Run reserves that path)
 
 `{"ok": true, "titles": 3}`.
 
