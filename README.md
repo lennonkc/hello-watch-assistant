@@ -1,4 +1,9 @@
-# Hello Watch Assistant
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="web/brand/lockup-dark.svg">
+    <img src="web/brand/lockup.svg" alt="Hello Watch Assistant" height="88">
+  </picture>
+</h1>
 
 **A spoiler-free viewing companion built on Gemini and Google Cloud.**
 

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Hello Watch Assistant">
+<title>Hello Watch Assistant</title>
+<defs><linearGradient id="hw-tile" x1="0" y1="0" x2="1" y2="1">
+<stop offset="0" stop-color="#635cf2"/><stop offset="1" stop-color="#3f39c4"/></linearGradient>
+<clipPath id="hw-past"><rect x="0" y="0" width="72" height="128"/></clipPath>
+<clipPath id="hw-future"><rect x="72" y="0" width="56" height="128"/></clipPath></defs>
+<rect width="128" height="128" rx="30" fill="url(#hw-tile)"/>
+<path d="M38 31Q38 25 43.2 28L101 61Q106 64 101 67L43.2 100Q38 103 38 97Z" fill="#f5f4f0" clip-path="url(#hw-past)"/>
+<path d="M38 31Q38 25 43.2 28L101 61Q106 64 101 67L43.2 100Q38 103 38 97Z" fill="#f5f4f0" fill-opacity=".14" stroke="#f5f4f0" stroke-opacity=".75" stroke-width="3" stroke-dasharray="3.5 4.5" stroke-linecap="round" clip-path="url(#hw-future)"/>
+<path d="M64 15H80V22L72 28.5L64 22Z" fill="#f0b44c" stroke="#f0b44c" stroke-width="2" stroke-linejoin="round"/>
+<rect x="70" y="26" width="4" height="88" rx="2" fill="#f0b44c"/>
+</svg>
