@@ -1,0 +1,90 @@
+/* Motion layer (paired with motion.js). Every rule is scoped under :root.hwa-m, which motion.js sets only when
+   the viewer has not asked for reduced motion. Animated properties are transform/opacity and the individual
+   rotate/translate/scale properties, which compose with any transform the page styles already set. */
+
+/* ---------- view transitions (tab + theme) ---------- */
+
+::view-transition-old(root),
+::view-transition-new(root) { animation: none; mix-blend-mode: normal; }
+:root.hwa-vt-tab .app-header { view-transition-name: hwa-header; }
+:root.hwa-vt-tab::view-transition-group(hwa-header) { animation: none; }
+:root.hwa-vt-theme::view-transition-new(root) { z-index: 2; }
+:root.hwa-vt-tab::view-transition-old(root) { z-index: 2; }
+
+/* Colors snap during the theme swap; the circular reveal does the animating. */
+:root.hwa-theme-swap *, :root.hwa-theme-swap *::before, :root.hwa-theme-swap *::after { transition: none !important; }
+
+/* ---------- take over the page's own one-shot entrance animations ---------- */
+
+:root.hwa-m .xp-turn,
+:root.hwa-m .xp-answer,
+:root.hwa-m .xp-ring.is-in,
+:root.hwa-m .xp-hl.is-in,
+:root.hwa-m .xp-shield.is-pulse .xp-shield__badge,
+:root.hwa-m .arch-cell.is-new,
+:root.hwa-m .xp-pill { animation: none; }
+
+:root.hwa-m .xp-q { transform-origin: 100% 100%; }
+:root.hwa-m .xp-turn { transition: opacity var(--dur-slow, .6s) var(--ease-out, ease); }
+
+/* ---------- scroll reveal ---------- */
+
+:root.hwa-m [data-hwa-reveal] { opacity: 0; translate: 0 18px; }
+@media print { [data-hwa-reveal] { opacity: 1 !important; translate: none !important; } }
+
+/* ---------- tab ink ---------- */
+
+.hwa-tab-ink {
+  position: absolute; z-index: 0; left: 0; top: 0; width: 0; height: 0; pointer-events: none;
+  border-radius: 999px;
+  background: var(--neu-convex, var(--surface));
+  box-shadow: var(--neu-raise-sm, var(--shadow)), var(--neu-edge, 0 0 0 transparent);
+  transform-origin: 0 0;
+}
+:root:not(.hwa-m) .hwa-tab-ink { display: none; }
+
+/* ---------- answer text word reveal ---------- */
+
+/* Plain inline spans (opacity only) so line breaking is identical to the unwrapped text. */
+.hwa-w { animation: hwa-word .5s var(--ease-out, cubic-bezier(.2,.8,.2,1)) backwards; }
+@keyframes hwa-word { from { opacity: 0; } }
+
+/* ---------- film cards: tilt glare ---------- */
+
+:root.hwa-m .xp-cards > [role="listitem"] { perspective: 1100px; }
+.hwa-glare {
+  position: absolute; inset: 0; z-index: 1; pointer-events: none; opacity: 0;
+  background: radial-gradient(60% 70% at var(--hwa-gx, 50%) var(--hwa-gy, 30%), rgb(255 255 255 / .28), transparent 65%);
+  mix-blend-mode: soft-light;
+  transition: opacity var(--dur, .28s) var(--ease-out, ease);
+}
+:root.hwa-m .xp-card.hwa-tilting .hwa-glare { opacity: 1; }
+:root:not(.hwa-m) .hwa-glare { display: none; }
+
+/* ---------- pick mode ---------- */
+
+:root.hwa-m .xp-player.is-picking .xp-cross { animation: hwa-breathe 1.6s var(--ease-out, ease) infinite alternate; }
+:root.hwa-m .xp-player.is-keyboard .xp-cross { transition: left .12s var(--ease-out, ease), top .12s var(--ease-out, ease); }
+@keyframes hwa-breathe { from { scale: 1; } to { scale: 1.08; } }
+
+.hwa-ripple {
+  position: absolute; width: 46px; height: 46px; margin: -23px 0 0 -23px; border-radius: 50%;
+  border: 2px solid #fff; pointer-events: none; opacity: 0;
+  box-shadow: 0 0 0 2px var(--accent), 0 0 18px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+/* ---------- small delights ---------- */
+
+:root.hwa-m .xp-chip:not(:disabled):hover .xp-chip__tap { animation: hwa-tap .9s var(--ease-out, ease); }
+@keyframes hwa-tap { 30% { scale: 1.25; } 60% { scale: .92; } }
+
+.hwa-pulse {
+  fill: none; stroke: var(--c, var(--accent)); stroke-width: 2; pointer-events: none;
+  transform-box: fill-box; transform-origin: center; opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-hwa-reveal] { opacity: 1 !important; translate: none !important; }
+  .hwa-w { animation: none; }
+  .hwa-ripple, .hwa-pulse { display: none; }
+}

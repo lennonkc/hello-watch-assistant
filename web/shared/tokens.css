@@ -1,34 +1,67 @@
 /* Design tokens shared by every tab (see docs/web-api.md, "Design tokens").
-   Light is the default; dark follows the OS unless the page sets data-theme. */
+   Soft-UI (neumorphic) system: surfaces share the page colour and get their depth from a pair of shadows,
+   a light one from the top left and a dark one from the bottom right. Light is the default; dark follows the
+   OS unless the page sets data-theme. */
 
 :root {
   color-scheme: light;
 
-  --bg: #f5f4f0;
-  --surface: #ffffff;
-  --surface-2: #eeece6;
-  --border: #dcd9d0;
-  --text: #17171c;
-  --text-muted: #5d5b66;
+  --bg: #e5e8ef;
+  --surface: #e5e8ef;
+  --surface-2: #dbdfe8;          /* recessed wells */
+  --surface-3: #eef0f5;          /* highlights on raised surfaces */
+  --border: #cdd2de;
+  --text: #1b2030;
+  --text-muted: #545c72;
+  --text-faint: #7b8298;
   --accent: #4c46d6;
+  --accent-2: #635cf2;
   --accent-contrast: #ffffff;
-  --ok: #1e7f45;
-  --locked: #8a5a00;
+  --ok: #17703b;
+  --locked: #7d5200;
   --warn: #b3261e;
+  --led-ok: #22c065;
+  --led-locked: #f0a92c;
 
-  --radius: 16px;
-  --radius-sm: 10px;
-  --shadow: 0 1px 2px rgb(20 18 30 / 0.06), 0 8px 24px -8px rgb(20 18 30 / 0.14);
+  /* depth */
+  --neu-dark: rgb(150 160 186 / 0.55);
+  --neu-light: rgb(255 255 255 / 0.92);
+  --neu-raise-lg: 18px 18px 40px var(--neu-dark), -14px -14px 34px var(--neu-light);
+  --neu-raise: 9px 9px 20px var(--neu-dark), -8px -8px 18px var(--neu-light);
+  --neu-raise-sm: 4px 4px 10px var(--neu-dark), -4px -4px 9px var(--neu-light);
+  --neu-raise-xs: 2px 2px 5px var(--neu-dark), -2px -2px 4px var(--neu-light);
+  --neu-press: inset 6px 6px 13px var(--neu-dark), inset -6px -6px 13px var(--neu-light);
+  --neu-press-sm: inset 3px 3px 7px var(--neu-dark), inset -3px -3px 7px var(--neu-light);
+  --neu-press-xs: inset 1.5px 1.5px 3px var(--neu-dark), inset -1.5px -1.5px 3px var(--neu-light);
+  --neu-edge: inset 1px 1px 0 rgb(255 255 255 / 0.75), inset -1px -1px 0 rgb(120 132 160 / 0.14);
+  --neu-convex: linear-gradient(145deg, #eef0f6 0%, #dde1ea 100%);
+  --neu-concave: linear-gradient(145deg, #d9dde6 0%, #eceef4 100%);
+  --accent-convex: linear-gradient(145deg, #6c66f4 0%, #4a43d2 55%, #3d36bd 100%);
+  --accent-glow: 0 10px 22px -8px rgb(76 70 214 / 0.65);
+  --grain-opacity: 0.05;
+
+  --radius-lg: 26px;
+  --radius: 18px;
+  --radius-sm: 12px;
+  --shadow: var(--neu-raise);
 
   --font-sans: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
     Arial, "PingFang SC", "Noto Sans SC", sans-serif;
+  --font-display: "Bricolage Grotesque", var(--font-sans);
   --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* motion */
+  --ease-out: cubic-bezier(.2, .8, .2, 1);
+  --ease-spring: cubic-bezier(.34, 1.4, .5, 1);
+  --dur-fast: .16s;
+  --dur: .28s;
+  --dur-slow: .6s;
 
   /* Google Cloud service families (architecture diagram). */
   --gc-gemini: #6f4ff2;
   --gc-run: #1a73e8;
   --gc-storage: #188038;
-  --gc-secret: #c26401;
+  --gc-secret: #b25c00;
   --gc-build: #c5221f;
 }
 
@@ -36,19 +69,31 @@
   :root:not([data-theme="light"]) {
     color-scheme: dark;
 
-    --bg: #0e0e13;
-    --surface: #17171f;
-    --surface-2: #20202a;
-    --border: #2e2e3a;
-    --text: #ecebf2;
-    --text-muted: #a3a1b0;
-    --accent: #9d97ff;
+    --bg: #1d2029;
+    --surface: #1d2029;
+    --surface-2: #171a22;
+    --surface-3: #252935;
+    --border: #2d313e;
+    --text: #e8eaf2;
+    --text-muted: #a2a8bc;
+    --text-faint: #7a8096;
+    --accent: #a29cff;
+    --accent-2: #8a83ff;
     --accent-contrast: #12111c;
     --ok: #5fd28f;
     --locked: #f0b44c;
     --warn: #ff8a80;
+    --led-ok: #4be08a;
+    --led-locked: #f5b545;
 
-    --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 12px 32px -12px rgb(0 0 0 / 0.6);
+    --neu-dark: rgb(6 7 11 / 0.72);
+    --neu-light: rgb(62 68 88 / 0.36);
+    --neu-edge: inset 1px 1px 0 rgb(255 255 255 / 0.055), inset -1px -1px 0 rgb(0 0 0 / 0.28);
+    --neu-convex: linear-gradient(145deg, #242834 0%, #1a1d25 100%);
+    --neu-concave: linear-gradient(145deg, #181b23 0%, #232733 100%);
+    --accent-convex: linear-gradient(145deg, #b3aeff 0%, #948dff 55%, #7f77f5 100%);
+    --accent-glow: 0 10px 24px -8px rgb(140 132 255 / 0.5);
+    --grain-opacity: 0.07;
 
     --gc-gemini: #a58dff;
     --gc-run: #6aa6ff;
@@ -61,19 +106,31 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --bg: #0e0e13;
-  --surface: #17171f;
-  --surface-2: #20202a;
-  --border: #2e2e3a;
-  --text: #ecebf2;
-  --text-muted: #a3a1b0;
-  --accent: #9d97ff;
+  --bg: #1d2029;
+  --surface: #1d2029;
+  --surface-2: #171a22;
+  --surface-3: #252935;
+  --border: #2d313e;
+  --text: #e8eaf2;
+  --text-muted: #a2a8bc;
+  --text-faint: #7a8096;
+  --accent: #a29cff;
+  --accent-2: #8a83ff;
   --accent-contrast: #12111c;
   --ok: #5fd28f;
   --locked: #f0b44c;
   --warn: #ff8a80;
+  --led-ok: #4be08a;
+  --led-locked: #f5b545;
 
-  --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 12px 32px -12px rgb(0 0 0 / 0.6);
+  --neu-dark: rgb(6 7 11 / 0.72);
+  --neu-light: rgb(62 68 88 / 0.36);
+  --neu-edge: inset 1px 1px 0 rgb(255 255 255 / 0.055), inset -1px -1px 0 rgb(0 0 0 / 0.28);
+  --neu-convex: linear-gradient(145deg, #242834 0%, #1a1d25 100%);
+  --neu-concave: linear-gradient(145deg, #181b23 0%, #232733 100%);
+  --accent-convex: linear-gradient(145deg, #b3aeff 0%, #948dff 55%, #7f77f5 100%);
+  --accent-glow: 0 10px 24px -8px rgb(140 132 255 / 0.5);
+  --grain-opacity: 0.07;
 
   --gc-gemini: #a58dff;
   --gc-run: #6aa6ff;

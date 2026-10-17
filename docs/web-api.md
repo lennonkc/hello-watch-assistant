@@ -10,6 +10,7 @@
 | `server/` | back end | FastAPI app, ADK agent, gate-aware tools, output guards, pack store |
 | `web/index.html` | front end | App shell: header, two tabs (`#experience`, `#architecture`), footer with film attribution |
 | `web/shared/tokens.css` | front end | Design tokens shared by both tabs (see below) |
+| `web/shared/motion.css`, `motion.js` | front end | Motion layer: entrances, tab / theme transitions, count-ups, ask-flow choreography; honours `prefers-reduced-motion` |
 | `web/experience/` | front end | Tab 1, "Live demo": film picker, player, ask panel |
 | `web/architecture/` | front end | Tab 2, "How it works": interactive flow diagram + Google Cloud technology map |
 
@@ -18,13 +19,23 @@ external scripts (Google Fonts stylesheets are fine). Everything must work at ph
 
 ## Design tokens (`web/shared/tokens.css`)
 
-Both tabs use only these CSS custom properties (defined on `:root`, overridden under
-`@media (prefers-color-scheme: dark)` and `:root[data-theme="dark"|"light"]`):
+The visual language is soft UI (neumorphism): surfaces share the page colour and get their depth from a light
+shadow at the top left and a dark one at the bottom right. Both tabs use only these CSS custom properties (defined
+on `:root`, overridden under `@media (prefers-color-scheme: dark)` and `:root[data-theme="dark"|"light"]`):
 
-`--bg`, `--surface`, `--surface-2`, `--border`, `--text`, `--text-muted`, `--accent`, `--accent-contrast`,
-`--ok` (gate passed), `--locked` (gate blocked / future), `--warn`, `--radius`, `--radius-sm`, `--shadow`,
-`--font-sans`, `--font-mono`, and one colour per Google Cloud service family used in the diagram:
-`--gc-gemini`, `--gc-run`, `--gc-storage`, `--gc-secret`, `--gc-build`.
+- Colour: `--bg`, `--surface`, `--surface-2` (recessed wells), `--surface-3` (highlights), `--border`, `--text`,
+  `--text-muted`, `--text-faint`, `--accent`, `--accent-2`, `--accent-contrast`, `--ok` (gate passed), `--locked`
+  (gate blocked / future), `--warn`, and the indicator lights `--led-ok`, `--led-locked`.
+- Depth: `--neu-raise-lg`, `--neu-raise`, `--neu-raise-sm`, `--neu-raise-xs` (extruded), `--neu-press`,
+  `--neu-press-sm`, `--neu-press-xs` (pressed in), `--neu-edge` (rim light), `--neu-convex` / `--neu-concave`
+  (surface gradients), `--accent-convex`, `--accent-glow`; `--shadow` is kept as an alias of `--neu-raise`.
+  Inside SVG, use the page-level filters `url(#neu-raise)`, `url(#neu-raise-lg)` and `url(#neu-inset)`.
+- Shape and type: `--radius-lg`, `--radius`, `--radius-sm`, `--font-sans`, `--font-display` (headings),
+  `--font-mono`.
+- Motion: `--ease-out`, `--ease-spring`, `--dur-fast`, `--dur`, `--dur-slow`. Stylesheets animate hover and press
+  with the individual `translate` / `scale` properties; `transform` is left to the motion layer.
+- One colour per Google Cloud service family used in the diagram: `--gc-gemini`, `--gc-run`, `--gc-storage`,
+  `--gc-secret`, `--gc-build`.
 
 ## Endpoints
 

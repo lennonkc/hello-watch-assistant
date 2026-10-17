@@ -6,8 +6,8 @@
   <title>Hello Watch Assistant</title>
   <meta name="description" content="A spoiler-free viewing companion: pause a film and ask about what you have already seen.">
   <meta name="color-scheme" content="light dark">
-  <meta name="theme-color" content="#f5f4f0" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#0e0e13" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#e5e8ef" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1d2029" media="(prefers-color-scheme: dark)">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Hello Watch Assistant">
   <meta property="og:title" content="Hello Watch Assistant">
@@ -22,27 +22,40 @@
   <link rel="apple-touch-icon" href="./brand/apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght%4012..96,500..800&family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="./shared/tokens.css">
+  <link rel="stylesheet" href="./shared/motion.css">
   <style>
     *, *::before, *::after { box-sizing: border-box; }
     [hidden] { display: none !important; }
-    html { -webkit-text-size-adjust: 100%; }
+    html { -webkit-text-size-adjust: 100%; background: var(--bg); }
     body {
       margin: 0;
       min-height: 100vh;
       min-height: 100dvh;
       display: flex;
       flex-direction: column;
-      background: var(--bg);
+      background:
+        radial-gradient(1200px 640px at 8% -12%, var(--surface-3), transparent 62%),
+        radial-gradient(900px 520px at 100% 0%, color-mix(in srgb, var(--accent) 6%, transparent), transparent 70%),
+        var(--bg);
       color: var(--text);
       font-family: var(--font-sans);
       font-size: 16px;
       line-height: 1.5;
       -webkit-font-smoothing: antialiased;
+      position: relative;
     }
+    /* Paper-like grain: gives the soft surfaces something tactile to catch the light on. */
+    body::before {
+      content: ""; position: absolute; inset: 0; z-index: 0; pointer-events: none; opacity: var(--grain-opacity);
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 .9 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      mix-blend-mode: multiply;
+    }
+    body > * { position: relative; z-index: 1; }
     button, input, select, textarea { font: inherit; color: inherit; }
-    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    ::selection { background: color-mix(in srgb, var(--accent) 28%, transparent); }
     .visually-hidden {
       position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px;
       overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
@@ -53,82 +66,129 @@
       background: var(--accent); color: var(--accent-contrast); text-decoration: none;
     }
     .skip-link:focus { top: 12px; }
+    .neu-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+    .neu-defs__dark { flood-color: var(--neu-dark); }
+    .neu-defs__light { flood-color: var(--neu-light); }
+
+    /* ---------- header ---------- */
 
     .app-header {
       position: sticky; top: 0; z-index: 20;
-      background: color-mix(in srgb, var(--bg) 82%, transparent);
-      backdrop-filter: saturate(1.4) blur(14px);
-      -webkit-backdrop-filter: saturate(1.4) blur(14px);
-      border-bottom: 1px solid var(--border);
+      background: color-mix(in srgb, var(--bg) 80%, transparent);
+      backdrop-filter: saturate(1.3) blur(16px);
+      -webkit-backdrop-filter: saturate(1.3) blur(16px);
+      transition: box-shadow var(--dur) var(--ease-out);
     }
+    .app-header.is-scrolled { box-shadow: 0 12px 28px -18px var(--neu-dark), 0 1px 0 color-mix(in srgb, var(--neu-light) 60%, transparent) inset; }
     .app-header__inner {
-      max-width: 1240px; margin: 0 auto; padding: 10px 16px;
-      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+      max-width: 1240px; margin: 0 auto; padding: 12px 16px;
+      display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
     }
-    .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: inherit; margin-right: auto; }
-    .brand__mark {
-      width: 32px; height: 32px; border-radius: 8px; flex: none; display: block;
-      box-shadow: 0 4px 14px -4px color-mix(in srgb, var(--accent) 60%, transparent);
+    .brand { display: flex; align-items: center; gap: 12px; text-decoration: none; color: inherit; margin-right: auto; }
+    .brand__socket {
+      width: 44px; height: 44px; flex: none; border-radius: 14px; display: grid; place-items: center;
+      background: var(--neu-convex); box-shadow: var(--neu-raise-sm), var(--neu-edge);
     }
+    .brand__mark { width: 30px; height: 30px; border-radius: 9px; display: block; }
     .brand__text { display: flex; flex-direction: column; line-height: 1.15; }
-    .brand__name { font-weight: 700; letter-spacing: -0.01em; }
+    .brand__name { font-family: var(--font-display); font-weight: 700; font-size: 17px; letter-spacing: -0.015em; }
     .brand__tag { font-size: 12.5px; color: var(--text-muted); }
 
     .tabs {
-      display: flex; gap: 4px; padding: 4px;
-      background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px;
+      position: relative; display: flex; gap: 4px; padding: 5px;
+      background: var(--surface-2); border-radius: 999px;
+      box-shadow: var(--neu-press-sm);
     }
     .tab {
+      position: relative; z-index: 1;
       appearance: none; border: 0; background: transparent; cursor: pointer;
-      padding: 7px 16px; border-radius: 999px; font-size: 14.5px; font-weight: 600;
-      color: var(--text-muted); display: inline-flex; align-items: center; gap: 7px;
-      transition: background-color .2s, color .2s, box-shadow .2s;
+      padding: 8px 17px; border-radius: 999px; font-size: 14.5px; font-weight: 600;
+      color: var(--text-muted); display: inline-flex; align-items: center; gap: 8px;
+      transition: color var(--dur) var(--ease-out), background-color var(--dur), box-shadow var(--dur);
       white-space: nowrap;
     }
     .tab:hover { color: var(--text); }
-    .tab[aria-selected="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
-    .tab svg { width: 16px; height: 16px; flex: none; }
+    .tab[aria-selected="true"] {
+      color: var(--text);
+      background: var(--neu-convex); box-shadow: var(--neu-raise-sm), var(--neu-edge);
+    }
+    .tab[aria-selected="true"] svg { color: var(--accent); }
+    :root.hwa-m .tab[aria-selected="true"] { background: transparent; box-shadow: none; }
+    .tab svg { width: 16px; height: 16px; flex: none; transition: color var(--dur); }
 
     .theme-toggle {
-      appearance: none; cursor: pointer; width: 38px; height: 38px; flex: none;
-      display: grid; place-items: center; border-radius: 999px;
-      background: var(--surface-2); border: 1px solid var(--border); color: var(--text-muted);
+      appearance: none; cursor: pointer; width: 44px; height: 44px; flex: none; border: 0;
+      display: grid; place-items: center; border-radius: 50%;
+      background: var(--neu-convex); color: var(--text-muted);
+      box-shadow: var(--neu-raise-sm), var(--neu-edge);
+      transition: box-shadow var(--dur-fast) var(--ease-out), color var(--dur);
     }
-    .theme-toggle:hover { color: var(--text); }
-    .theme-toggle svg { width: 18px; height: 18px; }
+    .theme-toggle:hover { color: var(--accent); }
+    .theme-toggle:active { box-shadow: var(--neu-press-sm); }
+    .theme-toggle svg { width: 19px; height: 19px; }
+
+    /* ---------- panels ---------- */
 
     main { flex: 1; width: 100%; }
-    .tab-panel { max-width: 1240px; margin: 0 auto; padding: 24px 16px 48px; }
+    .tab-panel { max-width: 1240px; margin: 0 auto; padding: 28px 16px 56px; }
     .tab-panel:focus { outline: none; }
     .panel-fallback {
       margin: 48px auto; max-width: 520px; text-align: center; color: var(--text-muted);
-      padding: 32px 24px; border: 1px dashed var(--border); border-radius: var(--radius); background: var(--surface);
+      padding: 34px 26px; border-radius: var(--radius-lg); background: var(--surface); box-shadow: var(--neu-press);
     }
     .panel-fallback strong { display: block; color: var(--text); font-size: 18px; margin-bottom: 6px; }
     .panel-fallback button {
-      margin-top: 16px; padding: 8px 16px; border-radius: 999px; border: 1px solid var(--border);
-      background: var(--surface-2); cursor: pointer; font-weight: 600;
+      margin-top: 18px; padding: 9px 18px; border-radius: 999px; border: 0; cursor: pointer; font-weight: 600;
+      background: var(--neu-convex); box-shadow: var(--neu-raise-sm), var(--neu-edge);
     }
-    .panel-loading { display: grid; place-items: center; min-height: 40vh; color: var(--text-muted); font-size: 14px; }
+    .panel-fallback button:active { box-shadow: var(--neu-press-sm); }
+    .panel-loading {
+      display: grid; place-items: center; align-content: center; gap: 14px; min-height: 40vh;
+      color: var(--text-muted); font-size: 14px;
+    }
+    .panel-loading::before {
+      content: ""; width: 44px; height: 44px; border-radius: 50%;
+      background: conic-gradient(from 0deg, var(--accent), transparent 70%);
+      -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
+      mask: radial-gradient(farthest-side, transparent calc(100% - 5px), #000 calc(100% - 4px));
+      animation: shell-spin .9s linear infinite;
+    }
+    @keyframes shell-spin { to { rotate: 360deg; } }
 
-    .app-footer { border-top: 1px solid var(--border); color: var(--text-muted); font-size: 13px; }
+    /* ---------- footer ---------- */
+
+    .app-footer { color: var(--text-muted); font-size: 13px; }
     .app-footer__inner {
-      max-width: 1240px; margin: 0 auto; padding: 20px 16px 28px;
-      display: grid; gap: 10px; grid-template-columns: 1fr;
+      max-width: 1240px; margin: 0 auto; padding: 0 16px 32px;
+      display: grid; gap: 12px; grid-template-columns: 1fr;
+    }
+    .app-footer__inner::before {
+      content: ""; height: 4px; border-radius: 4px; margin-bottom: 14px;
+      background: var(--surface-2); box-shadow: var(--neu-press-xs);
     }
     .app-footer ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 18px; }
-    .app-footer a { color: inherit; text-underline-offset: 2px; }
-    .app-footer a:hover { color: var(--text); }
+    .app-footer a { color: inherit; text-underline-offset: 3px; text-decoration-color: color-mix(in srgb, currentColor 40%, transparent); }
+    .app-footer a:hover { color: var(--accent); }
     .app-footer__note { margin: 0; }
-    .app-footer__brand { margin: 0; display: flex; align-items: center; gap: 8px; color: var(--text); font-weight: 600; }
-    .app-footer__brand img { width: 20px; height: 20px; border-radius: 5px; flex: none; }
+    .app-footer__brand {
+      margin: 0; display: flex; align-items: center; gap: 10px; color: var(--text);
+      font-family: var(--font-display); font-weight: 700; font-size: 15px;
+    }
+    .app-footer__brand span {
+      width: 30px; height: 30px; border-radius: 10px; display: grid; place-items: center; flex: none;
+      background: var(--neu-convex); box-shadow: var(--neu-raise-xs), var(--neu-edge);
+    }
+    .app-footer__brand img { width: 20px; height: 20px; border-radius: 6px; display: block; }
 
     @media (max-width: 640px) {
-      .app-header__inner { gap: 10px; }
+      .app-header__inner { gap: 12px; padding-block: 10px; }
       .brand__tag { display: none; }
+      .brand__socket { width: 40px; height: 40px; border-radius: 13px; }
+      .brand__mark { width: 27px; height: 27px; }
+      .theme-toggle { width: 40px; height: 40px; }
       .tabs { order: 3; width: 100%; }
       .tab { flex: 1; justify-content: center; padding: 8px 10px; }
-      .tab-panel { padding-top: 16px; }
+      .tab-panel { padding-top: 18px; }
     }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { transition-duration: 0s !important; animation-duration: 0s !important; }
@@ -138,10 +198,35 @@
 <body>
   <a class="skip-link" href="#panel-experience">Skip to content</a>
 
+  <!-- Soft-UI depth for SVG shapes (CSS box-shadow does not apply inside SVG). -->
+  <svg class="neu-defs" aria-hidden="true" focusable="false">
+    <filter id="neu-raise" x="-30%" y="-40%" width="160%" height="180%" color-interpolation-filters="sRGB">
+      <feDropShadow class="neu-defs__dark" dx="3" dy="3" stdDeviation="3"/>
+      <feDropShadow class="neu-defs__light" dx="-2.5" dy="-2.5" stdDeviation="2.5"/>
+    </filter>
+    <filter id="neu-raise-lg" x="-30%" y="-40%" width="160%" height="180%" color-interpolation-filters="sRGB">
+      <feDropShadow class="neu-defs__dark" dx="5" dy="5" stdDeviation="5"/>
+      <feDropShadow class="neu-defs__light" dx="-4" dy="-4" stdDeviation="4"/>
+    </filter>
+    <filter id="neu-inset" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">
+      <feFlood class="neu-defs__dark" result="dark"/>
+      <feFlood class="neu-defs__light" result="light"/>
+      <feOffset in="SourceAlpha" dx="5" dy="5" result="o1"/>
+      <feGaussianBlur in="o1" stdDeviation="5" result="b1"/>
+      <feComposite in="SourceAlpha" in2="b1" operator="out" result="rim1"/>
+      <feComposite in="dark" in2="rim1" operator="in" result="shade"/>
+      <feOffset in="SourceAlpha" dx="-5" dy="-5" result="o2"/>
+      <feGaussianBlur in="o2" stdDeviation="5" result="b2"/>
+      <feComposite in="SourceAlpha" in2="b2" operator="out" result="rim2"/>
+      <feComposite in="light" in2="rim2" operator="in" result="lit"/>
+      <feMerge><feMergeNode in="SourceGraphic"/><feMergeNode in="shade"/><feMergeNode in="lit"/></feMerge>
+    </filter>
+  </svg>
+
   <header class="app-header">
     <div class="app-header__inner">
       <a class="brand" href="#experience" aria-label="Hello Watch Assistant, home">
-        <img class="brand__mark" src="./brand/mark.svg" width="32" height="32" alt="">
+        <span class="brand__socket"><img class="brand__mark" src="./brand/mark.svg" width="30" height="30" alt=""></span>
         <span class="brand__text">
           <span class="brand__name">Hello Watch Assistant</span>
           <span class="brand__tag">Ask about the film. Never get spoiled.</span>
@@ -174,7 +259,7 @@
 
   <footer class="app-footer">
     <div class="app-footer__inner">
-      <p class="app-footer__brand"><img src="./brand/mark.svg" width="20" height="20" alt="">Hello Watch Assistant</p>
+      <p class="app-footer__brand"><span><img src="./brand/mark.svg" width="20" height="20" alt=""></span>Hello Watch Assistant</p>
       <ul aria-label="Film credits">
         <li><a href="https://durian.blender.org" rel="noopener" target="_blank">Sintel</a> © Blender Foundation, CC BY 3.0</li>
         <li><a href="https://mango.blender.org" rel="noopener" target="_blank">Tears of Steel</a> © Blender Foundation, CC BY 3.0</li>
@@ -184,6 +269,7 @@
     </div>
   </footer>
 
+  <script type="module" src="./shared/motion.js"></script>
   <script type="module">
     const TABS = {
       experience: () => import('./experience/experience.js'),
@@ -192,6 +278,13 @@
     const DEFAULT_TAB = 'experience';
     const mounted = new Set();
     const tabs = [...document.querySelectorAll('[role="tab"]')];
+
+    // Motion layer hook (web/shared/motion.js): wraps a DOM change in a transition when it is loaded.
+    function transition(fn, kind) {
+      const t = window.hwaMotion?.transition;
+      if (typeof t !== 'function') return fn();
+      try { return t(fn, kind); } catch (err) { console.warn('Transition failed', err); return fn(); }
+    }
 
     function panelFor(name) { return document.getElementById(`panel-${name}`); }
 
@@ -221,18 +314,24 @@
       }
     }
 
-    function select(name, { focus = false } = {}) {
+    function current() { return tabs.find((t) => t.getAttribute('aria-selected') === 'true')?.dataset.tab; }
+
+    function select(name, { focus = false, animate = false } = {}) {
       if (!TABS[name]) name = DEFAULT_TAB;
-      for (const tab of tabs) {
-        const on = tab.dataset.tab === name;
-        tab.setAttribute('aria-selected', String(on));
-        tab.tabIndex = on ? 0 : -1;
-        panelFor(tab.dataset.tab).hidden = !on;
-        if (on && focus) tab.focus();
-      }
-      document.querySelector('.skip-link').setAttribute('href', `#panel-${name}`);
-      document.dispatchEvent(new CustomEvent('hwa:tabchange', { detail: { tab: name } }));
-      mount(name);
+      const apply = () => {
+        for (const tab of tabs) {
+          const on = tab.dataset.tab === name;
+          tab.setAttribute('aria-selected', String(on));
+          tab.tabIndex = on ? 0 : -1;
+          panelFor(tab.dataset.tab).hidden = !on;
+          if (on && focus) tab.focus();
+        }
+        document.querySelector('.skip-link').setAttribute('href', `#panel-${name}`);
+        document.dispatchEvent(new CustomEvent('hwa:tabchange', { detail: { tab: name } }));
+        mount(name);
+      };
+      if (animate && current() !== name) transition(apply, 'tab');
+      else apply();
     }
 
     function fromHash() { return location.hash.replace(/^#/, '') || DEFAULT_TAB; }
@@ -241,7 +340,7 @@
       tab.addEventListener('click', () => {
         const name = tab.dataset.tab;
         if (fromHash() !== name) history.pushState(null, '', `#${name}`);
-        select(name);
+        select(name, { animate: true });
       });
       tab.addEventListener('keydown', (e) => {
         const i = tabs.indexOf(tab);
@@ -253,15 +352,21 @@
         if (!next) return;
         e.preventDefault();
         history.pushState(null, '', `#${next.dataset.tab}`);
-        select(next.dataset.tab, { focus: true });
+        select(next.dataset.tab, { focus: true, animate: true });
       });
     }
-    window.addEventListener('hashchange', () => { if (TABS[fromHash()]) select(fromHash()); });
-    window.addEventListener('popstate', () => select(fromHash()));
+    window.addEventListener('hashchange', () => { if (TABS[fromHash()]) select(fromHash(), { animate: true }); });
+    window.addEventListener('popstate', () => select(fromHash(), { animate: true }));
     document.querySelector('.skip-link').addEventListener('click', (e) => {
       const target = document.querySelector(e.currentTarget.getAttribute('href'));
       if (target) { e.preventDefault(); target.focus(); }
     });
+
+    // Header gains depth once the page scrolls under it.
+    const header = document.querySelector('.app-header');
+    const onScroll = () => header.classList.toggle('is-scrolled', scrollY > 4);
+    addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
 
     // Theme: follow system -> light -> dark -> follow system.
     const THEME_KEY = 'hwa-theme';
@@ -279,8 +384,12 @@
     try { theme = localStorage.getItem(THEME_KEY) || 'auto'; } catch { /* storage unavailable */ }
     theme = applyTheme(theme);
     toggle.addEventListener('click', () => {
-      theme = applyTheme({ auto: 'light', light: 'dark', dark: 'auto' }[theme]);
-      try { localStorage.setItem(THEME_KEY, theme); } catch { /* storage unavailable */ }
+      const next = { auto: 'light', light: 'dark', dark: 'auto' }[theme];
+      transition(() => {
+        theme = applyTheme(next);
+        document.dispatchEvent(new CustomEvent('hwa:themechange', { detail: { mode: theme } }));
+      }, 'theme');
+      try { localStorage.setItem(THEME_KEY, next); } catch { /* storage unavailable */ }
     });
 
     select(fromHash());

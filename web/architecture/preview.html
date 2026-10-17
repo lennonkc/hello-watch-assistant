@@ -6,10 +6,13 @@
   <title>How It Works</title>
   <link rel="icon" href="../brand/mark.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght%4012..96,500..800&family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="../shared/tokens.css">
   <style>
     /* Standalone preview of tab 2; the real app shell is web/index.html. */
+    .neu-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+    .neu-defs__dark { flood-color: var(--neu-dark); }
+    .neu-defs__light { flood-color: var(--neu-light); }
     body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font-sans); }
     main { max-width: 1240px; margin: 0 auto; padding: 24px 16px 48px; }
     .theme { position: fixed; top: 10px; right: 12px; z-index: 40; font: inherit; font-size: 13px; padding: 6px 12px;
@@ -17,6 +20,30 @@
   </style>
 </head>
 <body>
+  <!-- Soft-UI depth for SVG shapes (CSS box-shadow does not apply inside SVG). -->
+  <svg class="neu-defs" aria-hidden="true" focusable="false">
+    <filter id="neu-raise" x="-30%" y="-40%" width="160%" height="180%" color-interpolation-filters="sRGB">
+      <feDropShadow class="neu-defs__dark" dx="3" dy="3" stdDeviation="3"/>
+      <feDropShadow class="neu-defs__light" dx="-2.5" dy="-2.5" stdDeviation="2.5"/>
+    </filter>
+    <filter id="neu-raise-lg" x="-30%" y="-40%" width="160%" height="180%" color-interpolation-filters="sRGB">
+      <feDropShadow class="neu-defs__dark" dx="5" dy="5" stdDeviation="5"/>
+      <feDropShadow class="neu-defs__light" dx="-4" dy="-4" stdDeviation="4"/>
+    </filter>
+    <filter id="neu-inset" x="0" y="0" width="100%" height="100%" color-interpolation-filters="sRGB">
+      <feFlood class="neu-defs__dark" result="dark"/>
+      <feFlood class="neu-defs__light" result="light"/>
+      <feOffset in="SourceAlpha" dx="5" dy="5" result="o1"/>
+      <feGaussianBlur in="o1" stdDeviation="5" result="b1"/>
+      <feComposite in="SourceAlpha" in2="b1" operator="out" result="rim1"/>
+      <feComposite in="dark" in2="rim1" operator="in" result="shade"/>
+      <feOffset in="SourceAlpha" dx="-5" dy="-5" result="o2"/>
+      <feGaussianBlur in="o2" stdDeviation="5" result="b2"/>
+      <feComposite in="SourceAlpha" in2="b2" operator="out" result="rim2"/>
+      <feComposite in="light" in2="rim2" operator="in" result="lit"/>
+      <feMerge><feMergeNode in="SourceGraphic"/><feMergeNode in="shade"/><feMergeNode in="lit"/></feMerge>
+    </filter>
+  </svg>
   <button class="theme" type="button" id="theme">Theme: system</button>
   <main><section id="panel-architecture" aria-label="How it works"></section></main>
   <script type="module">
