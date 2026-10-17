@@ -1,0 +1,5 @@
+Each image above has a red circle. TARGET: "{label}" ({kind}).
+{looks}
+Other characters:
+{others}
+For every image: is the subject inside the circle mainly the target? {no_people}

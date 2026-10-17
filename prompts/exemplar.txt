@@ -1,0 +1,8 @@
+Build a reference gallery for one character.
+TARGET: {ref} — "{label}" ({kind}).
+{looks}
+Other characters (not the target):
+{others}
+For every candidate frame above, say whether the target is visible, how clearly (0-1), and give box_2d around the
+target as [ymin, xmin, ymax, xmax] normalized 0-1000.
+{no_people}

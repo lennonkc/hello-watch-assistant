@@ -1,0 +1,25 @@
+# FFmpeg base image: x264 stable r3222 (b35605a) + FFmpeg 9.0.2, statically built from source into /opt/ffmpeg.
+# Same versions as the local ingest environment (Homebrew ffmpeg 9.0.2 / x264 0.165.3222), so segment files are byte-for-byte reproducible.
+# The build takes about 40 min and rarely changes, hence a separate image: tag = ffmpeg<version>-x264r<revision>; build.sh skips it if the registry already has it.
+ARG DEBIAN_TAG=trixie-slim
+FROM debian:${DEBIAN_TAG}
+ARG X264_COMMIT=b35605ace3ddf7c1a5d67a2eb553f034aef41d55
+ARG FFMPEG_VERSION=9.0.2
+ARG FFMPEG_SHA256=8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential nasm pkg-config git ca-certificates curl xz-utils zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN git clone https://code.videolan.org/videolan/x264.git && cd x264 && git checkout ${X264_COMMIT} \
+    && ./configure --prefix=/opt/ffmpeg --enable-static --enable-pic --disable-cli \
+    && make -j"$(nproc)" && make install
+RUN curl -fsSLo ffmpeg.tar.xz https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz \
+    && echo "${FFMPEG_SHA256}  ffmpeg.tar.xz" | sha256sum -c - \
+    && tar xf ffmpeg.tar.xz && cd ffmpeg-${FFMPEG_VERSION} \
+    && PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig ./configure --prefix=/opt/ffmpeg \
+        --enable-gpl --enable-version3 --enable-libx264 --enable-zlib \
+        --disable-doc --disable-ffplay --disable-debug --disable-autodetect \
+        --pkg-config-flags=--static --extra-ldflags=-static-libgcc \
+    && make -j"$(nproc)" && make install \
+    && /opt/ffmpeg/bin/ffmpeg -hide_banner -version | head -1
+

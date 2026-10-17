@@ -1,0 +1,3 @@
+[tool.pytest.ini_options]
+testpaths = ["ingest/tests"]
+markers = ["real_prompts: use the real prompts (Secret Manager / prompts/) instead of placeholder prompts"]

@@ -1,0 +1,14 @@
+{
+ "catalog_id": "9e9cbbc5-02d4-46b1-a1b3-f1a47e7e50fe",
+ "title": "Tears of Steel",
+ "asset_kind": "short",
+ "license": "CC-BY-3.0",
+ "license_note": "Tears of Steel (CC) Blender Foundation | mango.blender.org — on-screen notice: Creative Commons Attribution 3.0",
+ "derivatives_ok": 1,
+ "dialogue_lang": "en",
+ "vision_prompt": "v2",
+ "expected_asset_sha256": [
+  "b9b4cd747885075b1a7b0deba1ef04ca9acdd780caa0e88e5dfac6aab67f2b55"
+ ],
+ "subtitles": []
+}

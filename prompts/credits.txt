@@ -1,0 +1,2 @@
+This clip is the end credits of a film. List every person's name shown, with the role text next to it, and mark
+performers / voices as cast. The list is used as a blocklist so the app never says real people's names.

@@ -1,0 +1,2 @@
+
+Dialogue is in {lang}: write knowledge text in English, but keep `quote` fields in the original language.

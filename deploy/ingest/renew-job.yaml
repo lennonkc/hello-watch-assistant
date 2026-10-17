@@ -1,0 +1,40 @@
+# Cloud Run Job: renew Gemini file registrations (scans registry/*.json and re-registers entries whose expires_at is < 12 h away).
+# Triggered by Cloud Scheduler every 6 h (see docs/cloud-deploy.md). No HTTP exposed.
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: cedar-watch-renew
+  labels:
+    app: cedar-watch
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/execution-environment: gen2
+    spec:
+      parallelism: 1
+      taskCount: 1
+      template:
+        spec:
+          serviceAccountName: cedar-watch-ingest@${PROJECT}.iam.gserviceaccount.com
+          timeoutSeconds: 1800
+          maxRetries: 1
+          containers:
+            - image: ${IMAGE}
+              args: ["cloud", "renew"]
+              env:
+                - name: CEDAR_INGEST_BUCKET
+                  value: ${BUCKET}
+                - name: CEDAR_GEMINI_BACKEND        # developer | enterprise (Agent Platform, ADC = this service account)
+                  value: ${GEMINI_BACKEND}
+                - name: CEDAR_GCP_PROJECT
+                  value: ${PROJECT}
+                - name: CEDAR_GEMINI_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: cedar-watch-gemini-api-key
+                      key: latest
+              resources:
+                limits:
+                  cpu: "1"
+                  memory: 4Gi

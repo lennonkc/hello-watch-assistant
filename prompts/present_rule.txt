@@ -1,0 +1,2 @@
+
+For every scene, event and object, list every indexed character visible on screen at that time.

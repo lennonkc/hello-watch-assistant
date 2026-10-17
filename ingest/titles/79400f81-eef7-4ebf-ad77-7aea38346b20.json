@@ -1,0 +1,14 @@
+{
+ "catalog_id": "79400f81-eef7-4ebf-ad77-7aea38346b20",
+ "title": "Elephants Dream",
+ "asset_kind": "short",
+ "license": "CC-BY-2.5",
+ "license_note": "Elephants Dream (c) copyright 2006, Blender Foundation / Netherlands Media Art Institute / www.elephantsdream.org (licence per catalog; verify against on-screen notice)",
+ "derivatives_ok": 1,
+ "dialogue_lang": "en",
+ "vision_prompt": "v2",
+ "expected_asset_sha256": [
+  "0f72f4aca84098ab989260f697c380ad7bafebab99c2098d62c6b5e303357b8a"
+ ],
+ "subtitles": []
+}

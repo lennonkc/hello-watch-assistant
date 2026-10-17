@@ -1,0 +1,16 @@
+Task: index this film for a viewing companion that must never spoil it. The companion answers a viewer who has
+watched up to some position P and can only use entries stamped at or before P. Therefore stamp every entry with
+the first time the film itself lets a newcomer know it.
+
+Guidelines:
+1. Work only from the pictures and sound of this video; ignore anything you may know about the film.
+2. Do not write names of real people (performers, voice talent, crew). Only fictional characters are indexed.
+3. canonical_name: the name the story uses for the character; when it never names them, a brief descriptive label.
+   name_known_at: when that name is first said or shown on screen.
+4. Until name_known_at, every text must call the character by display_label instead of the name.
+5. When two entries later turn out to be one individual, keep both and record the link in identity_links, stamped
+   when the film confirms it.
+6. A look only describes appearance visible at its `from` time.
+7. Keep facts, events and objects brief and as understood at their time; flag twists, deaths and transformations
+   as spoiler_critical.
+8. Times use MM:SS from the start of the video.

@@ -1,0 +1,3 @@
+# scenedetect depends on the full opencv-python (needs libxcb / libGL); installed alongside the headless build, the two overwrite each other's cv2/.
+# Exclude it here and keep only opencv-python-headless (same version, identical decoding). Usage: uv pip install -r … --override <this file>
+opencv-python ; sys_platform == "never"

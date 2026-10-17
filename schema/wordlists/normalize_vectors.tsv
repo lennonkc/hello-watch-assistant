@@ -1,0 +1,90 @@
+# normalize_vectors.tsv — 归一化测试向量(C1 §7.2 / §7.4)
+# 格式:input<TAB>folded<TAB>case_kept
+#   folded    = normalize(input, case_sensitive=False)
+#   case_kept = normalize(input, case_sensitive=True)
+# 算法见 README.md;参考实现与自测:python3 -I schema/wordlists/normalize.py --selftest
+# 注意:部分 input 刻意含分解序列(e+U+0301)与兼容表意文字(U+F900),编辑本文件时勿让编辑器做 Unicode 规范化。
+# NFKC 全角拉丁
+ＳＣＡＬＥＳ	scales	SCALES
+# NFKC 全角数字
+ｓｃａｌｅｓ１２３	scales123	scales123
+# NFKC 全角空格 U+3000
+Ｓｉｎｔｅｌ　ａｎｄ　Ｓｃａｌｅｓ	sintel and scales	Sintel and Scales
+# NFKC 全角标点
+ＳＣＡＬＥＳ是小鱗嗎？	scales是小鳞吗?	SCALES是小鳞吗?
+# NFKC 全角撇号
+Scales＇s	scales's	Scales's
+# NFKC 连字
+ﬁnd the ﬂag	find the flag	find the flag
+# NFKC 罗马数字
+Chapter Ⅻ	chapter xii	Chapter XII
+# NFKC 上标
+x²	x2	x2
+# NFKC 带圈数字
+①	1	1
+# NFKC 商标符
+Blender™	blendertm	BlenderTM
+# NFKC 半角片假名
+ｼﾝﾃﾙ	シンテル	シンテル
+# NFKC 半角浊音片假名:浊点 U+3099 属 Mn,被去掉(日文副作用)
+ｶﾞｲﾄﾞ	カイト	カイト
+# NFKC 兼容表意文字 U+F900 再繁转简
+豈	岂	岂
+# NFKC 合字 ǅ
+ǅivan	dzivan	Dzivan
+# 去重音 é 预组合
+Café	cafe	Cafe
+# 去重音 e+U+0301 分解序列
+Café	cafe	Cafe
+# 去重音 Pokémon
+Pokémon	pokemon	Pokemon
+# 去重音 ë ñ
+Zoë Saldaña	zoe saldana	Zoe Saldana
+# 去重音 Å ö
+Ångström	angstrom	Angstrom
+# 去重音 ï ç
+naïve façade	naive facade	naive facade
+# 去重音 越南语叠加符
+Việt Nam	viet nam	Viet Nam
+# 去重音 希腊 tonos + 词尾 sigma
+ΣΊΣΥΦΟΣ	σισυφος	ΣΙΣΥΦΟΣ
+# Ł 非组合字符原样保留;Ż 去点
+Łukasz Żak	łukasz zak	Łukasz Zak
+# Ø 非组合字符原样保留
+Øystein	øystein	Øystein
+# ß 小写仍为 ß(lowercase 非 casefold)
+Straße	straße	Straße
+# Æ 原样保留
+Æsir	æsir	Æsir
+# İ 先去点再小写
+İstanbul	istanbul	Istanbul
+# ı 无点 i 原样
+ı	ı	ı
+# 繁→简 小鱗
+小鱗	小鳞	小鳞
+# 繁→简 音译
+史科爾斯	史科尔斯	史科尔斯
+# 繁→简 多对一 髮/發
+頭髮發白	头发发白	头发发白
+# 繁→简 後 裡 隻
+然後這裡有一隻龍	然后这里有一只龙	然后这里有一只龙
+# 繁→简 乾 取首候选
+乾杯	干杯	干杯
+# 繁→简 金丝雀线索
+傷疤 變老	伤疤 变老	伤疤 变老
+# 已是简体 幂等
+小鳞	小鳞	小鳞
+# 中英混排
+Sintel 與 Scales 的龍	sintel 与 scales 的龙	Sintel 与 Scales 的龙
+# 中英混排 全角+繁体
+ＤＲＡＧＯＮ龍	dragon龙	DRAGON龙
+# 所有格原样(匹配端处理)
+Scales's	scales's	Scales's
+# 所有格 U+2019 原样
+Sintel’s	sintel’s	Sintel’s
+# 大小写折叠
+SINTEL Sintel sintel	sintel sintel sintel	SINTEL Sintel sintel
+# emoji 原样
+🐉 Dragon	🐉 dragon	🐉 Dragon
+# 中文标点原样(非兼容字符)
+「小鳞」、龍	「小鳞」、龙	「小鳞」、龙

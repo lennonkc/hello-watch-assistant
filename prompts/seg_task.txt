@@ -1,0 +1,7 @@
+
+
+Scope: only {start}–{end} of the film; keep using whole-film times.
+Known characters (use their ref, such as "R2"):
+{roster}
+Within this range, add characters not listed above, plus appearances, events and objects.
+Answer with JSON in the given schema.

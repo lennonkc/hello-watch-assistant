@@ -1,0 +1,32 @@
+{
+ "catalog_id": "c4c02a81-ae5c-4a91-aef1-eea196f91c17",
+ "title": "Sintel",
+ "asset_kind": "short",
+ "license": "CC-BY-3.0",
+ "license_note": "Sintel (c) Blender Foundation | durian.blender.org",
+ "derivatives_ok": 1,
+ "vision_prompt": "v1",
+ "dialogue_lang": "en",
+ "expected_asset_sha256": ["27409568e533800e43cc832c7a72a472cf9e566a7a8093be8fe2f98569e0c642"],
+ "subtitles": [
+  {"track": "en.official", "lang": "en", "file": "sintel_en.srt", "encoding": "utf-8",
+   "source_url": "https://durian.blender.org/wp-content/content/subtitles/sintel_en.srt",
+   "sha256": "4ed7e1f1bc5ff69fe33606960e4c048ba6766237bf33b132fef76e1a92cb64b2"},
+  {"track": "zh-Hans.official", "lang": "zh-Hans", "file": "sintel_chs.srt", "encoding": "gb18030",
+   "source_url": "https://download.blender.org/durian/subs/sintel_chs.srt",
+   "sha256": "459c14dfd101dee30cb8271e2b68667c657c5dc976bba73a4259d9794efa45dd"},
+  {"track": "zh-Hant.official", "lang": "zh-Hant", "file": "sintel_zh.srt", "encoding": "utf-8",
+   "source_url": "https://download.blender.org/durian/subs/sintel_zh.srt",
+   "sha256": "9f8365c9d780bd5d69c217e680ee1be60cc10b621e1f304f0716a3c215966da5"},
+  {"track": "th.official", "lang": "th", "file": "sintel_th.srt", "encoding": "cp874",
+   "source_url": "https://download.blender.org/durian/subs/sintel_th.srt",
+   "sha256": "6e623af6fbe42d6d6ec89a6a65b3a8c3c98dc9ae0f78ff17afb6f98cbdbeadd4"}
+ ],
+ "name_sources": [
+  {"lang": "zh-Hans", "file": "sintel_cn.srt", "encoding": "utf-16",
+   "source_url": "https://download.blender.org/durian/subs/sintel_cn.srt",
+   "sha256": "6eebcbf9a42cf4f8db0daee8dee1d2eaced18a2f74d1c33772b5ec8ac577a2d0",
+   "note": "second Simplified Chinese translation; only one official track per language is allowed, so this file is used only to extract name-variant canaries"}
+ ],
+ "subtitle_license": "CC-BY-3.0 (assumed same as film; per-translation credit unverified)"
+}

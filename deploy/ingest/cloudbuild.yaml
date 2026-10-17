@@ -1,0 +1,21 @@
+# Ingest image build (Cloud Build, default machine type; FFmpeg comes from the base image, a few minutes). Submitted by build.sh as a git-archive source tarball.
+substitutions:
+  _REGION: us-west1
+  _REPO: cedar-watch
+  _TAG: dev
+  _GIT_COMMIT: unknown
+  _FFMPEG_TAG: ffmpeg9.0.2-x264r3222
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "deploy/ingest/Dockerfile",
+           "--build-arg", "FFMPEG_IMAGE=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ffmpeg:${_FFMPEG_TAG}",
+           "--build-arg", "GIT_COMMIT=${_GIT_COMMIT}",
+           "-t", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ingest:${_TAG}",
+           "-t", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ingest:latest",
+           "."]
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ingest:${_TAG}"
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ingest:latest"
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 3600s

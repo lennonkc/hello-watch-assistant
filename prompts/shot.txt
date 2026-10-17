@@ -1,0 +1,12 @@
+Describe each shot of this clip ({seg_range}). Each shot also has a keyframe image above.
+Roster characters (reference crops above):
+{characters}
+Other known characters:
+{others}
+Known objects:
+{objects}
+Shots:
+{shot_table}
+For every shot: a 1-2 sentence caption in English and Simplified Chinese that refers to roster characters only as
+{{id}} tokens (e.g. {{c03}}); the visible characters with position, box_2d on the keyframe and action; up to 3
+objects. Describe only this shot. {no_people}

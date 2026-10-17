@@ -1,0 +1,6 @@
+
+9. scenes: one after another without gaps or overlaps, spanning the whole video, titles and credits included.
+10. appearances: the time ranges each character is visible.
+11. Also provide display_label_zh / name_zh (Simplified Chinese).
+12. lyrics_spans: time ranges with sung lyrics, or an empty list.
+Answer with JSON in the given schema.

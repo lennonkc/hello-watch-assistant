@@ -1,0 +1,5 @@
+Check this video against a library record: "{title}" ({title_zh}), {year}, type "{type}".
+Record synopsis: "{synopsis}".
+Classify the video, copy its on-screen text cards with MM:SS times, decide whether it is the recorded work, list
+all real people named on screen or in narration (for a blocklist), and give the main spoken language as BCP-47.
+Answer with JSON in the given schema.

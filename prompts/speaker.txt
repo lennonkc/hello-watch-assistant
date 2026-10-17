@@ -1,0 +1,7 @@
+Decide who speaks each dialogue line. The video windows above include audio.
+Roster (reference crops above):
+{characters}
+Lines (with automatic speaker-cluster labels):
+{lines}
+For each line give the speaker id, "offscreen" or "unknown", a confidence and the evidence used.
+{no_people}

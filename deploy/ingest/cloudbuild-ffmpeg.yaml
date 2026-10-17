@@ -1,0 +1,14 @@
+# FFmpeg base image build (Cloud Build, default machine type; about 40 min). Invoked by build.sh when the tag is missing from the registry.
+substitutions:
+  _REGION: us-west1
+  _REPO: cedar-watch
+  _FFMPEG_TAG: ffmpeg9.0.2-x264r3222
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "deploy/ingest/Dockerfile.ffmpeg",
+           "-t", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ffmpeg:${_FFMPEG_TAG}", "."]
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/ffmpeg:${_FFMPEG_TAG}"
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 5400s

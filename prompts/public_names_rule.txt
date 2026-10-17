@@ -1,0 +1,3 @@
+
+The viewer has read this catalog synopsis before watching: "{synopsis}". A character named in it may be called by
+that name from their first appearance, if the video makes clear which character it is.

@@ -1,0 +1,42 @@
+# Cloud Run Job: ingest (`gcloud run jobs replace`; placeholders filled in by deploy_jobs.sh). No HTTP exposed.
+# Override per execution with --args / --tasks: `cloud run --sha <a> --sha <b>`, task count = number of assets in parallel.
+apiVersion: run.googleapis.com/v1
+kind: Job
+metadata:
+  name: cedar-watch-ingest
+  labels:
+    app: cedar-watch
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/execution-environment: gen2
+    spec:
+      parallelism: ${PARALLELISM}
+      taskCount: 1
+      template:
+        spec:
+          serviceAccountName: cedar-watch-ingest@${PROJECT}.iam.gserviceaccount.com
+          timeoutSeconds: 3600
+          maxRetries: 1
+          containers:
+            - image: ${IMAGE}
+              args: ["cloud", "run"]
+              env:
+                - name: CEDAR_INGEST_BUCKET
+                  value: ${BUCKET}
+                - name: CEDAR_GEMINI_BACKEND        # developer | enterprise (Agent Platform, ADC = this service account)
+                  value: ${GEMINI_BACKEND}
+                - name: CEDAR_GCP_PROJECT
+                  value: ${PROJECT}
+                - name: CEDAR_PROMPTS_SECRET        # prompts are not baked into the image; read from Secret Manager at runtime (deploy/prompts/push_prompts.sh)
+                  value: projects/${PROJECT}/secrets/cedar-watch-prompts/versions/latest
+                - name: CEDAR_GEMINI_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: cedar-watch-gemini-api-key
+                      key: latest
+              resources:
+                limits:
+                  cpu: "2"
+                  memory: 8Gi

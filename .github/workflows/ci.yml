@@ -1,0 +1,23 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # Unit tests run offline with placeholder prompts: no API keys, no Google Cloud access.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - name: Install deps
+        run: pip install -r requirements-ingest.txt
+      - name: Reference prompts are complete and well-formed
+        run: python -c "from ingest import promptbook as pb; pb.validate(pb.read_dir(pb.DEFAULT_DIR)); print('prompts OK')"
+      - name: Shared wordlists self-test
+        run: python -I schema/wordlists/normalize.py --selftest
+      - name: Unit tests
+        run: python -m pytest -q -p no:cacheprovider ingest/tests ingest/cloud/tests

@@ -1,0 +1,115 @@
+{
+  "schema": "Cedar MediaItem v1",
+  "schema_version": "1.1",
+  "generated_at": "2026-10-09T10:11:52+08:00",
+  "count": 3,
+  "notes": "Demo catalog: the three open-licensed (CC BY) Blender Foundation films used by the demo.",
+  "items": [
+    {
+      "id": "79400f81-eef7-4ebf-ad77-7aea38346b20",
+      "type": "movie",
+      "title": "Elephants Dream",
+      "title_zh": "大象之梦",
+      "synopsis_full": "Emo and Proog, two people with different visions of the surreal world they live in, travel through a seemingly infinite machine exploring their thoughts.",
+      "synopsis_short_zh": "Emo 与 Proog 游走在由思想构建的无穷机器世界,两人眼中的它截然不同。",
+      "duration_s": 654,
+      "year": 2006,
+      "genres": [
+        "animation",
+        "scifi",
+        "fantasy"
+      ],
+      "mood_tags": [
+        {
+          "tag": "surreal",
+          "weight": 9
+        },
+        {
+          "tag": "thought-provoking",
+          "weight": 7
+        },
+        {
+          "tag": "experimental",
+          "weight": 5
+        }
+      ],
+      "min_age": 7,
+      "age_rating": "TV-PG",
+      "rating": 5.6,
+      "rating_count": null,
+      "rating_source": "imdb",
+      "rating_imdb": 5.6
+    },
+    {
+      "id": "c4c02a81-ae5c-4a91-aef1-eea196f91c17",
+      "type": "movie",
+      "title": "Sintel",
+      "title_zh": "辛特尔",
+      "synopsis_full": "A lonely young woman, Sintel, helps and befriends an injured baby dragon she calls Scales; when he is taken away by an adult dragon, she sets off on a dangerous quest to find him.",
+      "synopsis_short_zh": "少女辛特尔救助的幼龙被巨龙夺走,她踏上跨越荒原的寻龙之旅。",
+      "duration_s": 888,
+      "year": 2010,
+      "genres": [
+        "animation",
+        "fantasy",
+        "adventure"
+      ],
+      "mood_tags": [
+        {
+          "tag": "touching",
+          "weight": 9
+        },
+        {
+          "tag": "adventurous",
+          "weight": 7
+        },
+        {
+          "tag": "melancholic",
+          "weight": 5
+        }
+      ],
+      "min_age": 7,
+      "age_rating": "TV-PG",
+      "rating": 7.5,
+      "rating_count": null,
+      "rating_source": "tmdb",
+      "rating_imdb": 7.4,
+      "rating_douban": 7.4
+    },
+    {
+      "id": "9e9cbbc5-02d4-46b1-a1b3-f1a47e7e50fe",
+      "type": "movie",
+      "title": "Tears of Steel",
+      "title_zh": "钢铁之泪",
+      "synopsis_full": "Forty years after a robot apocalypse, warriors and scientists gather at Amsterdam's Oude Kerk to save the world by re-enacting a pivotal moment from the past.",
+      "synopsis_short_zh": "机器人浩劫四十年后,一群战士与科学家在阿姆斯特丹老教堂重演过去、拯救世界。",
+      "duration_s": 734,
+      "year": 2012,
+      "genres": [
+        "scifi",
+        "action"
+      ],
+      "mood_tags": [
+        {
+          "tag": "intense",
+          "weight": 9
+        },
+        {
+          "tag": "futuristic",
+          "weight": 7
+        },
+        {
+          "tag": "apocalyptic",
+          "weight": 5
+        }
+      ],
+      "min_age": 13,
+      "age_rating": "TV-14",
+      "rating": 5.5,
+      "rating_count": null,
+      "rating_source": "imdb",
+      "rating_imdb": 5.5,
+      "rating_douban": 6.8
+    }
+  ]
+}

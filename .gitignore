@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.DS_Store
+.env
+*.key
+
+# Generated artifacts (knowledge packs, thumbnails, work dirs) stay out of git: .cache/ locally, GCS in the cloud
+.cache/
+
+.venv/
+.pytest_cache/
+.vscode/

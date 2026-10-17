@@ -1,0 +1,4 @@
+The viewer stopped the film at {at}. Summarise what has happened so far in roughly {words} words, using only the
+facts below, in their order, with no hints about later events, and naming characters only as listed.
+Put the same summary in Simplified Chinese in recap_zh.
+
