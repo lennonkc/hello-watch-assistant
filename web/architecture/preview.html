@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>How It Works</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="../shared/tokens.css">
+  <style>
+    /* Standalone preview of tab 2; the real app shell is web/index.html. */
+    body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--font-sans); }
+    main { max-width: 1240px; margin: 0 auto; padding: 24px 16px 48px; }
+    .theme { position: fixed; top: 10px; right: 12px; z-index: 40; font: inherit; font-size: 13px; padding: 6px 12px;
+      border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
+  </style>
+</head>
+<body>
+  <button class="theme" type="button" id="theme">Theme: system</button>
+  <main><section id="panel-architecture" aria-label="How it works"></section></main>
+  <script type="module">
+    import { mount } from './architecture.js';
+    mount(document.getElementById('panel-architecture'));
+    const btn = document.getElementById('theme');
+    const modes = [undefined, 'light', 'dark'];
+    let i = 0;
+    btn.addEventListener('click', () => {
+      i = (i + 1) % modes.length;
+      if (modes[i]) document.documentElement.dataset.theme = modes[i];
+      else delete document.documentElement.dataset.theme;
+      btn.textContent = `Theme: ${modes[i] || 'system'}`;
+    });
+  </script>
+</body>
+</html>

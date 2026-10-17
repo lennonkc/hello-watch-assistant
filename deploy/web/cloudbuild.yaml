@@ -1,0 +1,14 @@
+# Web service image build (Cloud Build). Submitted by deploy.sh as a git-archive source tarball.
+substitutions:
+  _REGION: us-west1
+  _REPO: cedar-watch
+  _TAG: dev
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "deploy/web/Dockerfile",
+           "-t", "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/web:${_TAG}", "."]
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_REPO}/web:${_TAG}"
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 1200s

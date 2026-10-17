@@ -1,0 +1,83 @@
+/* Design tokens shared by every tab (see docs/web-api.md, "Design tokens").
+   Light is the default; dark follows the OS unless the page sets data-theme. */
+
+:root {
+  color-scheme: light;
+
+  --bg: #f5f4f0;
+  --surface: #ffffff;
+  --surface-2: #eeece6;
+  --border: #dcd9d0;
+  --text: #17171c;
+  --text-muted: #5d5b66;
+  --accent: #4c46d6;
+  --accent-contrast: #ffffff;
+  --ok: #1e7f45;
+  --locked: #8a5a00;
+  --warn: #b3261e;
+
+  --radius: 16px;
+  --radius-sm: 10px;
+  --shadow: 0 1px 2px rgb(20 18 30 / 0.06), 0 8px 24px -8px rgb(20 18 30 / 0.14);
+
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    Arial, "PingFang SC", "Noto Sans SC", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Google Cloud service families (architecture diagram). */
+  --gc-gemini: #6f4ff2;
+  --gc-run: #1a73e8;
+  --gc-storage: #188038;
+  --gc-secret: #c26401;
+  --gc-build: #c5221f;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --bg: #0e0e13;
+    --surface: #17171f;
+    --surface-2: #20202a;
+    --border: #2e2e3a;
+    --text: #ecebf2;
+    --text-muted: #a3a1b0;
+    --accent: #9d97ff;
+    --accent-contrast: #12111c;
+    --ok: #5fd28f;
+    --locked: #f0b44c;
+    --warn: #ff8a80;
+
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 12px 32px -12px rgb(0 0 0 / 0.6);
+
+    --gc-gemini: #a58dff;
+    --gc-run: #6aa6ff;
+    --gc-storage: #4fc77a;
+    --gc-secret: #f4a640;
+    --gc-build: #ff7a6e;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: #0e0e13;
+  --surface: #17171f;
+  --surface-2: #20202a;
+  --border: #2e2e3a;
+  --text: #ecebf2;
+  --text-muted: #a3a1b0;
+  --accent: #9d97ff;
+  --accent-contrast: #12111c;
+  --ok: #5fd28f;
+  --locked: #f0b44c;
+  --warn: #ff8a80;
+
+  --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 12px 32px -12px rgb(0 0 0 / 0.6);
+
+  --gc-gemini: #a58dff;
+  --gc-run: #6aa6ff;
+  --gc-storage: #4fc77a;
+  --gc-secret: #f4a640;
+  --gc-build: #ff7a6e;
+}

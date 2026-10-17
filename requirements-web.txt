@@ -1,0 +1,8 @@
+# Online Q&A service (server/) and its tests; the web front end (web/) is static and needs nothing
+google-genai==2.30.1
+google-adk==2.12.0
+fastapi==0.141.1
+uvicorn==0.54.0
+numpy>=2.0
+google-cloud-storage==3.4.1
+pytest>=8.0

@@ -9,6 +9,9 @@ before the film does, never hints at a twist, and never says an actor's name.
 > Built for the Google Cloud AI Builder Cup 2026 (Media, Content & Digital Experiences track).
 > Development started on 2026-10-09, within the hackathon window.
 
+**Live demo: DEMO_URL** — pick a film, pause anywhere, ask. The second tab ("How it works") is an interactive map of
+the whole pipeline and the Google Cloud services behind it.
+
 ---
 
 ## Why this is hard
@@ -21,7 +24,7 @@ to the model. It has to be **structural**: the model must never *see* what the v
 
 ```mermaid
 flowchart LR
-  subgraph Offline["Offline ingest (Cloud Run Jobs)"]
+  subgraph Offline["Offline ingest (local or Cloud Run Jobs)"]
     V[Film in Cloud Storage] --> S[Shots, segments, thumbnails]
     V --> T[Transcription<br/>gemini-3.5-transcribe]
     S --> U[Video understanding<br/>Gemini 3.8 Flash on Agent Platform]
@@ -75,7 +78,8 @@ The full contract is in [docs/knowledge-pack.md](docs/knowledge-pack.md). How th
 | Image build | **Cloud Build** + **Artifact Registry** (pinned FFmpeg / Python for byte-reproducible packs) | `deploy/ingest/` |
 | Secrets: API key and **all prompts** | **Secret Manager** (prompts are never baked into the image) | `ingest/promptbook.py`, `deploy/prompts/` |
 | Upload renewal | **Cloud Scheduler** → Cloud Run Job | `deploy/ingest/renew-job.yaml` |
-| Online assistant (in progress) | **Agent Development Kit (ADK)** agent on **Cloud Run** | web demo |
+| Online assistant: tool-using agent with gate-aware tools, streamed to the browser | **Agent Development Kit (ADK)** `LlmAgent` on **Gemini 3.8 Flash** (Agent Platform), served by **Cloud Run** | `server/`, `web/`, `deploy/web/` |
+| Playback | **Cloud Storage** V4 signed URLs, signed by the service's own identity (IAM `signBlob`, no key files) | `server/main.py` |
 
 ## Prompts: open code, private know-how
 
@@ -118,6 +122,9 @@ Total Gemini cost for the three films, including all re-runs: about $8.
 | `ingest/cloud/`, `deploy/ingest/` | Cloud Run Jobs runner, GCS layout, image build and job specs. See [docs/cloud-deploy.md](docs/cloud-deploy.md) |
 | `ingest/promptbook.py`, `prompts/`, `deploy/prompts/` | Runtime prompt loading (Secret Manager), reference prompts |
 | `schema/` | Knowledge-pack SQLite DDL and the shared normalisation wordlists |
+| `server/` | Online Q&A service: FastAPI + ADK agent, gate-first views at P (`knowledge.py`), output guards (`guard.py`). Contract: [docs/web-api.md](docs/web-api.md) |
+| `web/` | Static front end: "Live demo" player tab and the interactive "How it works" tab |
+| `deploy/web/` | Web service image and Cloud Run deployment (service account, prompt secret, limits) |
 | `catalog/` | Demo catalog (the three open films) |
 | `docs/` | [Knowledge-pack spec](docs/knowledge-pack.md), [online Q&A guide](docs/online-qa.md), [cloud deployment](docs/cloud-deploy.md) |
 
@@ -136,6 +143,18 @@ python -m venv .venv && .venv/bin/pip install -r requirements-ingest.txt
 
 To use Agent Platform instead of the Developer API, set `CEDAR_GEMINI_BACKEND=enterprise` and
 `CEDAR_GCP_PROJECT=<project>`. Cloud deployment is described in [docs/cloud-deploy.md](docs/cloud-deploy.md).
+
+### Web demo (local)
+
+```bash
+.venv/bin/pip install -r requirements-web.txt
+export CEDAR_GCP_PROJECT=<project> CEDAR_GEMINI_BACKEND=enterprise
+export WATCH_PACKS_DIR=<dir with <asset_sha>/master/pack.db>   # or WATCH_PACKS_GCS=gs://<bucket>/<prefix>
+export WATCH_VIDEO_DIR=<dir with <asset_sha>.mp4>               # or CEDAR_INGEST_BUCKET=<bucket> for signed URLs
+.venv/bin/uvicorn server.main:app --port 8080                   # then open http://localhost:8080
+```
+
+Deploy to Cloud Run: `PROJECT=<project> BUCKET=<bucket> PROMPTS_DIR=<agent prompts> deploy/web/deploy.sh`.
 
 ## Research this builds on
 

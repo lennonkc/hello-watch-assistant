@@ -1,0 +1,4 @@
+The viewer paused a film at {position} and asks: {question}
+The last image is the current frame; earlier stills (or a video) show the moments just before it.
+Characters already introduced (use only these labels): {characters}
+Describe only what is visible. Do not guess names or what happens later. Answer in {lang}, in at most 3 sentences.

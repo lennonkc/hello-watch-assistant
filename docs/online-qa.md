@@ -75,8 +75,19 @@ The context for one answer has three layers. When the budget is tight, **keep th
 Fallback (look-back): only when text evidence is judged insufficient, escalate to re-answering with the near-window video;
 the window only ever covers time before P, never after. Agentic video mode cannot clip, so it is not used online.
 
-Output must still pass C1 §7: blocklist (real names), future canaries, name visibility. (A reference implementation of
-these output checks lives in the internal evaluation suite and is not part of this repository.)
+Output must still pass C1 §7: blocklist (real names), future canaries, name visibility. The web demo implements these
+checks in `server/guard.py`.
+
+## 4a. The web demo service (`server/`)
+
+The demo in this repository follows this guide: an ADK `LlmAgent` on Gemini 3.8 Flash (Agent Platform) with five tools
+(`story_so_far`, `search_moments`, `recent_dialogue`, `on_screen`, `look_closer`), all built on `server/knowledge.py`
+(gate-first views at P). The server writes P, title, language and tap into session state with `state_delta`; tools read
+it from `ToolContext.state`, so the model has no parameter that could move P. `look_closer` sends the current frame plus
+stills from the 30 s before P (every 3 s, all `≤ floor(P)`); the `gs://` clip mode is optional (`WATCH_LOOK_VIDEO=1`)
+because clipping a whole-film URI adds tens of seconds. If an answer trips a guard, the draft is discarded and the
+question is re-asked once in a fresh session with a note; a second hit returns a fixed safe reply. Seeking backwards
+also starts a fresh session. HTTP contract: [web-api.md](web-api.md).
 
 ## 5. Gemini backends
 

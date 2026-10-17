@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Hello Watch Assistant</title>
+  <meta name="description" content="A spoiler-free viewing companion: pause a film and ask about what you have already seen.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234c46d6'/%3E%3Cpath d='M12 9.5v13l10-6.5z' fill='white'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="./shared/tokens.css">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    html { -webkit-text-size-adjust: 100%; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      font-size: 16px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .visually-hidden {
+      position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+    }
+    .skip-link {
+      position: absolute; left: 12px; top: -48px; z-index: 100;
+      padding: 8px 14px; border-radius: var(--radius-sm);
+      background: var(--accent); color: var(--accent-contrast); text-decoration: none;
+    }
+    .skip-link:focus { top: 12px; }
+
+    .app-header {
+      position: sticky; top: 0; z-index: 20;
+      background: color-mix(in srgb, var(--bg) 82%, transparent);
+      backdrop-filter: saturate(1.4) blur(14px);
+      -webkit-backdrop-filter: saturate(1.4) blur(14px);
+      border-bottom: 1px solid var(--border);
+    }
+    .app-header__inner {
+      max-width: 1240px; margin: 0 auto; padding: 10px 16px;
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; color: inherit; margin-right: auto; }
+    .brand__mark {
+      width: 32px; height: 32px; border-radius: 9px; flex: none;
+      display: grid; place-items: center;
+      background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 55%, var(--gc-gemini)));
+      color: var(--accent-contrast);
+      box-shadow: 0 4px 14px -4px color-mix(in srgb, var(--accent) 60%, transparent);
+    }
+    .brand__text { display: flex; flex-direction: column; line-height: 1.15; }
+    .brand__name { font-weight: 700; letter-spacing: -0.01em; }
+    .brand__tag { font-size: 12.5px; color: var(--text-muted); }
+
+    .tabs {
+      display: flex; gap: 4px; padding: 4px;
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px;
+    }
+    .tab {
+      appearance: none; border: 0; background: transparent; cursor: pointer;
+      padding: 7px 16px; border-radius: 999px; font-size: 14.5px; font-weight: 600;
+      color: var(--text-muted); display: inline-flex; align-items: center; gap: 7px;
+      transition: background-color .2s, color .2s, box-shadow .2s;
+      white-space: nowrap;
+    }
+    .tab:hover { color: var(--text); }
+    .tab[aria-selected="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+    .tab svg { width: 16px; height: 16px; flex: none; }
+
+    .theme-toggle {
+      appearance: none; cursor: pointer; width: 38px; height: 38px; flex: none;
+      display: grid; place-items: center; border-radius: 999px;
+      background: var(--surface-2); border: 1px solid var(--border); color: var(--text-muted);
+    }
+    .theme-toggle:hover { color: var(--text); }
+    .theme-toggle svg { width: 18px; height: 18px; }
+
+    main { flex: 1; width: 100%; }
+    .tab-panel { max-width: 1240px; margin: 0 auto; padding: 24px 16px 48px; }
+    .tab-panel:focus { outline: none; }
+    .panel-fallback {
+      margin: 48px auto; max-width: 520px; text-align: center; color: var(--text-muted);
+      padding: 32px 24px; border: 1px dashed var(--border); border-radius: var(--radius); background: var(--surface);
+    }
+    .panel-fallback strong { display: block; color: var(--text); font-size: 18px; margin-bottom: 6px; }
+    .panel-fallback button {
+      margin-top: 16px; padding: 8px 16px; border-radius: 999px; border: 1px solid var(--border);
+      background: var(--surface-2); cursor: pointer; font-weight: 600;
+    }
+    .panel-loading { display: grid; place-items: center; min-height: 40vh; color: var(--text-muted); font-size: 14px; }
+
+    .app-footer { border-top: 1px solid var(--border); color: var(--text-muted); font-size: 13px; }
+    .app-footer__inner {
+      max-width: 1240px; margin: 0 auto; padding: 20px 16px 28px;
+      display: grid; gap: 10px; grid-template-columns: 1fr;
+    }
+    .app-footer ul { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 18px; }
+    .app-footer a { color: inherit; text-underline-offset: 2px; }
+    .app-footer a:hover { color: var(--text); }
+    .app-footer__note { margin: 0; }
+
+    @media (max-width: 640px) {
+      .app-header__inner { gap: 10px; }
+      .brand__tag { display: none; }
+      .tabs { order: 3; width: 100%; }
+      .tab { flex: 1; justify-content: center; padding: 8px 10px; }
+      .tab-panel { padding-top: 16px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition-duration: 0s !important; animation-duration: 0s !important; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#panel-experience">Skip to content</a>
+
+  <header class="app-header">
+    <div class="app-header__inner">
+      <a class="brand" href="#experience" aria-label="Hello Watch Assistant, home">
+        <span class="brand__mark" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/><path d="M3.5 12a8.5 8.5 0 0 1 8.5-8.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity=".55"/></svg>
+        </span>
+        <span class="brand__text">
+          <span class="brand__name">Hello Watch Assistant</span>
+          <span class="brand__tag">Ask about the film. Never get spoiled.</span>
+        </span>
+      </a>
+
+      <div class="tabs" role="tablist" aria-label="Sections">
+        <button class="tab" role="tab" id="tab-experience" data-tab="experience" aria-controls="panel-experience" aria-selected="true">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3" stroke="currentColor" stroke-width="2"/><path d="M10.5 9.5v5l4-2.5z" fill="currentColor"/></svg>
+          Live demo
+        </button>
+        <button class="tab" role="tab" id="tab-architecture" data-tab="architecture" aria-controls="panel-architecture" aria-selected="false" tabindex="-1">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="6" cy="6" r="2.5" stroke="currentColor" stroke-width="2"/><circle cx="18" cy="12" r="2.5" stroke="currentColor" stroke-width="2"/><circle cx="6" cy="18" r="2.5" stroke="currentColor" stroke-width="2"/><path d="M8.5 6.5 15.5 11M8.5 17.5l7-4.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+          How it works
+        </button>
+      </div>
+
+      <button class="theme-toggle" type="button" id="theme-toggle" aria-label="Theme: follow system">
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" data-icon="auto"><circle cx="12" cy="12" r="8" stroke="currentColor" stroke-width="2"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" data-icon="light" hidden><circle cx="12" cy="12" r="4" stroke="currentColor" stroke-width="2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" data-icon="dark" hidden><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <section class="tab-panel" role="tabpanel" id="panel-experience" aria-labelledby="tab-experience" tabindex="-1"></section>
+    <section class="tab-panel" role="tabpanel" id="panel-architecture" aria-labelledby="tab-architecture" tabindex="-1" hidden></section>
+  </main>
+
+  <footer class="app-footer">
+    <div class="app-footer__inner">
+      <ul aria-label="Film credits">
+        <li><a href="https://durian.blender.org" rel="noopener" target="_blank">Sintel</a> © Blender Foundation, CC BY 3.0</li>
+        <li><a href="https://mango.blender.org" rel="noopener" target="_blank">Tears of Steel</a> © Blender Foundation, CC BY 3.0</li>
+        <li><a href="https://orange.blender.org" rel="noopener" target="_blank">Elephants Dream</a> © 2006 Blender Foundation / Netherlands Media Art Institute, CC BY 2.5</li>
+      </ul>
+      <p class="app-footer__note">Built with Gemini and Google Cloud for the AI Builder Cup 2026. Answers use only what the film has shown up to your paused moment.</p>
+    </div>
+  </footer>
+
+  <script type="module">
+    const TABS = {
+      experience: () => import('./experience/experience.js'),
+      architecture: () => import('./architecture/architecture.js'),
+    };
+    const DEFAULT_TAB = 'experience';
+    const mounted = new Set();
+    const tabs = [...document.querySelectorAll('[role="tab"]')];
+
+    function panelFor(name) { return document.getElementById(`panel-${name}`); }
+
+    function fallback(panel, name, err) {
+      console.warn(`Could not load the "${name}" tab`, err);
+      panel.innerHTML = '';
+      const box = document.createElement('div');
+      box.className = 'panel-fallback';
+      box.innerHTML = '<strong>This section is not available yet</strong>' +
+        '<span>It is still being built. Please check back soon.</span><br><button type="button">Try again</button>';
+      box.querySelector('button').addEventListener('click', () => { mounted.delete(name); mount(name); });
+      panel.append(box);
+    }
+
+    async function mount(name) {
+      if (mounted.has(name)) return;
+      mounted.add(name);
+      const panel = panelFor(name);
+      panel.innerHTML = '<div class="panel-loading" role="status">Loading…</div>';
+      try {
+        const mod = await TABS[name]();
+        panel.innerHTML = '';
+        if (typeof mod.mount !== 'function') throw new Error('module has no mount(el)');
+        await mod.mount(panel);
+      } catch (err) {
+        fallback(panel, name, err);
+      }
+    }
+
+    function select(name, { focus = false } = {}) {
+      if (!TABS[name]) name = DEFAULT_TAB;
+      for (const tab of tabs) {
+        const on = tab.dataset.tab === name;
+        tab.setAttribute('aria-selected', String(on));
+        tab.tabIndex = on ? 0 : -1;
+        panelFor(tab.dataset.tab).hidden = !on;
+        if (on && focus) tab.focus();
+      }
+      document.querySelector('.skip-link').setAttribute('href', `#panel-${name}`);
+      document.dispatchEvent(new CustomEvent('hwa:tabchange', { detail: { tab: name } }));
+      mount(name);
+    }
+
+    function fromHash() { return location.hash.replace(/^#/, '') || DEFAULT_TAB; }
+
+    for (const tab of tabs) {
+      tab.addEventListener('click', () => {
+        const name = tab.dataset.tab;
+        if (fromHash() !== name) history.pushState(null, '', `#${name}`);
+        select(name);
+      });
+      tab.addEventListener('keydown', (e) => {
+        const i = tabs.indexOf(tab);
+        let next = null;
+        if (e.key === 'ArrowRight') next = tabs[(i + 1) % tabs.length];
+        else if (e.key === 'ArrowLeft') next = tabs[(i - 1 + tabs.length) % tabs.length];
+        else if (e.key === 'Home') next = tabs[0];
+        else if (e.key === 'End') next = tabs[tabs.length - 1];
+        if (!next) return;
+        e.preventDefault();
+        history.pushState(null, '', `#${next.dataset.tab}`);
+        select(next.dataset.tab, { focus: true });
+      });
+    }
+    window.addEventListener('hashchange', () => { if (TABS[fromHash()]) select(fromHash()); });
+    window.addEventListener('popstate', () => select(fromHash()));
+    document.querySelector('.skip-link').addEventListener('click', (e) => {
+      const target = document.querySelector(e.currentTarget.getAttribute('href'));
+      if (target) { e.preventDefault(); target.focus(); }
+    });
+
+    // Theme: follow system -> light -> dark -> follow system.
+    const THEME_KEY = 'hwa-theme';
+    const toggle = document.getElementById('theme-toggle');
+    const LABELS = { auto: 'Theme: follow system', light: 'Theme: light', dark: 'Theme: dark' };
+    function applyTheme(mode) {
+      if (mode === 'light' || mode === 'dark') document.documentElement.dataset.theme = mode;
+      else { delete document.documentElement.dataset.theme; mode = 'auto'; }
+      for (const icon of toggle.querySelectorAll('[data-icon]')) icon.toggleAttribute('hidden', icon.dataset.icon !== mode);
+      toggle.setAttribute('aria-label', LABELS[mode]);
+      toggle.title = LABELS[mode];
+      return mode;
+    }
+    let theme = 'auto';
+    try { theme = localStorage.getItem(THEME_KEY) || 'auto'; } catch { /* storage unavailable */ }
+    theme = applyTheme(theme);
+    toggle.addEventListener('click', () => {
+      theme = applyTheme({ auto: 'light', light: 'dark', dark: 'auto' }[theme]);
+      try { localStorage.setItem(THEME_KEY, theme); } catch { /* storage unavailable */ }
+    });
+
+    select(fromHash());
+  </script>
+</body>
+</html>

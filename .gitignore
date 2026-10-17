@@ -13,3 +13,6 @@ __pycache__/
 
 # Local-only notes for coding agents (never committed)
 CLAUDE.local.md
+
+# Browser automation scratch output
+.playwright-mcp/

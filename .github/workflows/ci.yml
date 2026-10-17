@@ -14,10 +14,10 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.13" }
       - name: Install deps
-        run: pip install -r requirements-ingest.txt google-cloud-storage==3.4.1   # cloud runner tests
+        run: pip install -r requirements-ingest.txt -r requirements-web.txt   # + cloud runner and web service tests
       - name: Reference prompts are complete and well-formed
         run: python -c "from ingest import promptbook as pb; pb.validate(pb.read_dir(pb.DEFAULT_DIR)); print('prompts OK')"
       - name: Shared wordlists self-test
         run: python -I schema/wordlists/normalize.py --selftest
       - name: Unit tests
-        run: python -m pytest -q -p no:cacheprovider ingest/tests ingest/cloud/tests
+        run: python -m pytest -q -p no:cacheprovider ingest/tests ingest/cloud/tests server/tests
