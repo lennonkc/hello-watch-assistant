@@ -1,0 +1,717 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hello Watch Assistant · Vision Deck</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+/* Vision deck for the AI Builder Cup 2026. One 1920×1080 slide per page; export to PDF with
+   docs/deck/export_pdf.py (Playwright page.pdf, print backgrounds, no margins).
+   Colours follow web/shared/tokens.css (light theme). */
+
+:root {
+  --bg: #f5f4f0;
+  --surface: #ffffff;
+  --surface-2: #eeece6;
+  --border: #dcd9d0;
+  --text: #17171c;
+  --text-muted: #5d5b66;
+  --accent: #4c46d6;
+  --accent-contrast: #ffffff;
+  --ok: #1e7f45;
+  --locked: #8a5a00;
+  --warn: #b3261e;
+  --gc-gemini: #6f4ff2;
+  --gc-run: #1a73e8;
+  --gc-storage: #188038;
+  --gc-secret: #c26401;
+  --gc-build: #c5221f;
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --radius: 22px;
+  --radius-sm: 14px;
+}
+
+@page { size: 1920px 1080px; margin: 0; }
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; background: #d9d7d0; }
+body {
+  font-family: var(--font-sans); color: var(--text);
+  -webkit-print-color-adjust: exact; print-color-adjust: exact;
+}
+h1, h2, h3, h4, p, ul, ol { margin: 0; padding: 0; }
+ul, ol { list-style: none; }
+
+.slide {
+  position: relative; width: 1920px; height: 1080px; overflow: hidden;
+  background: var(--bg); padding: 88px 112px 96px;
+  display: flex; flex-direction: column; gap: 44px;
+  break-after: page; page-break-after: always;
+  margin: 0 auto 24px;
+}
+.slide:last-child { break-after: auto; page-break-after: auto; }
+@media print { .slide { margin: 0; } html, body { background: var(--bg); } }
+
+/* footer: page number + product name */
+.slide::after {
+  content: "Hello Watch Assistant  ·  " attr(data-n);
+  position: absolute; left: 112px; bottom: 36px;
+  font-size: 20px; color: var(--text-muted); letter-spacing: .02em;
+}
+.slide.cover::after, .slide.closing::after { content: none; }
+
+.eyebrow {
+  font-size: 22px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--accent);
+}
+.h1 { font-size: 64px; line-height: 1.06; letter-spacing: -0.025em; font-weight: 700; max-width: 1500px; }
+.lead { font-size: 30px; line-height: 1.45; color: var(--text-muted); max-width: 1440px; }
+.head { display: grid; gap: 18px; }
+.mono { font-family: var(--font-mono); }
+.muted { color: var(--text-muted); }
+.ok { color: var(--ok); }
+.lock { color: var(--locked); }
+strong { font-weight: 700; }
+
+.card {
+  background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius);
+  padding: 32px 36px;
+}
+.grid { display: grid; gap: 28px; }
+.g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.g3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.g4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.fill { flex: 1; min-height: 0; }
+
+.card h3 { font-size: 30px; line-height: 1.2; font-weight: 700; margin-bottom: 12px; }
+.card p, .card li { font-size: 24px; line-height: 1.45; color: var(--text-muted); }
+.card p + p { margin-top: 12px; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 10px; padding: 8px 18px; border-radius: 999px;
+  font-size: 22px; font-weight: 600; background: var(--surface); border: 1.5px solid var(--border);
+}
+.dot { width: 12px; height: 12px; border-radius: 50%; background: var(--c, var(--text-muted)); flex: none; display: inline-block; }
+
+/* screenshots: placeholder frame behind the image, so a missing file still lays out */
+.shot {
+  position: relative; margin: 0; border-radius: var(--radius); overflow: hidden;
+  background:
+    repeating-linear-gradient(135deg, transparent 0 14px, color-mix(in srgb, var(--border) 45%, transparent) 14px 15px),
+    var(--surface-2);
+  border: 1.5px solid var(--border);
+  box-shadow: 0 2px 4px rgb(20 18 30 / .06), 0 24px 48px -20px rgb(20 18 30 / .25);
+}
+.shot::before {
+  content: attr(data-label); position: absolute; inset: 0; display: grid; place-items: center;
+  font-size: 22px; color: var(--text-muted); font-family: var(--font-mono); text-align: center; padding: 24px;
+}
+.shot img { position: relative; display: block; width: 100%; height: 100%; object-fit: cover; object-position: top center; }
+.shot figcaption {
+  position: absolute; left: 16px; bottom: 16px; z-index: 1;
+  font-size: 20px; font-weight: 600; padding: 6px 14px; border-radius: 999px;
+  background: rgb(255 255 255 / .92); color: var(--text); border: 1px solid var(--border);
+}
+
+/* ── 1 cover ────────────────────────────── */
+.cover { padding: 0; flex-direction: row; gap: 0; }
+.cover__left { flex: 1.1; padding: 104px 0 96px 112px; display: flex; flex-direction: column; gap: 34px; }
+.cover__right {
+  flex: 1; position: relative; overflow: hidden;
+  background: linear-gradient(160deg, #1d1b3a, #121128 70%);
+  display: grid; place-items: center;
+}
+.brand { display: flex; align-items: center; gap: 22px; }
+.brand__mark {
+  width: 76px; height: 76px; border-radius: 20px; display: grid; place-items: center; color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--gc-gemini));
+  box-shadow: 0 12px 32px -10px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+.cover h1 { font-size: 104px; line-height: 0.98; letter-spacing: -0.035em; font-weight: 700; }
+.cover .sub { font-size: 38px; line-height: 1.3; color: var(--text); max-width: 900px; font-weight: 500; }
+.cover .tag { font-size: 28px; color: var(--text-muted); max-width: 860px; line-height: 1.45; }
+.links { display: grid; gap: 14px; margin-top: auto; }
+.link { display: grid; grid-template-columns: 170px 1fr; align-items: baseline; font-size: 24px; }
+.link span:first-child { font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: .08em; font-size: 20px; }
+.link span:last-child { font-family: var(--font-mono); color: var(--accent); font-size: 23px; }
+
+.scrub { width: 680px; display: grid; gap: 34px; color: #ecebf2; }
+.scrub__frame {
+  height: 360px; border-radius: 22px; position: relative; overflow: hidden;
+  background:
+    radial-gradient(120% 90% at 30% 20%, rgb(165 141 255 / .35), transparent 60%),
+    radial-gradient(90% 80% at 80% 90%, rgb(95 210 143 / .18), transparent 60%),
+    #0e0e13;
+  border: 1.5px solid rgb(255 255 255 / .12);
+}
+.scrub__pause {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: 96px; height: 96px; border-radius: 50%; background: rgb(255 255 255 / .14);
+  display: grid; place-items: center;
+}
+.scrub__q {
+  position: absolute; right: 26px; bottom: 26px; padding: 16px 22px; border-radius: 20px 20px 6px 20px;
+  background: #fff; color: var(--text); font-size: 26px; font-weight: 600;
+}
+.scrub__bar { position: relative; height: 14px; border-radius: 999px; background: rgb(240 180 76 / .28); }
+.scrub__seen { position: absolute; inset: 0 auto 0 0; width: 46%; border-radius: 999px; background: #5fd28f; }
+.scrub__p {
+  position: absolute; left: 46%; top: 50%; transform: translate(-50%, -50%);
+  width: 34px; height: 34px; border-radius: 50%; background: #fff; border: 5px solid #9d97ff;
+}
+.scrub__plabel {
+  position: absolute; left: 46%; top: -58px; transform: translateX(-50%);
+  font-family: var(--font-mono); font-size: 24px; color: #fff; background: #4c46d6; padding: 4px 14px; border-radius: 10px;
+}
+.scrub__legend { display: flex; justify-content: space-between; font-size: 22px; }
+.scrub__legend b { font-weight: 600; }
+
+/* ── 2 problem ─────────────────────────── */
+.questions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; }
+.q {
+  font-size: 40px; font-weight: 700; letter-spacing: -0.01em; padding: 34px 38px; border-radius: var(--radius);
+  background: var(--surface); border: 1.5px solid var(--border); position: relative;
+}
+.q small { display: block; font-size: 22px; font-weight: 500; color: var(--text-muted); margin-top: 8px; letter-spacing: 0; }
+.problem { display: grid; grid-template-columns: 1.05fr 1fr; gap: 56px; flex: 1; align-items: stretch; }
+.danger {
+  border-radius: var(--radius); padding: 40px 44px; display: flex; flex-direction: column; gap: 22px;
+  background: color-mix(in srgb, var(--warn) 7%, var(--surface)); border: 1.5px solid color-mix(in srgb, var(--warn) 35%, var(--border));
+}
+.danger h3 { font-size: 34px; }
+.danger p { font-size: 26px; line-height: 1.5; color: var(--text); }
+.chat { display: grid; gap: 14px; margin-top: 4px; }
+.bubble { font-size: 24px; line-height: 1.4; padding: 16px 22px; border-radius: 18px; max-width: 88%; }
+.bubble.me { justify-self: end; background: var(--accent); color: #fff; border-bottom-right-radius: 6px; }
+.bubble.bot { background: var(--surface); border: 1.5px solid var(--border); border-bottom-left-radius: 6px; }
+.bubble.bot em { font-style: normal; background: color-mix(in srgb, var(--warn) 18%, transparent); padding: 0 6px; border-radius: 6px; color: var(--warn); font-weight: 600; }
+
+/* ── 3 why hard ─────────────────────────── */
+.timeline { position: relative; height: 230px; margin-top: 8px; }
+.tl__bar { position: absolute; left: 0; right: 0; top: 104px; height: 22px; border-radius: 999px; overflow: hidden; display: flex; }
+.tl__seen { width: 42%; background: var(--ok); }
+.tl__future { flex: 1; background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--locked) 30%, var(--surface-2)) 0 12px, color-mix(in srgb, var(--locked) 16%, var(--surface-2)) 12px 24px); }
+.tl__p { position: absolute; left: 42%; top: 40px; bottom: 30px; border-left: 4px solid var(--accent); }
+.tl__p span {
+  position: absolute; top: -14px; left: 0; transform: translateX(-50%); background: var(--accent); color: #fff;
+  font-size: 24px; font-weight: 700; padding: 4px 16px; border-radius: 10px; white-space: nowrap;
+}
+.tl__label { position: absolute; top: 150px; font-size: 26px; font-weight: 600; }
+.tl__label small { display: block; font-size: 22px; font-weight: 500; color: var(--text-muted); margin-top: 4px; }
+.tl__items { position: absolute; top: 56px; left: 0; right: 0; height: 30px; }
+.tl__items i { position: absolute; width: 18px; height: 18px; border-radius: 5px; top: 6px; }
+.tl__items i.s { background: var(--ok); }
+.tl__items i.f { background: transparent; border: 2.5px solid var(--locked); }
+.reasons .card { border-top: 6px solid var(--warn); }
+.verdict {
+  font-size: 36px; font-weight: 700; padding: 30px 40px; border-radius: var(--radius);
+  background: color-mix(in srgb, var(--ok) 10%, var(--surface)); border: 1.5px solid color-mix(in srgb, var(--ok) 40%, var(--border));
+  display: flex; align-items: center; gap: 22px;
+}
+
+/* ── 4 experience ───────────────────────── */
+.exp { display: grid; grid-template-columns: 860px 300px 1fr; gap: 32px; flex: 1; min-height: 0; }
+.exp--miss { grid-template-columns: 900px 1fr; gap: 48px; }
+.shot--contain { align-self: start; aspect-ratio: 2480 / 1860; }
+.shot--contain img { object-fit: cover; object-position: top center; }
+.shot--contain figcaption { top: 16px; bottom: auto; }
+.shot--phone { align-self: stretch; border-radius: 34px; border: 8px solid #17171c; background: #17171c; }
+.shot--phone img { object-fit: cover; object-position: 50% 64%; }
+.shot--phone figcaption { left: 50%; transform: translateX(-50%); white-space: nowrap; }
+.ok-ico { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+.feat { display: grid; gap: 22px; align-content: start; }
+.feat li {
+  display: grid; grid-template-columns: 56px 1fr; gap: 20px; align-items: start;
+  font-size: 25px; line-height: 1.45; color: var(--text-muted);
+}
+.feat li b { display: block; color: var(--text); font-size: 28px; margin-bottom: 2px; }
+.ico {
+  width: 56px; height: 56px; border-radius: 16px; display: grid; place-items: center; font-size: 26px; font-weight: 700;
+  background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent);
+}
+
+/* ── 5 how it works ─────────────────────── */
+.lane {
+  border-radius: var(--radius); padding: 26px 30px 30px; display: grid; gap: 20px;
+  background: var(--surface-2);
+}
+.lane--online { background: color-mix(in srgb, var(--accent) 6%, var(--surface-2)); }
+.lane__title { font-size: 24px; font-weight: 700; display: flex; gap: 16px; align-items: baseline; }
+.lane__title span { font-weight: 500; color: var(--text-muted); font-size: 22px; }
+.flow { display: flex; align-items: stretch; gap: 0; }
+.step {
+  flex: 1; background: var(--surface); border: 1.5px solid var(--border); border-radius: 16px;
+  padding: 18px 20px 18px 24px; position: relative; display: grid; gap: 6px; align-content: start;
+}
+.step::before { content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 6px; border-radius: 0 4px 4px 0; background: var(--c, var(--text-muted)); }
+.step b { font-size: 25px; line-height: 1.2; }
+.step span { font-size: 21px; line-height: 1.35; color: var(--text-muted); }
+.step--gate { background: color-mix(in srgb, var(--ok) 11%, var(--surface)); border: 3px solid var(--ok); }
+.step--gate::before { display: none; }
+.step--pack { background: color-mix(in srgb, var(--accent) 9%, var(--surface)); border: 2.5px solid var(--accent); }
+.step--pack::before { display: none; }
+.arrow { flex: 0 0 44px; display: grid; place-items: center; color: var(--text-muted); font-size: 30px; }
+.bridge { display: flex; align-items: center; gap: 18px; padding-left: 30px; font-size: 22px; color: var(--ok); font-weight: 600; }
+.bridge::before { content: ""; width: 4px; height: 44px; background: var(--ok); border-radius: 4px; }
+
+/* ── 6 gate ─────────────────────────────── */
+.rules li {
+  display: grid; grid-template-columns: 40px 1fr; gap: 16px; font-size: 25px; line-height: 1.45; color: var(--text-muted);
+  padding: 16px 0; border-bottom: 1.5px solid var(--border);
+}
+.rules li:last-child { border-bottom: 0; }
+.rules li b { color: var(--text); }
+.check {
+  width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; margin-top: 2px;
+  background: color-mix(in srgb, var(--ok) 15%, transparent); color: var(--ok); font-weight: 700; font-size: 22px;
+}
+.rejected li { padding: 20px 0; border-bottom: 1.5px solid var(--border); }
+.rejected li:last-child { border-bottom: 0; }
+.rejected b { display: flex; gap: 14px; align-items: center; font-size: 27px; color: var(--text); }
+.rejected b::before { content: "✕"; color: var(--warn); font-size: 24px; }
+.rejected p { font-size: 23px; line-height: 1.45; color: var(--text-muted); margin-top: 6px; padding-left: 38px; }
+
+/* ── 7 agent ────────────────────────────── */
+.tools { display: grid; gap: 14px; }
+.tool {
+  display: grid; grid-template-columns: 290px 1fr; gap: 20px; align-items: baseline;
+  padding: 18px 24px; border-radius: 16px; background: var(--surface); border: 1.5px solid var(--border);
+}
+.tool code { font-family: var(--font-mono); font-size: 25px; font-weight: 600; color: var(--accent); }
+.tool span { font-size: 23px; line-height: 1.4; color: var(--text-muted); }
+.seq { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 6px; }
+.seq span {
+  font-family: var(--font-mono); font-size: 21px; padding: 6px 14px; border-radius: 10px;
+  background: var(--surface-2); border: 1.5px solid var(--border); color: var(--text);
+}
+.seq i { font-style: normal; color: var(--text-muted); font-size: 22px; }
+
+/* ── 8 tech map ─────────────────────────── */
+.tech { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 22px; flex: 1; align-content: start; }
+.svc {
+  background: var(--surface); border: 1.5px solid var(--border); border-left: 7px solid var(--c);
+  border-radius: 16px; padding: 22px 24px; display: grid; gap: 8px; align-content: start;
+}
+.svc b { font-size: 26px; line-height: 1.2; }
+.svc span { font-size: 21px; line-height: 1.4; color: var(--text-muted); }
+.svc em { font-style: normal; font-size: 20px; font-weight: 700; color: var(--c); text-transform: uppercase; letter-spacing: .06em; }
+
+/* ── 9 results ──────────────────────────── */
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 24px; }
+.stat {
+  background: var(--surface); border: 1.5px solid var(--border); border-radius: var(--radius);
+  padding: 30px 32px; display: grid; gap: 10px; align-content: start;
+}
+.stat .v { font-size: 76px; font-weight: 700; letter-spacing: -0.035em; line-height: 1; font-variant-numeric: tabular-nums; }
+.stat .v small { font-size: 32px; font-weight: 600; color: var(--text-muted); letter-spacing: 0; }
+.stat p { font-size: 23px; line-height: 1.4; color: var(--text-muted); }
+.stat.hero { background: color-mix(in srgb, var(--ok) 9%, var(--surface)); border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
+.stat.hero .v { color: var(--ok); }
+.note { font-size: 21px; color: var(--text-muted); line-height: 1.45; }
+
+/* ── 10 community ───────────────────────── */
+.who .card { display: grid; gap: 12px; align-content: start; border-top: 6px solid var(--c); }
+.who .card h3 { margin-bottom: 0; }
+.who .tag { font-size: 20px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: var(--c); }
+
+/* ── 11 feasibility ─────────────────────── */
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; flex: 1; min-height: 0; }
+.col { display: grid; gap: 18px; align-content: start; }
+.col h3 { font-size: 32px; display: flex; gap: 14px; align-items: center; }
+.bul li {
+  position: relative; padding-left: 30px; font-size: 24px; line-height: 1.45; color: var(--text-muted); margin-bottom: 14px;
+}
+.bul li::before { content: ""; position: absolute; left: 0; top: 14px; width: 12px; height: 12px; border-radius: 3px; background: var(--c, var(--accent)); }
+.bul li b { color: var(--text); }
+.honest {
+  font-size: 22px; line-height: 1.45; padding: 18px 24px; border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--locked) 10%, var(--surface)); border-left: 5px solid var(--locked); color: var(--text);
+}
+
+/* ── 12 roadmap ─────────────────────────── */
+.road { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 26px; flex: 1; align-content: start; }
+.road .card { display: grid; gap: 10px; align-content: start; }
+.road .when { font-size: 20px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+.road .card h3 { margin-bottom: 0; }
+
+/* density variants */
+.slide.tight { gap: 30px; }
+.slide.roomy { gap: 36px; padding-bottom: 100px; }
+.tight .tools { gap: 12px; }
+.tight .tool { padding: 14px 22px; }
+.tight .card { padding: 24px 30px; }
+.tight .lane { gap: 16px; padding: 22px 26px 24px; }
+.roomy .stats { flex: 1; grid-auto-rows: 1fr; }
+.roomy .stat { padding: 26px 34px; align-content: center; gap: 12px; }
+.roomy .stat .v { font-size: 84px; }
+.roomy .stat .v small { font-size: 38px; }
+.roomy .stat p { font-size: 25px; }
+.who-wrap { flex: 1; min-height: 0; display: grid; grid-template-rows: 1.2fr 1fr; gap: 24px; }
+.roomy .who .card, .who-wrap .g2 .card { padding: 30px 38px; }
+.roomy .card h3 { font-size: 34px; }
+.roomy .card p { font-size: 25px; }
+.roomy .road { grid-auto-rows: 1fr; }
+.roomy .road .card { padding: 40px 42px; gap: 14px; }
+
+/* ── 13 closing ─────────────────────────── */
+.closing { justify-content: center; gap: 48px; }
+.closing h2 { font-size: 88px; line-height: 1.02; letter-spacing: -0.03em; }
+.credits { display: grid; grid-template-columns: 1.2fr 1fr; gap: 48px; }
+.credits h4 { font-size: 22px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 14px; }
+.credits li { font-size: 22px; line-height: 1.5; color: var(--text-muted); margin-bottom: 6px; }
+.credits li b { color: var(--text); }
+</style>
+</head>
+<body>
+
+<!-- 1 · Cover -->
+<section class="slide cover" data-n="1">
+  <div class="cover__left">
+    <p class="eyebrow">AI Builder Cup 2026 · Media, Content &amp; Digital Experiences</p>
+    <div class="brand">
+      <span class="brand__mark"><svg width="40" height="40" viewBox="0 0 24 24" fill="none"><path d="M8 5.5v13l10.5-6.5z" fill="currentColor"/><path d="M3.5 12a8.5 8.5 0 0 1 8.5-8.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity=".6"/></svg></span>
+    </div>
+    <h1>Hello Watch<br>Assistant</h1>
+    <p class="sub">A spoiler-free viewing companion, built on Gemini and Google Cloud.</p>
+    <p class="tag">Pause any film and ask. It answers only from what you have already seen: it never names a character before the film does, never hints at a twist and never says an actor’s name.</p>
+    <div class="links">
+      <div class="link"><span>Live demo</span><span>hello-watch-vspuwrubbq-uw.a.run.app</span></div>
+      <div class="link"><span>Code</span><span>github.com/lennonkc/hello-watch-assistant</span></div>
+    </div>
+  </div>
+  <div class="cover__right">
+    <div class="scrub" aria-hidden="true">
+      <div class="scrub__frame">
+        <div class="scrub__pause"><svg width="40" height="40" viewBox="0 0 24 24"><rect x="6" y="5" width="4" height="14" rx="1" fill="#fff"/><rect x="14" y="5" width="4" height="14" rx="1" fill="#fff"/></svg></div>
+        <div class="scrub__q">Who is she?</div>
+      </div>
+      <div class="scrub__bar"><div class="scrub__seen"></div><div class="scrub__plabel">P</div><div class="scrub__p"></div></div>
+      <div class="scrub__legend"><span><b style="color:#5fd28f">Seen</b> · the assistant may use it</span><span><b style="color:#f0b44c">Not yet</b> · locked</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- 2 · Problem -->
+<section class="slide" data-n="2">
+  <div class="head">
+    <p class="eyebrow">The problem</p>
+    <h2 class="h1">Viewers pause with questions. Every answer out there is a spoiler risk.</h2>
+  </div>
+  <div class="problem">
+    <div class="questions">
+      <div class="q">“Who is she?”<small>A face you can’t place</small></div>
+      <div class="q">“What is that?”<small>An object that seems to matter</small></div>
+      <div class="q">“What did I miss?”<small>You stepped away for ten minutes</small></div>
+      <div class="q">“What did he just say?”<small>A line lost to the soundtrack</small></div>
+    </div>
+    <div class="danger">
+      <h3>A general chatbot knows the whole film</h3>
+      <p>From reviews, wikis and its training data. It cannot tell what you have seen, so it answers with everything it knows.</p>
+      <div class="chat">
+        <div class="bubble me">Who is the old man? (minute 12)</div>
+        <div class="bubble bot">He’s the hero’s mentor, who <em>turns out to be</em> … — the reveal from minute 80.</div>
+      </div>
+      <p>Today viewers rewind, search the web and risk spoilers, or stay confused.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 3 · Why it's hard -->
+<section class="slide" data-n="3">
+  <div class="head">
+    <p class="eyebrow">Why it is hard</p>
+    <h2 class="h1">Spoiler safety can’t be a polite instruction to the model.</h2>
+  </div>
+  <div class="timeline" aria-hidden="true">
+    <div class="tl__items">
+      <i class="s" style="left:3%"></i><i class="s" style="left:9%"></i><i class="s" style="left:14%"></i><i class="s" style="left:21%"></i>
+      <i class="s" style="left:27%"></i><i class="s" style="left:33%"></i><i class="s" style="left:38%"></i>
+      <i class="f" style="left:47%"></i><i class="f" style="left:55%"></i><i class="f" style="left:62%"></i><i class="f" style="left:70%"></i>
+      <i class="f" style="left:78%"></i><i class="f" style="left:86%"></i><i class="f" style="left:94%"></i>
+    </div>
+    <div class="tl__bar"><div class="tl__seen"></div><div class="tl__future"></div></div>
+    <div class="tl__p"><span>You paused here · P</span></div>
+    <div class="tl__label ok" style="left:0">Seen<small>Every fact revealed before P</small></div>
+    <div class="tl__label lock" style="left:47%">Not yet seen<small>Must be invisible to the model, not just “not mentioned”</small></div>
+  </div>
+  <div class="grid g3 reasons">
+    <div class="card"><h3>Models remember plots</h3><p>Popular films are in the training data. Telling the model “don’t spoil” leaves the knowledge in place.</p></div>
+    <div class="card"><h3>Search ranks the future too</h3><p>Retrieval over a whole film puts later scenes in the candidate list. One missed filter and they reach the prompt.</p></div>
+    <div class="card"><h3>Leaks look like good answers</h3><p>A spoiled answer reads fluently and confidently. Nothing in the output signals that something went wrong.</p></div>
+  </div>
+  <div class="verdict"><span class="check" style="width:48px;height:48px;font-size:28px">✓</span><span>So the model must never <em style="font-style:normal;color:var(--ok)">see</em> what the viewer hasn’t seen. The gate has to be structural.</span></div>
+</section>
+
+<!-- 4 · Experience -->
+<section class="slide" data-n="4">
+  <div class="head">
+    <p class="eyebrow">The experience</p>
+    <h2 class="h1">Pause, tap, ask. The answer stops exactly where you are.</h2>
+  </div>
+  <div class="exp">
+    <figure class="shot shot--contain" data-label="docs/images/live-demo-answer.jpg"><img src="../images/live-demo-answer.jpg" alt="Live demo: the viewer taps the paused frame and asks who this is" onerror="this.remove()"><figcaption>Live demo · tap the frame, ask “Who is this?”</figcaption></figure>
+    <figure class="shot shot--phone" data-label="docs/images/mobile.jpg"><img src="../images/mobile.jpg" alt="The same answer on a phone" onerror="this.remove()"><figcaption>On a phone</figcaption></figure>
+    <ul class="feat">
+      <li><span class="ico">?</span><div><b>Four everyday questions</b>Who someone is, what an object is, the story so far, and the line you just missed.</div></li>
+      <li><span class="ico">⌖</span><div><b>Tap the frame</b>The tap picks the person or object; the answer draws a box around them.</div></li>
+      <li><span class="ico">↻</span><div><b>See how it answered</b>Each step streams in live, with evidence frames all from before P.</div></li>
+      <li><span class="ico">Aa</span><div><b>English and Chinese</b>Ask and get answers in either language.</div></li>
+    </ul>
+  </div>
+</section>
+
+<!-- 5 · What did I miss -->
+<section class="slide" data-n="5">
+  <div class="head">
+    <p class="eyebrow">The experience</p>
+    <h2 class="h1">“What did I miss?” recaps the story up to your exact moment.</h2>
+  </div>
+  <div class="exp exp--miss">
+    <figure class="shot shot--contain" data-label="docs/images/live-demo-miss.jpg"><img src="../images/live-demo-miss.jpg" alt="Live demo: what did I miss, with the spoiler shield counts" onerror="this.remove()"><figcaption>Live demo · Sintel, paused at 07:11</figcaption></figure>
+    <ul class="feat">
+      <li><span class="ico ok-ico">✓</span><div><b>The gate runs first</b>At 07:11, 215 facts are unlocked and 150 are kept away from the model.</div></li>
+      <li><span class="ico">≡</span><div><b>Story so far</b>The latest recap plus what happened since, read by the agent’s story_so_far tool.</div></li>
+      <li><span class="ico">▣</span><div><b>Evidence you can check</b>“Based on” shows the recap time and frames from earlier in the film.</div></li>
+      <li><span class="ico ok-ico">⛨</span><div><b>Guarded and fast</b>The spoiler guard passed; this answer took 4.4 s.</div></li>
+    </ul>
+  </div>
+</section>
+
+<!-- 6 · How it works -->
+<section class="slide tight" data-n="6">
+  <div class="head">
+    <p class="eyebrow">How it works</p>
+    <h2 class="h1">Gemini studies each film once. Every question then passes the gate first.</h2>
+  </div>
+  <div class="lane">
+    <p class="lane__title">A · Offline ingest <span>once per film · local or Cloud Run Jobs</span></p>
+    <div class="flow">
+      <div class="step" style="--c:var(--gc-storage)"><b>Source film</b><span>Cloud Storage</span></div>
+      <div class="arrow">→</div>
+      <div class="step" style="--c:var(--gc-run)"><b>Shots and frames</b><span>FFmpeg · PySceneDetect</span></div>
+      <div class="arrow">→</div>
+      <div class="step" style="--c:var(--gc-gemini); flex:1.5"><b>Video understanding</b><span>Gemini 3.8 Flash: characters, shots, speakers, recaps; gemini-3.5-transcribe for dialogue</span></div>
+      <div class="arrow">→</div>
+      <div class="step" style="--c:var(--gc-gemini)"><b>Embeddings</b><span>gemini-embedding-2, text and video</span></div>
+      <div class="arrow">→</div>
+      <div class="step" style="--c:var(--gc-run)"><b>Builder checks</b><span>11 automated checks</span></div>
+      <div class="arrow">→</div>
+      <div class="step step--pack"><b>Knowledge pack</b><span>SQLite, a reveal time on every row</span></div>
+    </div>
+  </div>
+  <div class="bridge">The pack stays on the server. Only the gate reads it.</div>
+  <div class="lane lane--online">
+    <p class="lane__title">B · Online Q&amp;A <span>every question · Cloud Run service</span></p>
+    <div class="flow">
+      <div class="step" style="--c:var(--text-muted)"><b>Pause and ask</b><span>Question, position, optional tap</span></div>
+      <div class="arrow">→</div>
+      <div class="step" style="--c:var(--gc-run)"><b>Lock P</b><span>On the server, in session state</span></div>
+      <div class="arrow">→</div>
+      <div class="step step--gate"><b>Spoiler gate</b><span>Eligible set: reveal + margin ≤ P</span></div>
+      <div class="arrow">→</div>
+      <div class="step" style="--c:var(--gc-gemini); flex:1.4"><b>ADK agent + 5 tools</b><span>Gemini 3.8 Flash on Agent Platform; tools read only the eligible set</span></div>
+      <div class="arrow">→</div>
+      <div class="step" style="--c:var(--gc-run)"><b>Output guards</b><span>Names, canaries, visibility</span></div>
+      <div class="arrow">→</div>
+      <div class="step" style="--c:var(--gc-run)"><b>Streamed answer</b><span>Server-Sent Events</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- 7 · The gate -->
+<section class="slide" data-n="7">
+  <div class="head">
+    <p class="eyebrow">The spoiler gate</p>
+    <h2 class="h1">Gate first, then rank. The model can’t leak what it was never shown.</h2>
+  </div>
+  <div class="grid" style="grid-template-columns: 1.25fr 1fr; gap: 40px; flex: 1">
+    <div class="card">
+      <h3>How eligibility works</h3>
+      <ul class="rules">
+        <li><span class="check">✓</span><div><b>P is locked on the server.</b> The browser reports a position; it never sends, or receives, the list of what is visible.</div></li>
+        <li><span class="check">✓</span><div><b>Every row has a reveal time.</b> It becomes eligible when <span class="mono">reveal_at_s + margin ≤ P</span>, with margins per type: dialogue 1 s, events 3 s, scenes 3–5 s.</div></li>
+        <li><span class="check">✓</span><div><b>Names wait for the film.</b> A character is “the young woman” until the film says her name; only then may the name be used.</div></li>
+        <li><span class="check">✓</span><div><b>Identities stay apart until a reveal.</b> Facts are never linked across a hidden identity; the clue to it is a future canary.</div></li>
+        <li><span class="check">✓</span><div><b>Ranking runs inside the gate.</b> Vector, full-text or hybrid ranking only ever sees the eligible set.</div></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Rejected on purpose</h3>
+      <ul class="rejected">
+        <li><b>Managed RAG with metadata filters</b><p>Ranks the whole film, then filters. If the filter silently stops applying, the result is a spoiler.</p></li>
+        <li><b>Grounding with online search</b><p>Brings in synopses, reviews and wikis: exactly where spoilers live.</p></li>
+        <li><b>Calling Gemini from the browser</b><p>The client would need the evidence, and a client can be modified. The gate must run behind the server’s trust boundary.</p></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- 8 · ADK agent -->
+<section class="slide tight" data-n="8">
+  <div class="head">
+    <p class="eyebrow">The agent</p>
+    <h2 class="h1">An ADK agent with five gate-aware tools, and no way to move P.</h2>
+  </div>
+  <div class="grid" style="grid-template-columns: 1.2fr 1fr; gap: 40px; flex: 1">
+    <div class="tools">
+      <div class="tool"><code>story_so_far</code><span>Latest eligible recap plus the scenes and events after it. The first choice for “what did I miss?”</span></div>
+      <div class="tool"><code>search_moments</code><span>Embeds the question with gemini-embedding-2 and ranks only inside the eligible set.</span></div>
+      <div class="tool"><code>recent_dialogue</code><span>Lines spoken before P, with who said each one when known.</span></div>
+      <div class="tool"><code>on_screen</code><span>Who and what is in the paused frame; a tap is matched to their boxes, and labels are decided at P.</span></div>
+      <div class="tool"><code>look_closer</code><span>Gemini 3.8 Flash looks at the paused frame plus stills from the 30 s before it.</span></div>
+    </div>
+    <div class="grid" style="gap: 24px; align-content: start">
+      <div class="card">
+        <h3>P lives in session state</h3>
+        <p>The server writes P, title, language and tap into the ADK session with <span class="mono">state_delta</span>. Tools read <span class="mono">ToolContext.state</span>; no tool takes P as an argument.</p>
+      </div>
+      <div class="card">
+        <h3>Every step is visible</h3>
+        <div class="seq"><span>gate</span><i>→</i><span>tool</span><i>→</i><span>tool_result</span><i>→</i><span>answer</span></div>
+        <p style="margin-top:12px">Streamed to the browser with Server-Sent Events.</p>
+      </div>
+      <div class="card">
+        <h3>Guard, retry, fall back</h3>
+        <p>If the output guard finds a forbidden term, the draft is discarded and the question is answered again in a fresh session with a do-not-use hint. If that still fails, a fixed safe answer is returned.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 9 · Google Cloud map -->
+<section class="slide" data-n="9">
+  <div class="head">
+    <p class="eyebrow">Built on Google Cloud</p>
+    <h2 class="h1">Twelve Google services, each with one clear job.</h2>
+  </div>
+  <div class="tech">
+    <div class="svc" style="--c:var(--gc-gemini)"><em>Gemini</em><b>Gemini 3.8 Flash</b><span>Watches each film during ingest; powers the agent and visual look-ups online.</span></div>
+    <div class="svc" style="--c:var(--gc-gemini)"><em>Gemini</em><b>gemini-embedding-2</b><span>One 1536-d space for text items and ≤ 30 s video windows with audio.</span></div>
+    <div class="svc" style="--c:var(--gc-gemini)"><em>Gemini</em><b>gemini-3.5-transcribe</b><span>Word-level transcription with speaker diarization.</span></div>
+    <div class="svc" style="--c:var(--gc-gemini)"><em>Agents</em><b>Gemini Enterprise Agent Platform</b><span>Serves Gemini with project IAM; reads video straight from Cloud Storage.</span></div>
+    <div class="svc" style="--c:var(--gc-gemini)"><em>Agents</em><b>Agent Development Kit</b><span>The online LlmAgent and its five gate-aware tools.</span></div>
+    <div class="svc" style="--c:var(--gc-run)"><em>Compute</em><b>Cloud Run service</b><span>Web app, spoiler gate, agent and output guards; capped instances and rate limits.</span></div>
+    <div class="svc" style="--c:var(--gc-run)"><em>Compute</em><b>Cloud Run Jobs</b><span>Batch ingest: one film per task, cached and budgeted stages.</span></div>
+    <div class="svc" style="--c:var(--gc-storage)"><em>Data</em><b>Cloud Storage</b><span>Films and versioned knowledge packs in a private bucket; video via signed URLs.</span></div>
+    <div class="svc" style="--c:var(--gc-secret)"><em>Security</em><b>Secret Manager</b><span>Every production prompt, the agent instructions and the API key. None are in the repo.</span></div>
+    <div class="svc" style="--c:var(--gc-build)"><em>Build</em><b>Cloud Build</b><span>Builds the ingest image (pinned FFmpeg, Python) and the web service image.</span></div>
+    <div class="svc" style="--c:var(--gc-build)"><em>Build</em><b>Artifact Registry</b><span>Stores the images that Cloud Run runs.</span></div>
+    <div class="svc" style="--c:var(--gc-build)"><em>Operations</em><b>Cloud Scheduler</b><span>Triggers the upload-renewal job every 6 hours.</span></div>
+  </div>
+</section>
+
+<!-- 10 · Results -->
+<section class="slide roomy" data-n="10">
+  <div class="head">
+    <p class="eyebrow">Results</p>
+    <h2 class="h1">Measured on three open films, processed end to end.</h2>
+  </div>
+  <div class="stats">
+    <div class="stat hero"><span class="v">0<small> / 120</small></span><p>gate violations in checked retrieval results</p></div>
+    <div class="stat"><span class="v">36<small> / 40</small></span><p>vector retrieval hits in the top 3 (full-text only: 22 / 40)</p></div>
+    <div class="stat"><span class="v">12<small> / 14</small></span><p>Chinese questions with a correct top-3 retrieval hit (full-text: 0 / 14)</p></div>
+    <div class="stat"><span class="v">10<small> / 10</small></span><p>speaker attributions correct in spot checks</p></div>
+    <div class="stat"><span class="v">12<small> / 12</small></span><p>character identities correct in shot entities</p></div>
+    <div class="stat"><span class="v">~85<small> %</small></span><p>shot captions fully correct in spot checks</p></div>
+    <div class="stat"><span class="v">3–13<small> s</small></span><p>to a full answer (local tests), with ≤ 3 tool calls by instruction</p></div>
+    <div class="stat"><span class="v">≈ $8</span><p>total Gemini cost to ingest all three films, re-runs included</p></div>
+  </div>
+  <p class="note">Spot checks on Sintel unless noted. Retrieval: 20 questions × 2 pause positions, scored by top-3 time overlap. Films: Sintel, Tears of Steel, Elephants Dream (Blender Foundation, CC BY).</p>
+</section>
+
+<!-- 11 · Community benefit -->
+<section class="slide roomy" data-n="11">
+  <div class="head">
+    <p class="eyebrow">Community benefit</p>
+    <h2 class="h1">Help that respects the story, for people who need it most.</h2>
+  </div>
+  <div class="who-wrap">
+  <div class="grid g3 who">
+    <div class="card" style="--c:var(--gc-gemini)"><p class="tag">Accessibility</p><h3>Deaf and hard-of-hearing viewers</h3><p>“Who said that?” is answered from speaker-attributed dialogue, without spoiling what comes next.</p></div>
+    <div class="card" style="--c:var(--gc-run)"><p class="tag">Language</p><h3>Viewers watching in a second language</h3><p>Ask in Chinese about an English film. Cross-language retrieval finds the moment, and the answer comes back in your language.</p></div>
+    <div class="card" style="--c:var(--gc-storage)"><p class="tag">Attention</p><h3>Viewers who step away</h3><p>A recap that stops exactly where you are, for families, interrupted evenings and long films.</p></div>
+  </div>
+  <div class="grid g2">
+    <div class="card"><h3>Education and libraries</h3><p>A study companion for film classes and library collections that explains what students have watched without giving away the ending.</p></div>
+    <div class="card"><h3>Streaming, TV and creators</h3><p>A second-screen companion that keeps viewers engaged instead of searching elsewhere. Creators can open their story to questions because reveal times are data they can review.</p></div>
+  </div>
+  </div>
+</section>
+
+<!-- 12 · Feasibility & scalability -->
+<section class="slide" data-n="12">
+  <div class="head">
+    <p class="eyebrow">Feasibility and scalability</p>
+    <h2 class="h1">Built, deployed and cheap to run, with a clear path to scale.</h2>
+  </div>
+  <div class="two">
+    <div class="col card">
+      <h3><span class="dot" style="--c:var(--ok)"></span>Feasible today</h3>
+      <ul class="bul" style="--c:var(--ok)">
+        <li><b>Live on Cloud Run</b> with three films, a public link and an open-source codebase.</li>
+        <li><b>Ingest once per film.</b> Cached, budgeted stages; about $8 of Gemini for all three films, re-runs included.</li>
+        <li><b>Byte-reproducible packs:</b> identical content re-exports to identical bytes and the same version.</li>
+        <li><b>Guarded spend:</b> at most 2 instances, per-IP and daily question limits.</li>
+      </ul>
+    </div>
+    <div class="col card">
+      <h3><span class="dot" style="--c:var(--accent)"></span>Ready to scale</h3>
+      <ul class="bul">
+        <li><b>Cloud Run Jobs</b> ingest one film per task, in parallel.</li>
+        <li><b>The knowledge pack is versioned SQLite.</b> A device form (reviewed rows only, no review log) is already defined, designed for answering on a TV or phone.</li>
+        <li><b>Prompts in Secret Manager</b> change without rebuilding images.</li>
+        <li><b>Human review is specified:</b> review patches, roles and a rule that names, identities and spoiler-critical items need a human.</li>
+      </ul>
+    </div>
+  </div>
+  <p class="honest"><b>Honest limits:</b> the demo serves automatically pre-checked rows; production would add the human review step for names and twists. Shot captions are about 85% fully correct, and the output guards are a safety net, not a guarantee.</p>
+</section>
+
+<!-- 13 · Roadmap -->
+<section class="slide roomy" data-n="13">
+  <div class="head">
+    <p class="eyebrow">Roadmap</p>
+    <h2 class="h1">From three open films to any catalogue, on any screen.</h2>
+  </div>
+  <div class="road">
+    <div class="card"><p class="when">Next</p><h3>Voice questions</h3><p>Push-to-talk or a wake word. P locks at the moment you speak, as the spec already defines.</p></div>
+    <div class="card"><p class="when">Next</p><h3>TV and mobile apps</h3><p>Ship the device pack with the title so simple questions work offline on the living-room screen.</p></div>
+    <div class="card"><p class="when">Next</p><h3>Reviewer tooling</h3><p>A review interface on top of the existing patch format, so a person can confirm names and reveals quickly.</p></div>
+    <div class="card"><p class="when">Later</p><h3>Series memory</h3><p>Gate across episodes and seasons: “previously on” recaps that stop at your episode.</p></div>
+    <div class="card"><p class="when">Later</p><h3>More languages</h3><p>Recaps and answers beyond English and Chinese, with name canaries for each language.</p></div>
+    <div class="card"><p class="when">Later</p><h3>Partner catalogues</h3><p>Studios, broadcasters and libraries ingest their own titles with their own review.</p></div>
+  </div>
+</section>
+
+<!-- 14 · Closing -->
+<section class="slide closing" data-n="14">
+  <p class="eyebrow">Hello Watch Assistant</p>
+  <h2>Ask about the film.<br>Never get spoiled.</h2>
+  <div class="links" style="margin-top:0">
+    <div class="link"><span>Live demo</span><span>https://hello-watch-vspuwrubbq-uw.a.run.app</span></div>
+    <div class="link"><span>Code</span><span>https://github.com/lennonkc/hello-watch-assistant</span></div>
+  </div>
+  <div class="credits">
+    <div>
+      <h4>Research it builds on</h4>
+      <ul>
+        <li><b>AutoAD II</b> and <b>AutoAD-Zero</b>: in-film character bank, circle visual prompting</li>
+        <li><b>Shot-by-Shot</b>: shot-level description</li>
+        <li><b>MovieChat</b>: breakpoint mode, progressive recaps</li>
+        <li><b>HAVEN</b> and speaker-aware long-video QA</li>
+      </ul>
+    </div>
+    <div>
+      <h4>Demo films</h4>
+      <ul>
+        <li><b>Sintel</b> © Blender Foundation, durian.blender.org, CC BY 3.0</li>
+        <li><b>Tears of Steel</b> © Blender Foundation, mango.blender.org, CC BY 3.0</li>
+        <li><b>Elephants Dream</b> © 2006 Blender Foundation / Netherlands Media Art Institute, orange.blender.org, CC BY 2.5</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+</body>
+</html>

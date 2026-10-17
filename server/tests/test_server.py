@@ -93,9 +93,9 @@ def test_guard(title):
 
 
 def test_canary_prefix_match():
-    assert guard.matches("scar*", "The scarred wing", "word", False)
-    assert not guard.matches("scar*", "Oscar", "word", False)
-    assert guard.matches("伤疤*", "有伤疤的翅膀", "word", False)
+    assert guard.matches("mark*", "The marked door", "word", False)
+    assert not guard.matches("mark*", "Denmark", "word", False)
+    assert guard.matches("印记*", "门上有印记", "word", False)
 
 
 def test_gate_counts_are_counts_only(title):

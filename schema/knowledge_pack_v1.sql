@@ -140,7 +140,7 @@ CREATE TABLE character_facts (
   source           TEXT NOT NULL
 );
 
--- Identity twists (e.g. "the adult dragon = the grown-up baby dragon"). Before the reveal, a and b must be presented as different characters (spec §5.3 identity isolation).
+-- Identity twists (e.g. "the stranger = the lost brother"). Before the reveal, a and b must be presented as different characters (spec §5.3 identity isolation).
 CREATE TABLE identity_links (
   link_id        TEXT PRIMARY KEY,
   a_character_id TEXT NOT NULL REFERENCES characters(character_id),  -- the character as the viewer perceives it before the reveal

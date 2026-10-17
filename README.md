@@ -12,6 +12,8 @@ before the film does, never hints at a twist, and never says an actor's name.
 **Live demo: https://hello-watch-vspuwrubbq-uw.a.run.app** — pick a film, pause anywhere, ask. The second tab ("How it works") is an interactive map of
 the whole pipeline and the Google Cloud services behind it.
 
+![Live demo: the viewer paused Sintel at 03:20 and tapped the frame. The agent's steps stream in, the answer names only what has been shown, and the tapped character is boxed on the video.](docs/images/live-demo-answer.jpg)
+
 ---
 
 ## Why this is hard
@@ -62,6 +64,14 @@ flowchart LR
 3. **Answer, then guard.** Answers are generated from the eligible evidence plus a short "near window" of the video
    before *P*. Output guards then check them against a real-person-name blocklist, future "canary" terms and
    name-visibility rules.
+
+| "What did I miss?" at 07:11 | The gate at work |
+|---|---|
+| ![What did I miss: an answer built from the latest eligible recap, with the spoiler shield showing what is unlocked and what stays locked](docs/images/live-demo-miss.jpg) | ![Try the gate: drag P and watch items unlock only after their reveal time](docs/images/how-it-works-gate.png) |
+
+The "How it works" tab of the demo walks through every step interactively:
+
+![How it works: interactive pipeline diagram with the spoiler gate selected](docs/images/how-it-works-diagram.png)
 
 The full contract is in [docs/knowledge-pack.md](docs/knowledge-pack.md). How the online service uses it is in
 [docs/online-qa.md](docs/online-qa.md).

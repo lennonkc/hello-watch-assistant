@@ -17,7 +17,7 @@ from ingest.textnorm import has_cjk, normalize, term_matches
 
 
 def _prefix_match(term: str, text: str, case_sensitive: bool) -> bool:
-    """`word` / `phrase` terms ending in `*` are prefix matches (`scar*` matches scars, not Oscar)."""
+    """`word` / `phrase` terms ending in `*` are prefix matches (`mark*` matches marked, not Denmark)."""
     t = normalize(term[:-1], case_sensitive)
     if has_cjk(t):
         return t in normalize(text, case_sensitive)

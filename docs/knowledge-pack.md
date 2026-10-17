@@ -147,10 +147,11 @@ For every `identity_links(a, b, reveal_at_s = R)` that is not yet eligible:
    mentioned / speaker, `character_facts`, `character_looks`, `appearances`) may be attached only to a; it **must not be
    attached to b** unless b is on screen at that moment as "b itself" (covered by one of b's appearance intervals).
 2. **Clue terms**: every identity link must carry an `identity_clue` canary (§7.2), filled in by the reviewer with the clue
-   viewers use to recognise the identity (Sintel: `scar*` / `伤疤`), at least one per output language.
+   viewers use to recognise the identity (for example a distinctive mark: `mark*` / `印记`), at least one per output
+   language.
 3. **Cross-table consistency**: no text whose eligibility time is earlier than `R` may contain the link's clue terms. This
-   applies to appearance descriptions too (in the Sintel sample, the adult dragon's look mentioned "a scar on the wing",
-   and the scar is exactly the basis of the reveal — it must be split into a separate look whose `reveal_at_s` is no
+   applies to appearance descriptions too (in one demo film, a look description mentioned the very mark the reveal
+   relies on — that detail must be split into a separate look whose `reveal_at_s` is no
    earlier than the reveal).
 4. The online co-occurrence rule (drop any sentence containing both a's label and b's name) is specified in the online
    service's tool contract.
@@ -207,18 +208,18 @@ While `P < active_until_s`, any output containing `term` is treated as a spoiler
 |---|---|---|---|
 | `name` | builder | `canonical_name`, `name_zh`, renderings in each Chinese subtitle track | `name_known_at_s + m_rev` (not generated when `name_public = 1`) |
 | `alias` | builder | non-generic aliases (all languages) | `alias_known_at_s + m_rev` |
-| `identity_clue` | **reviewer** (at least one per output language) | the clue viewers use to recognise the identity, e.g. `scar*`, `伤疤` | the identity link's `reveal_at_s + m_rev` |
-| `event` | reviewer (mandatory for events / facts / objects with `spoiler_critical = 1`) | the key term of the reveal, e.g. `aged` / `变老` | the item's `reveal_at_s + its margin` |
+| `identity_clue` | **reviewer** (at least one per output language) | the clue viewers use to recognise the identity, e.g. `mark*`, `印记` | the identity link's `reveal_at_s + m_rev` |
+| `event` | reviewer (mandatory for events / facts / objects with `spoiler_critical = 1`) | the key term of the reveal, e.g. `disguised` / `伪装` | the item's `reveal_at_s + its margin` |
 | `other` | reviewer | anything | anything |
 
 - **Align synonymous items**: margins differ by type (events 3 s; facts / identity links / looks 1 s). If a spoiler-critical
   event's canary term also appears in a synonymous fact or look, that text's `reveal_at_s` must be no earlier than
   `event reveal_at_s + m_event − m_rev`; otherwise the synonymous text becomes eligible while the canary is still active
   (builder check 11 reports this).
-- **No whole-sentence terms** (e.g. `"the adult dragon = Scales"`): real output never contains them verbatim, so they guard nothing.
+- **No whole-sentence terms** (e.g. `"the stranger = the lost brother"`): real output never contains them verbatim, so they guard nothing.
 - `match`: `word` (whole word; English by word boundaries, Chinese by substring), `phrase` (whole phrase), `regex`
-  (written explicitly by the reviewer, e.g. `scar(s|red)?`). A `word` / `phrase` term ending in `*` means **prefix match**
-  (`scar*` matches scar, scars, scarred, but not Oscar); `*` anywhere else is literal.
+  (written explicitly by the reviewer, e.g. `mark(s|ed)?`). A `word` / `phrase` term ending in `*` means **prefix match**
+  (`mark*` matches mark, marks, marked, but not Denmark); `*` anywhere else is literal.
 - `case_sensitive = 1`: use when a character name coincides with a common noun (`Scales` vs "tan scales").
 - Before matching, both sides are normalised with **NFKC + accent stripping + Traditional→Simplified Chinese**; with
   `case_sensitive = 0`, case folding as well.
@@ -266,7 +267,7 @@ If any check fails, `review_complete` must not be set to 1; problems that can be
 6. **Identity isolation**: check the timing of b-side links per §5.3 rule 1; run the cross-table clue-term scan per rule 3.
 7. **Twist timing**: for every identity link and every event with `kind = reveal`, let C = cues containing b's name or alias
    (or the reveal's key term) whose start lies in `[R − 20, R + 20]`; if C is non-empty, require `R ≥ min(C.start_s)`.
-   A reveal without dialogue (e.g. "aged") must have a human-confirmed record with `spoiler_critical = 1`.
+   A reveal without dialogue (e.g. a silent visual transformation) must have a human-confirmed record with `spoiler_critical = 1`.
 8. **Review coverage**: every "requires reviewed" item in §5.2 is `reviewed`; every identity link and every
    `spoiler_critical = 1` item has canaries in each output language; every `name` / `alias` canary has a `zh` counterpart.
 9. **Real names**: every text column (including `title_info` and `*_zh`) is matched against `blocklist` with zero hits.

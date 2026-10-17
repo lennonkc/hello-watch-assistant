@@ -507,6 +507,11 @@
     padding: 8px 10px; animation: none; background: rgb(12 12 18 / .92);
   }
 }
+@media (max-width: 480px) {
+  .xp-frames { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+  .xp-frame__cap { padding-inline: 5px; font-size: 10.5px; gap: 3px; }
+  .xp-frame__cap .xp-icon { width: 10px; height: 10px; }
+}
 @media (prefers-reduced-motion: reduce) {
   .xp *, .xp *::before, .xp *::after { animation: none !important; transition: none !important; }
   .xp-thread { scroll-behavior: auto; }
