@@ -210,7 +210,7 @@
 
 @keyframes arch-flow { to { stroke-dashoffset: -35; } }
 
-.arch-legend {
+.arch .arch-legend {
   display: flex; flex-wrap: wrap; gap: 8px 18px; margin-top: 18px !important; padding: 0 6px;
   font-size: 12.5px; color: var(--text-muted);
 }
@@ -461,21 +461,36 @@
 .arch-card--good { --c: var(--led-ok); }
 .arch-card--good .arch-eyebrow { color: var(--ok); }
 
-.arch-mini {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 24px; padding: 12px 12px 12px 30px; border-radius: 18px;
+/* Mini pipeline: one raised row per step inside a recessed well, joined by a rail through the step dots. */
+.arch .arch-mini {
+  display: grid; gap: 12px; padding: 14px; border-radius: 20px;
   background: var(--neu-concave); box-shadow: var(--neu-press-sm);
 }
 .arch-mini li {
-  position: relative; display: inline-flex; align-items: center;
-  font-size: 12.5px; font-weight: 600; padding: 5px 11px; border-radius: 999px;
+  --dot: var(--text-faint);
+  position: relative; display: flex; align-items: center; gap: 12px; min-width: 0;
+  padding: 10px 14px; border-radius: 13px; font-size: 13.5px; font-weight: 600; line-height: 1.3;
   background: var(--neu-convex); box-shadow: var(--neu-raise-xs), var(--neu-edge);
 }
-.arch-mini li::before { content: "→"; position: absolute; right: calc(100% + 6px); color: var(--text-faint); font-weight: 400; }
-.arch-mini li:first-child::before {
-  content: ""; width: 7px; height: 7px; right: calc(100% + 10px); border-radius: 50%; background: var(--text-faint);
+.arch-mini li::before {
+  content: ""; width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--dot); box-shadow: 0 0 0 3px color-mix(in srgb, var(--dot) 18%, transparent);
 }
-.arch-mini li.is-ok { color: var(--ok); box-shadow: var(--neu-raise-xs), inset 0 0 0 1.5px color-mix(in srgb, var(--led-ok) 55%, transparent); }
-.arch-mini li.is-locked { color: var(--warn); box-shadow: var(--neu-raise-xs), inset 0 0 0 1.5px color-mix(in srgb, var(--warn) 50%, transparent); }
+.arch-mini li + li::after {
+  content: ""; position: absolute; left: 17px; top: -12px; width: 2px; height: 12px; border-radius: 1px;
+  background: color-mix(in srgb, var(--text-faint) 45%, transparent);
+}
+.arch-mini li.is-ok {
+  --dot: var(--led-ok); color: var(--ok);
+  background: color-mix(in srgb, var(--led-ok) 9%, var(--surface));
+  box-shadow: var(--neu-raise-xs), inset 0 0 0 1.5px color-mix(in srgb, var(--led-ok) 45%, transparent);
+}
+.arch-mini li.is-locked {
+  --dot: var(--warn); color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, var(--surface));
+  box-shadow: var(--neu-raise-xs), inset 0 0 0 1.5px color-mix(in srgb, var(--warn) 42%, transparent);
+}
+.arch-mini li.is-ok::before, .arch-mini li.is-locked::before { box-shadow: 0 0 8px var(--dot); }
 
 .arch-rejected { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; }
 .arch-rejected li { display: grid; gap: 8px; align-content: start; }

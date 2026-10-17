@@ -542,7 +542,12 @@ function setupTilt(panel) {
 
 // ---------- how-it-works tab ----------
 
+// Both reveal() and the fallback observer can reach a card; a second tween would read the first one's "0" as its
+// target and freeze there.
+const counted = new WeakSet();
 function countResult(li, delay) {
+  if (counted.has(li)) return;
+  counted.add(li);
   tweenNumbers(li.querySelector('.arch-result__value'), li, { start: null, delay, dur: 900 });
 }
 

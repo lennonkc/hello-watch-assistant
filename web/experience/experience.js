@@ -22,6 +22,8 @@ const ICONS = {
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   rewind: '<path d="M11 6 4 12l7 6zM20 6l-7 6 7 6z"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',
+  play: '<path d="M8 5.5v13l10.5-6.5z"/>',
+  down: '<path d="M12 5v14M6 13l6 6 6-6"/>',
   tap: '<circle cx="12" cy="12" r="3.5"/><circle cx="12" cy="12" r="8.5" opacity=".5"/>',
 };
 
@@ -88,6 +90,13 @@ const QUICK = [
   { key: 'say', label: 'What did they just say?', question: 'What did they just say?', icon: 'quote' },
 ];
 
+const HOWTO = [
+  ['film', 'Pick a film', 'and press play'],
+  ['pause', 'Pause anywhere', 'the story locks there'],
+  ['tap', 'Ask or tap', 'someone on screen'],
+];
+const TEASER = { id: 'F0LyLRiYJ7I', title: 'Hello Watch Assistant demo walkthrough' };
+
 function loadStyles() {
   const href = new URL('./experience.css', import.meta.url).href;
   if (document.querySelector(`link[href="${href}"]`)) return Promise.resolve();
@@ -126,24 +135,54 @@ class Experience {
 
   // ---------- layout ----------
 
+  /** Demo video. A static poster until clicked, so YouTube is only contacted when the viewer asks for it. */
+  renderTeaser() {
+    const frame = h('div', { class: 'xp-teaser__frame' });
+    const play = () => {
+      const src = `https://www.youtube-nocookie.com/embed/${TEASER.id}?autoplay=1&rel=0&modestbranding=1&playsinline=1`;
+      frame.replaceChildren(h('iframe', {
+        src, title: TEASER.title, allow: 'autoplay; encrypted-media; picture-in-picture; fullscreen',
+        referrerpolicy: 'strict-origin-when-cross-origin',
+      }));
+      frame.classList.add('is-playing');
+      this.video?.pause();
+    };
+    frame.append(h('button', { type: 'button', class: 'xp-teaser__poster', onclick: play, 'aria-label': `Play video: ${TEASER.title}` },
+      h('img', { src: `https://i.ytimg.com/vi/${TEASER.id}/maxresdefault.jpg`, alt: '', loading: 'lazy', decoding: 'async' }),
+      h('span', { class: 'xp-teaser__play', html: icon('play') })));
+    return h('figure', { class: 'xp-teaser' }, frame,
+      h('figcaption', { class: 'xp-teaser__cap' },
+        h('b', {}, 'See it in action'),
+        h('span', {}, 'Gemini on Google Cloud, answering mid-film without spoilers')));
+  }
+
+
   render() {
     const r = this.root;
     r.classList.add('xp');
     r.innerHTML = '';
 
-    const intro = h('div', { class: 'xp-intro' },
-      h('div', { class: 'xp-intro__text' },
+    const intro = h('section', { class: 'xp-hero', 'aria-labelledby': 'xp-hero-h' },
+      h('div', { class: 'xp-hero__copy' },
         h('p', { class: 'xp-eyebrow' }, MOCK ? 'Live demo · mock data' : 'Live demo'),
-        h('h1', { class: 'xp-title' }, 'Pause anywhere. Ask anything.', h('span', {}, ' Get no spoilers.')),
+        h('h1', { id: 'xp-hero-h', class: 'xp-title' }, 'Pause anywhere. Ask anything.', h('span', {}, ' Get no spoilers.')),
         h('p', { class: 'xp-lede' },
           'The assistant only knows what the film has shown up to the moment you pause. ',
           'Everything later stays locked on the server, so it cannot leak into an answer.'),
+        h('ol', { class: 'xp-howto', 'aria-label': 'How to try it' },
+          HOWTO.map(([ic, head, sub], i) => h('li', {},
+            h('span', { class: 'xp-howto__icon', html: icon(ic) }),
+            h('span', { class: 'xp-howto__text' },
+              h('small', {}, `Step ${i + 1}`), h('b', {}, head), h('span', {}, sub))))),
+        h('div', { class: 'xp-hero__cta' },
+          h('button', {
+            type: 'button', class: 'xp-cta',
+            onclick: () => document.getElementById('xp-picker-h')?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
+          }, 'Try it now', h('span', { html: icon('down') })),
+          h('a', { class: 'xp-cta xp-cta--ghost', href: `https://www.youtube.com/watch?v=${TEASER.id}`, target: '_blank', rel: 'noopener' },
+            h('span', { html: icon('play') }), 'Watch on YouTube')),
       ),
-      h('ol', { class: 'xp-howto', 'aria-label': 'How to try it' },
-        h('li', {}, h('b', {}, '1'), 'Pick a film and press play'),
-        h('li', {}, h('b', {}, '2'), 'Pause at any moment'),
-        h('li', {}, h('b', {}, '3'), 'Ask, or tap someone on screen'),
-      ),
+      this.renderTeaser(),
     );
 
     this.cards = h('div', { class: 'xp-cards', role: 'list' },
