@@ -2,6 +2,7 @@
 
 | Variable | Meaning |
 |---|---|
+| `WATCH_CATALOG_ROOT` | Directory holding `catalog/catalog.json` and `ingest/titles/` (default: this repo; point it at a larger catalog for local benchmarks) |
 | `WATCH_PACKS_DIR` | Local directory with `<asset_sha>/master/{pack.db, thumbs/}` (local dev: the ingest cache) |
 | `WATCH_PACKS_GCS` | `gs://<bucket>/<prefix>` with the same layout; downloaded to `WATCH_CACHE_DIR` at startup |
 | `WATCH_VIDEO_DIR` | Local directory with `<asset_sha>.mp4` or `<asset_sha>/proxy_640.mp4`, streamed directly |
@@ -31,6 +32,7 @@ def env_path(name: str) -> pathlib.Path | None:
     return pathlib.Path(v).expanduser() if v else None
 
 
+CATALOG_ROOT = env_path("WATCH_CATALOG_ROOT") or REPO       # dir with catalog/catalog.json + ingest/titles/<id>.json
 PACKS_DIR = env_path("WATCH_PACKS_DIR")
 PACKS_GCS = os.environ.get("WATCH_PACKS_GCS", "").rstrip("/")
 CACHE_DIR = env_path("WATCH_CACHE_DIR") or pathlib.Path("/tmp/watch-packs")

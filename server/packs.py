@@ -41,10 +41,10 @@ class Title:
 
 
 def _catalog() -> list[dict]:
-    doc = json.loads((config.REPO / "catalog" / "catalog.json").read_text(encoding="utf-8"))
+    doc = json.loads((config.CATALOG_ROOT / "catalog" / "catalog.json").read_text(encoding="utf-8"))
     out = []
     for item in doc["items"]:
-        spec = json.loads((config.REPO / "ingest" / "titles" / f"{item['id']}.json").read_text(encoding="utf-8"))
+        spec = json.loads((config.CATALOG_ROOT / "ingest" / "titles" / f"{item['id']}.json").read_text(encoding="utf-8"))
         out.append({"id": item["id"], "sha": spec["expected_asset_sha256"][0], "title": item["title"],
                     "synopsis": item.get("synopsis_full", ""), "license": spec["license"],
                     "attribution": spec.get("license_note", "")})
