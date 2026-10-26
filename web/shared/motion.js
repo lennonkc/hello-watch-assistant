@@ -63,6 +63,9 @@ const narrow = () => innerWidth < 700;
 const NUM_RE = /(\d[\d,]*(?:\.\d+)?)/;
 const tweenVals = new Map(); // key -> numbers currently on screen
 const tweenRuns = new Map(); // key -> run token
+// text node -> { target, shown } while a tween owns it, so a second call in the same observer batch does not read
+// the first call's "0" as its target.
+const tweenTexts = new WeakMap();
 
 function firstNumText(el) {
   const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
@@ -78,7 +81,8 @@ function firstNumText(el) {
 function tweenNumbers(el, key, { start, delay = 0, dur = 650 } = {}) {
   const node = el && firstNumText(el);
   if (!node) return;
-  const target = node.data;
+  const owned = tweenTexts.get(node);
+  const target = owned && owned.shown === node.data ? owned.target : node.data;
   const parts = target.split(NUM_RE);
   const nums = [], specs = [];
   for (let i = 1; i < parts.length; i += 2) {
@@ -88,7 +92,12 @@ function tweenNumbers(el, key, { start, delay = 0, dur = 650 } = {}) {
   const prev = start ?? tweenVals.get(key);
   const a = prev && prev.length === nums.length ? prev.slice() : nums.map(() => 0);
   tweenRuns.set(key, null);
-  if (reduced || a.every((x, i) => x === nums[i])) { tweenVals.set(key, nums); return; }
+  if (reduced || a.every((x, i) => x === nums[i])) {
+    node.data = target;
+    tweenTexts.delete(node);
+    tweenVals.set(key, nums);
+    return;
+  }
   const run = {};
   tweenRuns.set(key, run);
   const fmt = (x, sp) => (sp.comma
@@ -96,6 +105,7 @@ function tweenNumbers(el, key, { start, delay = 0, dur = 650 } = {}) {
     : x.toFixed(sp.dec));
   const write = (vals) => {
     node.data = parts.map((p, i) => (i % 2 ? fmt(vals[(i - 1) / 2], specs[(i - 1) / 2]) : p)).join('');
+    tweenTexts.set(node, { target, shown: node.data });
   };
   write(a);
   const t0 = performance.now() + delay;
@@ -108,6 +118,7 @@ function tweenNumbers(el, key, { start, delay = 0, dur = 650 } = {}) {
     tweenVals.set(key, cur);
     if (t < 1) { write(cur); requestAnimationFrame(step); return; }
     node.data = target;
+    tweenTexts.delete(node);
     tweenVals.set(key, nums);
     tweenRuns.delete(key);
   };
