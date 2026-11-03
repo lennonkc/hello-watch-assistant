@@ -115,9 +115,9 @@ Each prompt's placeholders are validated on load, so a broken secret fails fast 
 
 All three films are processed end to end with the v1.1 pipeline:
 
-| Film | Shot captions / entities | Speaker-attributed cues | Recaps | Video windows | Embeddings |
+| Film | Shot captions / entities | Speaker-attributed dialogue lines | Recaps | Video windows | Embeddings |
 |---|---|---|---|---|---|
-| Sintel | 175 / 283 | 104 / 104 | 10 | 40 | ~405 |
+| Sintel | 175 / 283 | 26 / 26 (× 4 official subtitle tracks) | 10 | 40 | ~405 |
 | Tears of Steel | 138 / 235 | 93 / 95 | 12 | 32 | ~343 |
 | Elephants Dream | 122 / 225 | 92 / 93 | 10 | 29 | ~305 |
 
