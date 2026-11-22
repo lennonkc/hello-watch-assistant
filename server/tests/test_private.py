@@ -226,6 +226,19 @@ def test_unlocked_titles_frames_and_video(client, world):
     assert g["eligible"]["scene"] == 1                               # the device-auto pack gates like master
 
 
+def test_the_bench_token_unlocks_without_an_access_code(client, monkeypatch):
+    """The benchmark host tests a private preview title with its bench token only; a wrong or unset token does not."""
+    from server import main
+    monkeypatch.setattr(config, "BENCH_TOKEN", "t0ken")
+    ok = {main.BENCH_HEADER: "t0ken"}
+    assert client.get("/api/titles/pv1/gate?p=53", headers=ok).status_code == 200
+    assert "pv1" in [t["id"] for t in client.get("/api/titles", headers=ok).json()]
+    assert client.get("/api/titles/pv1/gate?p=53", headers={main.BENCH_HEADER: "wrong"}).status_code == 404
+    monkeypatch.setattr(config, "BENCH_TOKEN", "")
+    assert client.get("/api/titles/pv1/gate?p=53", headers={main.BENCH_HEADER: ""}).status_code == 404
+    assert client.get("/api/health", headers=ok).json()["titles"] == 1          # still only public films counted
+
+
 def test_unlock_sets_the_cookie_and_limits_attempts(client):
     r = client.post("/api/unlock", json={"code": CODE})
     assert r.status_code == 204

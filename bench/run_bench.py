@@ -31,7 +31,7 @@ import uuid
 
 if __package__ in (None, ""):                                    # run as a script: python bench/run_bench.py
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-from bench.common import CASES_DIR, REPO, RUNS_DIR, read_cases, read_jsonl, write_jsonl  # noqa: E402
+from bench.common import CASES_DIR, REPO, RUNS_DIR, case_set, read_cases, read_jsonl, write_jsonl  # noqa: E402
 
 TIMEOUT_S = 180
 TOKEN_HEADER = "X-Watch-Bench-Token"
@@ -254,6 +254,10 @@ def main(argv=None) -> int:
         token = open(args.token_file, encoding="utf-8").read().strip() or None
 
     cases = read_cases(args.cases)
+    if len({case_set(c) == "generated" for c in cases}) > 1:
+        print("ERROR: generated and hand-written cases in one run; run them separately (scorecards never mix them)",
+              file=sys.stderr)
+        return 2
     if args.only:
         pre = tuple(p for p in args.only.split(",") if p)
         cases = [c for c in cases if c["id"].startswith(pre)]

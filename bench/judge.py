@@ -66,17 +66,8 @@ def _pack(c: dict):
 # ── pack lookups ─────────────────────────────────────────────────────
 
 def eligible_text(c: dict) -> str:
-    """Every text eligible at P (allow_auto), English and Chinese, + character looks already shown + visible names of
-    characters already on screen + title info."""
-    pv, P = _pack(c), c["P"]
-    items = pv.gate(P).eligible()
-    texts = [it.text for it in items if it.text] + [pv.zh[k] for it in items if (k := (it.item_type, it.item_id)) in pv.zh]
-    looks = [lk.get(f) or "" for lk in pv.data.get("character_looks", [])
-             if pv.reviewed_ok(lk.get("review_state")) and lk.get("reveal_at_s") is not None
-             and lk["reveal_at_s"] + pv.m_rev <= P + 1e-9 for f in ("description_en", "description_zh")]
-    names = [pv.visible_name(cid, P, lang) for cid in pv.chars if pv.appeared(cid, P) for lang in ("en", "zh")]
-    titles = [t.get(f) or "" for t in pv.title_info for f in ("text_en", "text_zh")]
-    return "\n".join(texts + looks + names + titles)
+    """Every text eligible at the case's P (see `PackView.eligible_text`)."""
+    return _pack(c).eligible_text(c["P"])
 
 
 def future_facts(c: dict, limit: int = 30) -> list[str]:
@@ -291,7 +282,8 @@ def judge_run(run_dir: pathlib.Path, cases: dict, use_llm: bool, use_rules: bool
         answer_text = "\n".join([r.get("answer") or ""] + [t for t in r.get("evidence_text") or [] if t])
         checked = answer_text + ("\n" + r["streamed_text"] if r.get("streamed_text") else "")
         sha = hashlib.sha256(checked.encode()).hexdigest()[:16]
-        row = {"id": r["id"], "file": c["_file"], "set": case_set(c), "category": c["category"], "title": c["title"],
+        row = {"id": r["id"], "file": c["_file"], "set": case_set(c), "private": bool(c.get("private")),
+               "category": c["category"], "title": c["title"],
                "lang": c["lang"], "expect": c["expect"], "status": r["status"], "error": r.get("error"),
                "http_status": r.get("http_status"), "stream_end": r.get("stream_end"), "P": c["P"],
                "t_total_ms": r.get("t_total_ms"), "t_first_text_ms": r.get("t_first_text_ms"),
@@ -301,6 +293,7 @@ def judge_run(run_dir: pathlib.Path, cases: dict, use_llm: bool, use_rules: bool
                "guard_rewritten": r.get("guard_rewritten"), "usage": usage_summary(r.get("usage"), model),
                "server_first_text_ms": (r.get("timing") or {}).get("first_text_ms"), "flow": r.get("flow"),
                "answer": r.get("answer"), "answer_sha": sha,
+               "n_evidence": len(r.get("evidence_text") or []) if r["status"] == "ok" else None,
                "include_hits": hits(c.get("must_include_any"), answer_text) if c.get("must_include_any") else None}
         if use_rules:
             row.update(rule_check(c, r.get("answer") or "", r.get("evidence_text") or [], r.get("streamed_text")))
@@ -363,6 +356,7 @@ def summarize(rows: list[dict]) -> dict:
     ruled = [r for r in rows if r.get("rule_leaks") is not None]
     leak_rows = [r for r in rows if r.get("rule_leaks") is not None or (r.get("llm") or {}).get("verdict")]
     usage_rows = [r["usage"] for r in ok if r.get("usage")]
+    ev_rows = [r for r in ok if r.get("n_evidence") is not None and r["expect"] != "decline"]
     tool_usage: dict = {}
     for r in ok:
         for t in r["tools"]:
@@ -373,6 +367,9 @@ def summarize(rows: list[dict]) -> dict:
         "correct_pct": _pct(r["llm"]["verdict"] == "correct" for r in acc_rows),
         "appropriate_pct": _pct(bool(r["llm"].get("appropriate")) for r in graded),
         "keyword_hit_pct": _pct(bool(r["include_hits"]) for r in kw_rows),
+        "evidence_pct": _pct(r["n_evidence"] > 0 for r in ev_rows),
+        "evidence_pct_en": _pct(r["n_evidence"] > 0 for r in ev_rows if r.get("lang") == "en"),
+        "evidence_pct_zh": _pct(r["n_evidence"] > 0 for r in ev_rows if r.get("lang") == "zh"),
         "leak_pct": _pct(bool(r.get("rule_leaks")) or bool((r.get("llm") or {}).get("leak")) for r in leak_rows),
         "leaks_any": sum(1 for r in leak_rows if r.get("rule_leaks") or (r.get("llm") or {}).get("leak")),
         "leaks_rule": sum(1 for r in ruled if r["rule_leaks"]) if ruled else None,
@@ -420,7 +417,9 @@ def _delta(a, b) -> str:
 METRICS = [("cases", "n"), ("errors (no answer; graded as non-answers)", "errors"),
            ("accuracy % (correct = 1, partial = 0.5)", "accuracy_pct"),
            ("fully correct %", "correct_pct"), ("appropriate behaviour %", "appropriate_pct"),
-           ("key-term hit %", "keyword_hit_pct"), ("spoiler leak % (rules ∪ LLM)", "leak_pct"),
+           ("key-term hit %", "keyword_hit_pct"),
+           ("answers with ≥ 1 evidence line % (expect ≠ decline)", "evidence_pct"), ("· en", "evidence_pct_en"),
+           ("· zh", "evidence_pct_zh"), ("spoiler leak % (rules ∪ LLM)", "leak_pct"),
            ("spoiler leaks, cases", "leaks_any"), ("· rule gate", "leaks_rule"), ("· judge only", "leaks_judge_only"),
            ("real-name leaks (cases)", "real_name_leaks"), ("guard rewrites %", "guard_rewrite_pct"),
            ("streamed answers %", "streamed_pct"), ("tool calls / answer", "tools_per_answer"),
@@ -436,14 +435,17 @@ LATENCY = [("server total (answer.latency_ms)", "latency_server_ms"),
            ("client first text", "latency_first_text_ms"), ("client first tool", "latency_first_tool_ms")]
 
 
-def report(runs: dict[str, list[dict]], out: pathlib.Path, meta: dict | None = None) -> str:
+def report(runs: dict[str, list[dict]], out: pathlib.Path, meta: dict | None = None, show_private: bool = False) -> str:
+    """scorecard.json / scorecard.md (everything) and summary.md (for job logs: numbers and case ids; for a private
+    preview title's cases no question, answer, rule-hit or error text unless `show_private`)."""
     shared = set.intersection(*({r["id"] for r in rows} for rows in runs.values()))
     partial = {n: len(rows) - len(shared) for n, rows in runs.items() if len(rows) > len(shared)}
     runs = {n: [r for r in rows if r["id"] in shared] for n, rows in runs.items()}     # compare like with like
     names = list(runs)
     two = len(names) == 2
     files = sorted({r["file"] for rows in runs.values() for r in rows})
-    groups = {"all": lambda r: True, "set: base": lambda r: r["set"] == "base", "set: new": lambda r: r["set"] == "new"}
+    groups = {"all": lambda r: True, "set: base": lambda r: r["set"] == "base", "set: new": lambda r: r["set"] == "new",
+              "set: generated": lambda r: r["set"] == "generated"}
     groups.update({f"file: {f}": (lambda f: lambda r: r["file"] == f)(f) for f in files})
     cats = sorted({r["category"] for rows in runs.values() for r in rows})
     card = {"runs": names, "meta": meta or {}, "prompt_sha": PROMPT_SHA,
@@ -494,7 +496,7 @@ def report(runs: dict[str, list[dict]], out: pathlib.Path, meta: dict | None = N
     for n in names:
         L.append(f"- **{n}**: " + (", ".join(f"{t} ×{c}" for t, c in allg[n]["tool_usage"].items()) or "—"))
     L += ["", "## Leaks", ""]
-    leak_lines = []
+    leak_lines, leak_short = [], []
     for n, rows in runs.items():
         for r in rows:
             llm = r.get("llm") or {}
@@ -503,11 +505,16 @@ def report(runs: dict[str, list[dict]], out: pathlib.Path, meta: dict | None = N
                 if llm.get("leak"):
                     why.append(f"llm: {llm.get('leak_quote', '')[:120]!r} ⇐ {llm.get('leak_fact', '')[:120]}")
                 kind = "rule" if r.get("rule_leaks") or r.get("real_names") else "judge only"
-                leak_lines.append(f"- **{n}** `{r['id']}` ({r['category']}) [{kind}] — " + "; ".join(why))
+                head_ = f"- **{n}** `{r['id']}` ({r['category']}) [{kind}] — "
+                leak_lines.append(head_ + "; ".join(why))
+                hide = r.get("private") and not show_private
+                leak_short.append(head_ + (f"{len(why)} finding(s), text hidden (private preview title)" if hide
+                                           else "; ".join(why)))
     L += leak_lines[:MAX_LEAK_LINES] or ["- none"]
     if len(leak_lines) > MAX_LEAK_LINES:
         L.append(f"- … {len(leak_lines) - MAX_LEAK_LINES} more in scorecard.json / judged.jsonl")
     err_lines = error_lines(runs)
+    err_short = error_lines(runs, show_private)
     if err_lines:
         L += ["", "## Errors", ""] + err_lines[:MAX_ERROR_LINES]
         if len(err_lines) > MAX_ERROR_LINES:
@@ -515,17 +522,18 @@ def report(runs: dict[str, list[dict]], out: pathlib.Path, meta: dict | None = N
     md = "\n".join(L) + "\n"
     (out / "scorecard.md").write_text(md, encoding="utf-8")
     summary += ["", "## Failing cases", ""] + failing_lines(runs)
-    if err_lines:
-        summary += ["", f"## Errors ({len(err_lines)})", ""] + err_lines[:MAX_ERROR_LINES]
-    if leak_lines:
-        summary += ["", f"## Leaks (first {min(10, len(leak_lines))} of {len(leak_lines)})", ""] + leak_lines[:10]
+    if err_short:
+        summary += ["", f"## Errors ({len(err_short)})", ""] + err_short[:MAX_ERROR_LINES]
+    if leak_short:
+        summary += ["", f"## Leaks (first {min(10, len(leak_short))} of {len(leak_short)})", ""] + leak_short[:10]
     summary += ["", f"Full scorecard: {out / 'scorecard.md'}"]
     (out / "summary.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
     return md
 
 
-def error_lines(runs: dict[str, list[dict]]) -> list[str]:
-    """One line per errored case: what the client saw (HTTP status, how the stream ended, the error event)."""
+def error_lines(runs: dict[str, list[dict]], show_private: bool = True) -> list[str]:
+    """One line per errored case: what the client saw (HTTP status, how the stream ended, the error event; the
+    message is left out for a private preview title's case unless `show_private`)."""
     out = []
     for n, rows in runs.items():
         for r in rows:
@@ -533,7 +541,9 @@ def error_lines(runs: dict[str, list[dict]]) -> list[str]:
                 how = ", ".join(x for x in (f"HTTP {r['http_status']}" if r.get("http_status") else "",
                                             f"stream {r['stream_end']}" if r.get("stream_end") else "",
                                             f"{r['t_total_ms']} ms" if r.get("t_total_ms") is not None else "") if x)
-                out.append(f"- **{n}** `{r['id']}` ({how or '?'}) — {str(r.get('error'))[:220]}")
+                msg = "message hidden (private preview title)" if r.get("private") and not show_private \
+                    else str(r.get("error"))[:220]
+                out.append(f"- **{n}** `{r['id']}` ({how or '?'}) — {msg}")
     return out
 
 
@@ -591,62 +601,90 @@ def _catalog() -> dict:
     return out
 
 
-def lint(cases: list[dict], with_packs: bool) -> int:
-    """Offline consistency checks; with packs also the gate checks (must_not_include must not be eligible at P yet)."""
+def served_titles(served: list[dict]) -> dict:
+    """Catalog-like entries {id: {title, duration_s, shas}} of served titles (`.cache/bench/served.json`), so cases of
+    a private preview title (not in catalog/catalog.json) lint too."""
+    return {t["id"]: {"title": t["title"], "duration_s": t.get("duration_s"), "shas": [t["sha"]]} for t in served}
+
+
+def lint(cases: list[dict], with_packs: bool, titles: dict | None = None, show_private: bool = False,
+         max_lines: int | None = None) -> int:
+    """Offline consistency checks; with packs also the checks against the packs (the case's pack is there, P within
+    it, must_not_include not eligible at P yet, must_include_any found in eligible text). `titles` adds catalog
+    entries (served private titles). A private case's message says only which check failed, never the text."""
     errors, warns = [], []
-    cat = _catalog()
+    cat = {**_catalog(), **(titles or {})}
+
+    def add(bucket: list, c: dict, kind: str, detail: str = "") -> None:
+        hide = c.get("private") and not show_private
+        bucket.append(f"{c['id']}: {kind}" + ("" if hide or not detail else f": {detail}"))
+
     for c in cases:
-        cid = c["id"]
-        errors += [f"{cid}: {e}" for e in C.validate(c)]
+        for e in C.validate(c):
+            add(errors, c, "schema", e)
         item = cat.get(c.get("content_id"))
         if item is None:
-            errors.append(f"{cid}: content_id not in catalog/catalog.json")
+            add(errors, c, "content_id not in catalog/catalog.json (nor a served title)")
         else:
             if c.get("title") != item["title"]:
-                errors.append(f"{cid}: title {c.get('title')!r} ≠ catalog {item['title']!r}")
+                add(errors, c, "title differs from the catalog", f"{c.get('title')!r} ≠ {item['title']!r}")
             if item["shas"] and c.get("asset_sha256") not in item["shas"]:
-                errors.append(f"{cid}: asset_sha256 is not the title spec's expected asset")
+                add(errors, c, "asset_sha256 is not the title spec's expected asset")
             dur = item["duration_s"]
             if dur and isinstance(c.get("P"), (int, float)) and c["P"] > dur:
-                errors.append(f"{cid}: P={c['P']} beyond duration {dur}")
+                add(errors, c, "P beyond the duration", f"P={c['P']} > {dur}")
         text = "\n".join(_strings({k: v for k, v in c.items() if not k.startswith("_")}))
-        errors += [f"{cid}: contains {s!r}" for s in FORBIDDEN if s in text]
+        for s in FORBIDDEN:
+            if s in text:
+                add(errors, c, "contains a string the leak scanner flags", repr(s))
         meta_text = "\n".join([c.get("notes") or "", c.get("source") or ""]
                               + [m.get("note", "") for f in ("must_include_any", "must_not_include", "flag_if_any")
                                  for m in c.get(f) or [] if isinstance(m, dict)])
         if CJK_ANY.search(meta_text):
-            errors.append(f"{cid}: notes / source must be English")
-        if (case_set(c) == "new") != cid.startswith("new:"):
-            warns.append(f"{cid}: new-set ids start with 'new:' (set={case_set(c)})")
+            add(errors, c, "notes / source must be English")
+        for want, prefix in (("new", "new:"), ("generated", "gen:")):
+            if (case_set(c) == want) != c["id"].startswith(prefix):
+                add(warns, c, f"{want}-set ids start with '{prefix}' (set={case_set(c)})")
         qtext = viewer_text(c)
         if c.get("lang") == "zh" and not CJK_ANY.search(c["question"]):
-            warns.append(f"{cid}: lang zh but the question has no Chinese")
+            add(warns, c, "lang zh but the question has no Chinese")
         if c.get("lang") == "en" and CJK_ANY.search(qtext):
-            warns.append(f"{cid}: lang en but the question has Chinese")
+            add(warns, c, "lang en but the question has Chinese")
         ref = "\n".join([c.get("reference") or ""] + [str(marker_label(m)) for m in c.get("must_include_any") or []])
         clash = hits(c.get("must_not_include"), ref)
         if clash:
-            errors.append(f"{cid}: must_not_include {clash} matches its own reference / must_include_any")
+            add(errors, c, "must_not_include matches its own reference / must_include_any", str(clash))
         if c.get("category") == "followup" and not c.get("history"):
-            errors.append(f"{cid}: category followup needs history")
+            add(errors, c, "category followup needs history")
         if c.get("category") == "injection" and c.get("expect") == "decline" and not c.get("must_not_include"):
-            warns.append(f"{cid}: injection probe without must_not_include")
+            add(warns, c, "injection probe without must_not_include")
     if with_packs:
         for c in cases:
             if c["id"].startswith("probe:"):
                 continue
+            if C.pack_path(c["asset_sha256"], PACKS) is None:
+                add(errors, c, "no pack for asset_sha256 among the packs given", str(PACKS))
+                continue
+            pv = _pack(c)
+            dur = pv.asset.get("duration_s")
+            if dur and c["P"] > dur:
+                add(errors, c, "P beyond the pack's duration", f"P={c['P']} > {dur}")
             txt = eligible_text(c)
             legal = [m for m in c.get("must_not_include") or []
                      if not (isinstance(m, dict) and m.get("lint_allow_eligible")) and marker_hits(m, txt)]
             if legal:
-                errors.append(f"{c['id']} P={c['P']}: must_not_include already eligible at P: "
-                              f"{[marker_label(m) for m in legal]}")
+                add(errors, c, f"must_not_include already eligible at P={c['P']}", str([marker_label(m) for m in legal]))
             if c.get("must_include_any") and c["lang"] == "en" and not hits(c["must_include_any"], txt):
-                warns.append(f"{c['id']} P={c['P']}: no must_include_any term found verbatim in eligible text")
-    for w in warns:
-        print("note", w)
-    for e in errors:
-        print("ERROR", e)
+                add(warns, c, f"no must_include_any term found verbatim in eligible text at P={c['P']}")
+    shown = 0
+    for kind, msgs in (("ERROR", errors), ("note", warns)):
+        for m in msgs:
+            if max_lines is not None and shown >= max_lines:
+                break
+            print(kind, m)
+            shown += 1
+    if max_lines is not None and len(errors) + len(warns) > shown:
+        print(f"... {len(errors) + len(warns) - shown} more")
     by: dict = {}
     for c in cases:
         by.setdefault((c["_file"], c["category"]), 0)
@@ -674,6 +712,10 @@ def main(argv=None) -> int:
     ap.add_argument("--packs", help="master packs root (<asset_sha>/master/pack.db); default BENCH_PACKS_DIR / "
                                     "WATCH_PACKS_DIR")
     ap.add_argument("--lint", action="store_true")
+    ap.add_argument("--titles", help="served titles JSON (.cache/bench/served.json): lint cases of served private titles")
+    ap.add_argument("--show-private", action="store_true",
+                    help="print question / answer / rule-hit text of private preview titles' cases too")
+    ap.add_argument("--max-lines", type=int, default=None, help="lint: print at most N error / note lines")
     ap.add_argument("--no-llm", action="store_true", help="do not call the LLM judge (cached grades are still used)")
     ap.add_argument("--no-rules", action="store_true", help="no pack lookups (cached rule results are still used)")
     ap.add_argument("--model", default=DEFAULT_MODEL, help="answering model for cost estimates when usage has none")
@@ -686,12 +728,16 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     PACKS = pathlib.Path(args.packs).expanduser() if args.packs else C.packs_dir()
     if args.lint:
-        return lint(read_cases(args.cases, strict=False), with_packs=PACKS is not None)
+        titles = served_titles(json.loads(pathlib.Path(args.titles).read_text(encoding="utf-8"))) if args.titles else None
+        return lint(read_cases(args.cases, strict=False), with_packs=PACKS is not None, titles=titles,
+                    show_private=args.show_private, max_lines=args.max_lines)
     if not args.runs:
         ap.error("give at least one run (or --lint)")
     if not args.no_rules and PACKS is None:
         ap.error("the rule gate needs --packs (or BENCH_PACKS_DIR); use --no-rules to skip it")
     by_id = {c["id"]: c for c in read_cases(args.cases)}
+    if len({case_set(c) == "generated" for c in by_id.values()}) > 1:
+        raise SystemExit("generated and hand-written cases together: grade them as separate runs (--cases)")
     runs, meta = {}, {}
     for spec in args.runs:
         merged, name, m = {}, None, {}
@@ -712,7 +758,7 @@ def main(argv=None) -> int:
         out = _run_path(args.runs[0].split("+")[0])
     else:
         out = RUNS_DIR / ("compare-" + "-vs-".join(pathlib.Path(r).name.replace("+", "_") for r in args.runs))
-    md = report(runs, out, meta)
+    md = report(runs, out, meta, args.show_private)
     if args.summary:
         print((out / "summary.md").read_text(encoding="utf-8"))
     elif not args.quiet:

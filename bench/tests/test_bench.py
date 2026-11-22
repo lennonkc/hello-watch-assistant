@@ -47,6 +47,10 @@ def test_marker_matching_folds_text_and_respects_word_boundaries():
     assert C.marker_hits({"regex": r"^\s*yes\b", "ignore_case": True}, "Yes, it is.")
     assert C.canary_hits({"term": "mark*", "match": "word"}, "she was marked")
     assert not C.canary_hits({"term": "mark*", "match": "word"}, "Denmark")
+    # the pack's boundary rule (ingest.textnorm.LATIN_WORD): CJK and other scripts are boundaries, Latin letters not
+    assert C.marker_hits("Scales", "史科尔斯Scales的")
+    assert C.marker_hits("Bob", "Bobа")                                            # Cyrillic а after it
+    assert not C.marker_hits("Bob", "Bobø") and not C.marker_hits("Bob", "Bob2")
 
 
 # ── rule gate ────────────────────────────────────────────────────────

@@ -61,7 +61,9 @@ session_service = InMemorySessionService()
 
 # ── catalog, media and gate ─────────────────────────────────────────
 
-# True while the request carries a valid access code (cookie `watch_access`): private preview titles exist for it.
+# True while the request carries a valid access code (cookie `watch_access`) or the bench token (header
+# `X-Watch-Bench-Token`, so the benchmark host can test a private preview title without knowing any access code):
+# private preview titles exist for it.
 UNLOCKED: contextvars.ContextVar[bool] = contextvars.ContextVar("watch_unlocked", default=False)
 PRIVATE_HEADERS = {"Cache-Control": "private, no-store"}
 
@@ -76,7 +78,8 @@ class AccessMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
-        token = UNLOCKED.set(STORE.unlocked(HTTPConnection(scope).cookies.get(config.ACCESS_COOKIE)))
+        conn = HTTPConnection(scope)
+        token = UNLOCKED.set(STORE.unlocked(conn.cookies.get(config.ACCESS_COOKIE)) or is_bench(conn))
         try:
             await self.app(scope, receive, send)
         finally:
