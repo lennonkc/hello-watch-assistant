@@ -48,6 +48,15 @@ def test_invalid_ops_rejected(pack, bad):
         apply_patch(pack, patch("reviewer-1", bad))
 
 
+def test_blocklist_add_already_derived_is_noop(pack):
+    pack["blocklist"].append({"term": "Jan Testperson", "lang": "en", "person_ref": "p22", "source": "credits"})
+    row = {"term": "Jan Testperson", "lang": "en", "person_ref": "p22", "source": "review"}
+    out = apply_patch(pack, patch("claude-prereview", {"op": "add", "table": "blocklist", "row": row}))
+    assert [r["source"] for r in out["blocklist"] if r["term"] == "Jan Testperson"] == ["credits"]
+    with pytest.raises(PatchError):     # the same term with a different person_ref is still a conflict
+        apply_patch(pack, patch("claude-prereview", {"op": "add", "table": "blocklist", "row": {**row, "person_ref": "p23"}}))
+
+
 def test_reviewer_must_be_role_id(pack):
     with pytest.raises(PatchError):
         apply_patch(pack, patch("Jane Doe", {"op": "approve", "table": "events", "key": {"event_id": "e001"}}))
