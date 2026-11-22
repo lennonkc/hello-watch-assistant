@@ -85,19 +85,6 @@ class AccessMiddleware:
 app.add_middleware(AccessMiddleware)
 
 
-class _RedactUnlock(logging.Filter):
-    """Access logs show `/api/unlock` without its query string (the access code)."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        args = record.args
-        if isinstance(args, tuple) and len(args) >= 3 and str(args[2]).startswith("/api/unlock"):
-            record.args = args[:2] + ("/api/unlock",) + args[3:]
-        return True
-
-
-logging.getLogger("uvicorn.access").addFilter(_RedactUnlock())
-
-
 def _title(title_id: str):
     t = STORE.titles.get(title_id)
     if t is None or (t.hidden and not UNLOCKED.get()):
@@ -130,14 +117,20 @@ def titles():
     return JSONResponse(out, headers=PRIVATE_HEADERS if unlocked else None)
 
 
-@app.get("/api/unlock")
-def unlock(request: Request, code: str = ""):
-    """Access code → 204 with the `watch_access` cookie (30 days), or 404. At most `UNLOCK_PER_MINUTE` attempts per IP
-    and minute (429 after that), so codes cannot be guessed quickly."""
+@app.post("/api/unlock")
+async def unlock(request: Request):
+    """Access code (JSON body `{"code": "…"}`; never in a URL, so it reaches no log) → 204 with the `watch_access`
+    cookie (30 days), or 404. At most `UNLOCK_PER_MINUTE` attempts per IP and minute, malformed ones included (429
+    after that), so codes cannot be guessed quickly."""
     if wait := UNLOCKS.check(client_ip(request)):
         return JSONResponse({"message": "Too many attempts. Try again in a minute.", "retry_after_s": wait},
                             status_code=429, headers={"Retry-After": str(wait), **PRIVATE_HEADERS})
-    if not STORE.unlocked(code):
+    try:
+        data = await request.json()
+    except Exception:                                      # not JSON: same answer as a wrong code
+        data = None
+    code = data.get("code") if isinstance(data, dict) else None
+    if not isinstance(code, str) or not STORE.unlocked(code):
         raise HTTPException(404, "not found")
     r = Response(status_code=204, headers=PRIVATE_HEADERS)
     r.set_cookie(config.ACCESS_COOKIE, code, max_age=config.ACCESS_COOKIE_DAYS * 86400, path="/", secure=True,

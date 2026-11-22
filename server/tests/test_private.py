@@ -227,27 +227,20 @@ def test_unlocked_titles_frames_and_video(client, world):
 
 
 def test_unlock_sets_the_cookie_and_limits_attempts(client):
-    r = client.get("/api/unlock", params={"code": CODE})
+    r = client.post("/api/unlock", json={"code": CODE})
     assert r.status_code == 204
     c = r.headers["set-cookie"]
     for part in (f"watch_access={CODE}", "HttpOnly", "Max-Age=2592000", "Path=/", "SameSite=lax", "Secure"):
         assert part in c
     assert r.headers["cache-control"] == "private, no-store"
-    assert client.get("/api/unlock", params={"code": "nope"}).status_code == 404
-    assert client.get("/api/unlock").status_code == 404
-    codes = [client.get("/api/unlock", params={"code": f"guess{i}"}).status_code for i in range(10)]
-    assert codes[:7] == [404] * 7 and codes[7:] == [429] * 3        # 10 attempts per minute, the first 3 above
-    assert client.get("/api/unlock", params={"code": CODE}).status_code == 429
-
-
-def test_unlock_query_is_redacted_from_access_logs():
-    import logging
-
-    from server import main
-    rec = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d',
-                            ("1.2.3.4:5", "GET", f"/api/unlock?code={CODE}", "1.1", 204), None)
-    main._RedactUnlock().filter(rec)
-    assert CODE not in rec.getMessage() and "/api/unlock" in rec.getMessage()
+    g = client.get("/api/unlock", params={"code": CODE})                # never in a URL: no GET form
+    assert g.status_code in (404, 405) and "set-cookie" not in g.headers
+    assert client.post("/api/unlock", json={"code": "nope"}).status_code == 404
+    assert client.post("/api/unlock", content=b"not json").status_code == 404
+    assert client.post("/api/unlock", json={"code": 42}).status_code == 404
+    codes = [client.post("/api/unlock", json={"code": f"guess{i}"}).status_code for i in range(10)]
+    assert codes[:6] == [404] * 6 and codes[6:] == [429] * 4        # 10 attempts per minute, 4 above
+    assert client.post("/api/unlock", json={"code": CODE}).status_code == 429
 
 
 def test_check_pack_reports_what_the_service_would_miss(tmp_path):

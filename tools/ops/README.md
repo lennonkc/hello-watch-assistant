@@ -26,12 +26,14 @@ prints the scorecard summary and failing case ids (the full scorecard stays in `
 `deploy/web/deploy.sh` is the full production deploy (service account, IAM, 100 % traffic); the agent prompts ship in
 the image (`prompts/agent/`).
 
-## Jobs (`JOB=<name>` in `params.env`, run with `tools/ops/run.sh job`)
+## Jobs (`JOB=<name>[,<name>…]` in `params.env`, run with `tools/ops/run.sh job`; several run in order and stop at the first failure)
 
 | Job | What it does | Writes |
 |---|---|---|
 | `inspect-packs` | per public film: pack versions per distribution in the ingest cache and under the bucket prefixes, raw `{oNN}` / `{other}` placeholders, blank and out-of-order cues; per `PRIVATE_TITLE_SHAS` entry: where its pack lives, manifest flags, row counts, vectors, story bounds, recaps, speakers, characters, safeguards, thumbnails, what the server would miss (`server.packs.check_pack`), whether the film file is under `HELLO_WATCH_MOVIES_DIR` (matched by sha256) and which local catalog JSON describes it (path and field names only) | nothing |
 
+| `publish-public-packs` | the ingest cache's master pack of each public film (pack.db, MANIFEST.json, pack.json, thumbs/) → `<PACKS_PREFIX>/<sha>/master/`, only if it has no raw `{oNN}` / `{other}` / `{cNN}` placeholders or blank cues and every file of its manifest is there; says where any other `{…}` token sits and whether a viewer could see it; uploads only files that are missing or differ in size, pack.db last; checks the service account can read the bucket. Never writes under the live `demo-packs` | the bucket (new prefix) |
+| `publish-private-title` | for each `PRIVATE_TITLE_SHAS` entry: the newest device-auto / master pack (device packs dir or ingest cache) with the thumbnails next to it → `<PACKS_PREFIX>/<sha>/<dist>/`; a 640 px H.264 preview (about 400 kbps + 64 kbps stereo AAC, a keyframe every 2 s, faststart, no container metadata) of the local film file (matched by sha256) → `previews/<sha>-640.mp4`; then `<PRIVATE_PREFIX>/titles.json` with the title (local `ingest/titles/<id>.json`) and a synopsis (local `catalog/catalog.json` `synopsis_full`, cut at a sentence end within 260 characters, printed for review) and `PRIVATE_ACCESS_SHA256`. Resumable; `PREVIEW_REBUILD=1` re-encodes | the bucket (new prefixes) |
 | `bench-show` | per case of a graded run (`BENCH_SHOW_RUN`, default the latest; `BENCH_SHOW_CASES`, default every failing case): P, language, question, answer (≤ 400 characters), rule hits with the matched text (re-checked with this commit's rules when the bench's packs are in `.cache/packs`), the judge's reason, timings, tools; at most 120 lines | nothing |
 | `logs` | Cloud Logging of the `TAG` revision for the last `LOGS_SINCE` (default 2h): severity ≥ WARNING plus the question records flagged error / cut_off / retried, optionally narrowed by `LOGS_FILTER`; time, severity and the first 300 characters | nothing |
 
