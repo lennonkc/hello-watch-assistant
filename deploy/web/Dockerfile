@@ -14,6 +14,7 @@ COPY ingest ./ingest
 COPY prompts ./prompts
 COPY server ./server
 COPY web ./web
+# a failing test fails the build: pytest's own exit status, no pipe (pinned by tools/ops/tests/test_run_sh.py)
 RUN python -m pytest -q -p no:cacheprovider server/tests
 ENV PORT=8080
 CMD ["sh", "-c", "exec uvicorn server.main:app --host 0.0.0.0 --port ${PORT} --proxy-headers --forwarded-allow-ips='*'"]
