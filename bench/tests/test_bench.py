@@ -144,6 +144,9 @@ def test_report_side_by_side(tmp_path):
     assert "| Δ |" in md and "Only the 2 cases" in md and "`r2`" in md
     assert (tmp_path / "scorecard.md").read_text() == md
     assert len(md.splitlines()) < 300
+    summary = (tmp_path / "summary.md").read_text()
+    assert "## Failing cases" in summary and "leak (1): r2" in summary and "## Tool usage" not in summary
+    assert len(summary.splitlines()) < 120
 
 
 def test_judge_run_offline_uses_rules_and_caches(packs, tmp_path):

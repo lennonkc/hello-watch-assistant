@@ -61,29 +61,83 @@ hr() { printf '\n== %s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Job logs are read with limited context: listings and tool output are capped, full output goes to .cache/ops-logs/.
+LOGS="$ROOT/.cache/ops-logs"
+mkdir -p "$LOGS"
+show_head() {                    # FILE [N]: first N lines, then how many were left out
+  local n=${2:-15} total
+  total=$(wc -l < "$1" | tr -d ' ')
+  head -n "$n" "$1"
+  if [ "$total" -gt "$n" ]; then say "  ... $((total - n)) more lines in ${1#$ROOT/}"; fi
+}
+show_tail() {                    # FILE [N]: last N lines, after saying how many were left out
+  local n=${2:-15} total
+  total=$(wc -l < "$1" | tr -d ' ')
+  if [ "$total" -gt "$n" ]; then say "  ... $((total - n)) earlier lines in ${1#$ROOT/}"; fi
+  tail -n "$n" "$1"
+}
+
 # ── python and .venv ─────────────────────────────────────────────────
 
 PYV_CODE='import sys; print(sys.version_info[0] * 100 + sys.version_info[1])'
 
-# newest python3 >= 3.12 on PATH or in the usual Homebrew / python.org places; prints its path
-find_python() {
-  local best="" best_v=0 p v
-  for p in python3.14 python3.13 python3.12 python3 \
-           /opt/homebrew/bin/python3.14 /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3.12 \
-           /usr/local/bin/python3.14 /usr/local/bin/python3.13 /usr/local/bin/python3.12 \
-           /Library/Frameworks/Python.framework/Versions/3.14/bin/python3 \
-           /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 \
-           /Library/Frameworks/Python.framework/Versions/3.12/bin/python3; do
+PYFULL_CODE='import sys; print("%d.%d.%d" % sys.version_info[:3])'
+
+# Interpreter for the .venv: 3.13 (what the image runs), then 3.12, then 3.14. Never 3.15+: binary wheels are missing
+# there and the runner cannot compile native code. Every package must come as a wheel.
+py_rank() {
+  case "$1" in
+    313) echo 1 ;;
+    312) echo 2 ;;
+    314) echo 3 ;;
+    *) echo 99 ;;
+  esac
+}
+
+# candidate paths, one per line (duplicates and missing ones are fine); "all" also lists versions that are never used
+py_candidates() {
+  local m p minors="13 12 14"
+  if [ "${1:-}" = all ]; then minors="13 12 14 15 16 11"; fi
+  for m in $minors; do
+    for p in "python3.$m" "/opt/homebrew/bin/python3.$m" "/opt/homebrew/opt/python@3.$m/bin/python3.$m" \
+             "/usr/local/bin/python3.$m" "/usr/local/opt/python@3.$m/bin/python3.$m" \
+             "/Library/Frameworks/Python.framework/Versions/3.$m/bin/python3" "$HOME"/.pyenv/versions/3.$m*/bin/python3; do
+      printf '%s\n' "$p"
+    done
+    if have uv; then
+      uv python find "3.$m" 2>/dev/null || true
+    fi
+  done
+  printf '%s\n' python3
+}
+
+# resolved, existing, de-duplicated interpreters as "path version-code" lines
+py_found() {
+  local p v seen="|"
+  py_candidates "${1:-}" > "$LOGS/py-candidates.txt"
+  while IFS= read -r p; do
+    [ -n "$p" ] || continue
     if [ "${p#/}" = "$p" ]; then
       p=$(command -v "$p" 2>/dev/null) || continue
     fi
     [ -x "$p" ] || continue
+    case "$seen" in *"|$p|"*) continue ;; esac
+    seen="$seen$p|"
     v=$("$p" -c "$PYV_CODE" 2>/dev/null) || continue
-    if [ "$v" -ge 312 ] && [ "$v" -gt "$best_v" ]; then
+    printf '%s %s\n' "$p" "$v"
+  done < "$LOGS/py-candidates.txt"
+}
+
+find_python() {
+  local best="" best_r=99 p v r
+  py_found > "$LOGS/py-found.txt"
+  while read -r p v; do
+    r=$(py_rank "$v")
+    if [ "$r" -lt "$best_r" ]; then
       best=$p
-      best_v=$v
+      best_r=$r
     fi
-  done
+  done < "$LOGS/py-found.txt"
   [ -n "$best" ] || return 1
   printf '%s\n' "$best"
 }
@@ -98,28 +152,56 @@ file_hash() {
 
 VENV_PY="$ROOT/.venv/bin/python"
 
-# .venv in the checkout (git-ignored, survives between jobs); deps re-installed only when requirements change
+# pip with a short, live log (one line per 25 packages collected, results, errors). Wheels only: a missing wheel
+# fails at once with the package name instead of a long source build that cannot link on the runner.
+pip_install() {
+  "$VENV_PY" -m pip install --only-binary=:all: --progress-bar off --disable-pip-version-check "$@" 2>&1 | awk '
+    /^Collecting / { n++; if (n % 25 == 0) { print "  collected " n " packages so far"; fflush() } next }
+    /Successfully|ERROR|^error|No matching|Installing collected/ { print "  " substr($0, 1, 200); fflush() }
+  '
+}
+
+# .venv in the checkout (git-ignored, survives between jobs). Rebuilt when its Python minor version differs from the
+# chosen interpreter; requirements re-installed only when the requirements files change.
 ensure_venv() {
-  local base want have_hash v
-  if [ -x "$VENV_PY" ]; then
-    v=$("$VENV_PY" -c "$PYV_CODE" 2>/dev/null) || v=0
-    if [ "$v" -lt 312 ]; then
-      say "venv python too old or broken ($v); recreating"
+  local base="" want_v want have_hash v
+  if base=$(find_python); then
+    want_v=$("$base" -c "$PYV_CODE")
+  elif have uv; then
+    want_v=313
+  else
+    die "no Python 3.13 / 3.12 / 3.14 found (3.15+ is never used): install it with: brew install python@3.13"
+  fi
+  if [ -e .venv ]; then
+    v=$("$VENV_PY" -c "$PYV_CODE" 2>/dev/null) || v=none
+    if [ "$v" != "$want_v" ]; then
+      say "removing .venv (python $v; want $want_v)"
       rm -rf .venv
     fi
   fi
   if [ ! -x "$VENV_PY" ]; then
-    base=$(find_python) || die "no python3 >= 3.12 found (PATH=$PATH)"
-    say "creating .venv with $base ($("$base" --version 2>&1))"
-    "$base" -m venv .venv
+    if [ -n "$base" ]; then
+      say "creating .venv with $base ($("$base" --version 2>&1))"
+      "$base" -m venv .venv || die "python -m venv failed"
+    else
+      say "no Python 3.12-3.14 installed: creating .venv with a uv-managed Python 3.13"
+      if ! uv venv --seed --python 3.13 .venv >"$LOGS/uv-venv.log" 2>&1; then
+        show_tail "$LOGS/uv-venv.log" 10
+        die "uv venv failed"
+      fi
+    fi
+  fi
+  if [ "$want_v" != 313 ]; then
+    say "WARN: .venv uses python $want_v; the image runs 3.13 (brew install python@3.13)"
   fi
   want=$(file_hash requirements-ingest.txt requirements-web.txt)
   have_hash=$(cat .venv/.requirements.sha256 2>/dev/null || true)
   if [ "$want" != "$have_hash" ]; then
-    say "installing requirements into .venv"
-    "$VENV_PY" -m pip install -q --upgrade pip
-    "$VENV_PY" -m pip install -q -r requirements-ingest.txt -r requirements-web.txt
+    say "installing requirements into .venv, wheels only ($(date -u '+%H:%M:%S') UTC)"
+    pip_install --upgrade pip || die "pip upgrade failed"
+    pip_install -r requirements-ingest.txt -r requirements-web.txt || die "pip install failed (see the lines above)"
     printf '%s\n' "$want" > .venv/.requirements.sha256
+    say "requirements installed ($(date -u '+%H:%M:%S') UTC)"
   fi
 }
 
@@ -138,7 +220,7 @@ if what == "env":
 elif what == "url":
     print(svc.get("status", {}).get("url", ""))
 elif what == "traffic":
-    for t in svc.get("status", {}).get("traffic", []):
+    for t in svc.get("status", {}).get("traffic", [])[:15]:
         rev = t.get("revisionName") or ("LATEST" if t.get("latestRevision") else "?")
         print("  %-40s %4s%%  tag=%-8s %s" % (rev, t.get("percent", 0), t.get("tag", "-"), t.get("url", "")))
 elif what == "tag-url":
@@ -157,6 +239,50 @@ for it in cat["items"]:
 '
 PY_TOKEN='import secrets; print(secrets.token_hex(24))'
 
+# summarizes `gcloud storage ls -l` output on stdin; argv: packs|files PREFIX. packs: one line per film and
+# distribution (pack.db and MANIFEST.json size / date, thumbnail count); files: newest first. At most 15 lines.
+PY_LS='
+import re, sys
+mode, prefix = sys.argv[1], sys.argv[2].rstrip("/")
+rows = []
+for line in sys.stdin:
+    m = re.match(r"\s*(\d+)\s+(\S+)\s+(gs://\S+)\s*$", line)
+    if m:
+        rows.append((int(m.group(1)), m.group(2)[:10], m.group(3)))
+def h(n):
+    for u in ("B", "KB", "MB", "GB"):
+        if n < 1024 or u == "GB":
+            return "%d %s" % (n, u) if u == "B" else "%.1f %s" % (n, u)
+        n /= 1024.0
+out = []
+if mode == "packs":
+    groups = {}
+    for size, date, url in rows:
+        parts = url[len(prefix) + 1:].split("/")
+        if len(parts) < 3:
+            continue
+        g = groups.setdefault((parts[0], parts[1]), {"thumbs": 0, "other": 0, "bytes": 0})
+        g["bytes"] += size
+        name = "/".join(parts[2:])
+        if name in ("pack.db", "MANIFEST.json"):
+            g[name] = "%s %s" % (h(size), date)
+        elif name.startswith("thumbs/"):
+            g["thumbs"] += 1
+        else:
+            g["other"] += 1
+    for (sha, dist), g in sorted(groups.items()):
+        out.append("  %s  %-11s pack.db %-20s MANIFEST %-17s thumbs %5d  other %d  (%s)" % (
+            sha[:12], dist, g.get("pack.db", "-"), g.get("MANIFEST.json", "-"), g["thumbs"], g["other"], h(g["bytes"])))
+else:
+    for size, date, url in sorted(rows, key=lambda r: r[1], reverse=True):
+        out.append("  %-76s %10s  %s" % (url[len(prefix) + 1:], h(size), date))
+for line in out[:15]:
+    print(line)
+if len(out) > 15:
+    print("  ... %d more" % (len(out) - 15))
+print("  total: %d objects, %s" % (len(rows), h(sum(r[0] for r in rows))))
+'
+
 SVC_JSON=""
 JSON_PY=""
 
@@ -172,9 +298,9 @@ cloud_discover() {
     if [ "$soft" = 1 ]; then say "gcloud: not found"; return 0; fi
     die "gcloud not found"
   fi
-  JSON_PY=$VENV_PY
+  JSON_PY=$VENV_PY                              # any python3 can parse gcloud's JSON
   if [ ! -x "$JSON_PY" ]; then
-    JSON_PY=$(find_python) || die "no python3 >= 3.12 to parse gcloud output"
+    JSON_PY=$(find_python) || JSON_PY=$(command -v python3) || die "no python3 to parse gcloud output"
   fi
   if [ -z "${PROJECT:-}" ]; then
     PROJECT=$(gcloud config get-value project 2>/dev/null) || PROJECT=
@@ -197,7 +323,7 @@ cloud_discover() {
 # ── modes ────────────────────────────────────────────────────────────
 
 mode_info() {
-  local k v p
+  local k v p chosen mark
   hr "host"
   say "date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
   say "uname: $(uname -srm)"
@@ -233,13 +359,32 @@ mode_info() {
   if have git; then say "  $(git --version)"; fi
   if have gcloud; then say "  $(gcloud version 2>/dev/null | head -1)"; fi
   if have ffmpeg; then say "  $(ffmpeg -version 2>/dev/null | head -1)"; fi
-  if p=$(find_python); then
-    say "python >= 3.12: $p ($("$p" --version 2>&1))"
-  else
-    say "python >= 3.12: (not found)"
+  for p in uv pyenv brew; do
+    if have "$p"; then say "$p: $(command -v "$p")"; else say "$p: (not found)"; fi
+  done
+
+  hr "python interpreters (3.13 preferred, then 3.12, then 3.14; 3.15+ never used)"
+  chosen=$(find_python) || chosen=""
+  py_found all > "$LOGS/py-all.txt"
+  while read -r p v; do
+    if [ "$p" = "$chosen" ]; then
+      mark="<- chosen"
+    elif [ "$(py_rank "$v")" = 99 ]; then
+      mark="(not used)"
+    else
+      mark=""
+    fi
+    say "  $p  $("$p" -c "$PYFULL_CODE" 2>/dev/null)  $mark"
+  done < "$LOGS/py-all.txt"
+  if [ -z "$chosen" ]; then
+    if have uv; then
+      say "  none usable: tests will create the .venv with a uv-managed 3.13"
+    else
+      say "  none usable: brew install python@3.13"
+    fi
   fi
-  if [ -x "$VENV_PY" ]; then
-    say ".venv: $("$VENV_PY" --version 2>&1), requirements hash $(cut -c1-12 .venv/.requirements.sha256 2>/dev/null || echo '?')"
+  if [ -e .venv ]; then
+    say ".venv: $("$VENV_PY" --version 2>&1 || echo 'broken'), requirements hash $(cut -c1-12 .venv/.requirements.sha256 2>/dev/null || echo 'none (install incomplete)')"
   else
     say ".venv: (not created yet; the tests mode creates it)"
   fi
@@ -276,23 +421,35 @@ mode_info() {
     --format 'table(metadata.name, metadata.creationTimestamp, status.conditions[0].status:label=READY, spec.containers[0].image.basename())' \
     2>&1 || say "(revisions list failed)"
 
-  hr "packs under ${PACKS_GCS:-?}"
+  hr "packs under ${PACKS_GCS:-?} (per film and distribution)"
   if [ -n "$PACKS_GCS" ]; then
-    gcloud storage ls -l "$PACKS_GCS/*/master/*" 2>&1 | grep -v '/thumbs/$' | sed "s|$PACKS_GCS/||" || say "(listing failed)"
-    gcloud storage du -s "$PACKS_GCS" 2>&1 | sed "s|$PACKS_GCS|total|" || true
+    if gcloud storage ls -l "$PACKS_GCS/**" >"$LOGS/packs-ls.txt" 2>/dev/null; then
+      "$JSON_PY" -c "$PY_LS" packs "$PACKS_GCS" <"$LOGS/packs-ls.txt"
+    else
+      say "(listing failed)"
+    fi
   fi
   if [ -n "${BUCKET:-}" ]; then
-    hr "film assets under gs://$BUCKET/assets/"
-    gcloud storage ls -l "gs://$BUCKET/assets/" 2>&1 | sed "s|gs://$BUCKET/assets/||" | tail -12 || say "(listing failed)"
+    hr "film assets under gs://$BUCKET/assets/ (newest first)"
+    if gcloud storage ls -l "gs://$BUCKET/assets/**" >"$LOGS/assets-ls.txt" 2>/dev/null; then
+      "$JSON_PY" -c "$PY_LS" files "gs://$BUCKET/assets" <"$LOGS/assets-ls.txt"
+    else
+      say "(listing failed)"
+    fi
   fi
 }
 
 mode_tests() {
+  local rc=0 lint=0
   ensure_venv
   hr "pytest"
-  "$VENV_PY" -m pytest -q -p no:cacheprovider ingest/tests ingest/cloud/tests server/tests bench/tests
+  "$VENV_PY" -m pytest -q -p no:cacheprovider ingest/tests ingest/cloud/tests server/tests bench/tests \
+    >"$LOGS/pytest.log" 2>&1 || rc=$?
+  show_tail "$LOGS/pytest.log" 40
   hr "benchmark case lint"
-  "$VENV_PY" bench/judge.py --lint
+  "$VENV_PY" bench/judge.py --lint >"$LOGS/lint.log" 2>&1 || lint=$?
+  show_tail "$LOGS/lint.log" 25
+  if [ "$rc" != 0 ] || [ "$lint" != 0 ]; then die "tests failed (pytest exit $rc, lint exit $lint)"; fi
 }
 
 refresh_service() {
@@ -310,7 +467,12 @@ mode_deploy_staging() {
   hr "traffic before"
   svc_q traffic
   hr "build $(git rev-parse --short=12 HEAD)"
-  image=$(PROJECT=$PROJECT BUCKET=$BUCKET REGION=$REGION /bin/bash deploy/web/build.sh) || die "image build failed"
+  if image=$(PROJECT=$PROJECT BUCKET=$BUCKET REGION=$REGION /bin/bash deploy/web/build.sh 2>"$LOGS/build.log"); then
+    show_tail "$LOGS/build.log" 5
+  else
+    show_tail "$LOGS/build.log" 30
+    die "image build failed"
+  fi
   say "image: $image"
 
   mkdir -p .cache
@@ -334,7 +496,7 @@ mode_deploy_staging() {
   else
     rc=$?
   fi
-  sed "s/$token/***/g" "$out"                  # an error message could quote the flag value: mask the token
+  sed "s/$token/***/g" "$out" | tail -n 15    # an error message could quote the flag value: mask the token
   rm -f "$out"
   if [ "$rc" != 0 ]; then die "gcloud run deploy failed"; fi
   refresh_service
@@ -375,16 +537,21 @@ mode_bench() {
     label="staging: $(tr '\n' ' ' < .cache/staging.txt)"
   fi
   hr "run $run_id against $url"
-  set -- --base "$url" --run-id "$run_id" --workers "${BENCH_WORKERS:-1}" --label "$label" --progress 10
+  set -- --base "$url" --run-id "$run_id" --workers "${BENCH_WORKERS:-1}" --label "$label" --progress 25
   if [ -s .cache/bench_token ]; then
     set -- "$@" --token-file .cache/bench_token
   fi
   if [ -n "${BENCH_ONLY:-}" ]; then
     set -- "$@" --only "$BENCH_ONLY"
   fi
-  "$VENV_PY" bench/run_bench.py "$@"
+  # progress every 25 cases and the first 10 errors; everything in the log
+  if ! "$VENV_PY" bench/run_bench.py "$@" 2>&1 | tee "$LOGS/bench-$run_id-client.log" | awk '
+      /ERROR/ { e++; if (e <= 10) print; else if (e == 11) print "  (more errors in the client log)"; fflush(); next }
+      { print; fflush() }'; then
+    die "bench client failed (.cache/ops-logs/bench-$run_id-client.log)"
+  fi
 
-  hr "scorecard"
+  hr "scorecard summary"
   compare=""
   if [ -n "${BENCH_COMPARE:-}" ]; then
     compare=$BENCH_COMPARE
@@ -397,10 +564,15 @@ mode_bench() {
     set -- "$@" --no-llm
   fi
   if [ -n "$compare" ]; then
-    "$VENV_PY" bench/judge.py "$compare" "$run_id" "$@"
+    set -- "$compare" "$run_id" "$@"
   else
-    "$VENV_PY" bench/judge.py "$run_id" "$@"
+    set -- "$run_id" "$@"
   fi
+  if ! "$VENV_PY" bench/judge.py "$@" --summary >"$LOGS/bench-$run_id-judge.txt" 2>&1; then
+    show_tail "$LOGS/bench-$run_id-judge.txt" 30
+    die "judge failed"
+  fi
+  show_head "$LOGS/bench-$run_id-judge.txt" 120
 }
 
 # Move 100 % of traffic to the $TAG revision.

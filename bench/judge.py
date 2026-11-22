@@ -440,6 +440,7 @@ def report(runs: dict[str, list[dict]], out: pathlib.Path, meta: dict | None = N
 
     compact("By set and case file", {g: v for g, v in card["groups"].items() if g != "all"})
     compact("By category", card["by_category"])
+    summary = L[:]                                   # the job-log summary shares everything up to here
     L += ["", "## Tool usage", ""]
     for n in names:
         L.append(f"- **{n}**: " + (", ".join(f"{t} ×{c}" for t, c in allg[n]["tool_usage"].items()) or "—"))
@@ -464,7 +465,39 @@ def report(runs: dict[str, list[dict]], out: pathlib.Path, meta: dict | None = N
             L.append(f"- … {len(err_lines) - MAX_ERROR_LINES} more")
     md = "\n".join(L) + "\n"
     (out / "scorecard.md").write_text(md, encoding="utf-8")
+    summary += ["", "## Failing cases", ""] + failing_lines(runs)
+    if leak_lines:
+        summary += ["", f"## Leaks (first {min(10, len(leak_lines))} of {len(leak_lines)})", ""] + leak_lines[:10]
+    summary += ["", f"Full scorecard: {out / 'scorecard.md'}"]
+    (out / "summary.md").write_text("\n".join(summary) + "\n", encoding="utf-8")
     return md
+
+
+def failing_lines(runs: dict[str, list[dict]], max_chars: int = 400) -> list[str]:
+    """Case ids per failure kind and run, one line each (for short job logs)."""
+    out = []
+    for n, rows in runs.items():
+        kinds: dict[str, list[str]] = {"error": [], "leak": [], "incorrect / nonanswer": [],
+                                       "declined, but the answer was on screen": [], "inappropriate": []}
+        for r in rows:
+            llm = r.get("llm") or {}
+            if r["status"] != "ok":
+                kinds["error"].append(r["id"])
+                continue
+            if r.get("rule_leaks") or r.get("real_names") or llm.get("leak"):
+                kinds["leak"].append(r["id"])
+            if llm.get("verdict") in ("incorrect", "nonanswer"):
+                kinds["incorrect / nonanswer"].append(r["id"])
+            elif llm.get("verdict") == "declined" and r["expect"] == "answer":
+                kinds["declined, but the answer was on screen"].append(r["id"])
+            elif llm.get("appropriate") is False:
+                kinds["inappropriate"].append(r["id"])
+        out.append(f"- **{n}**" + ("" if any(kinds.values()) else ": none"))
+        for k, ids in kinds.items():
+            if ids:
+                text = ", ".join(ids)
+                out.append(f"  - {k} ({len(ids)}): " + (text if len(text) <= max_chars else text[:max_chars] + " …"))
+    return out
 
 
 # ── lint ─────────────────────────────────────────────────────────────
@@ -580,6 +613,9 @@ def main(argv=None) -> int:
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--out")
     ap.add_argument("--quiet", action="store_true", help="do not print the scorecard")
+    ap.add_argument("--summary", action="store_true",
+                    help="print the short summary (overview, latency, groups, failing case ids) instead of the full "
+                         "scorecard; both are written to the output directory")
     args = ap.parse_args(argv)
     PACKS = pathlib.Path(args.packs).expanduser() if args.packs else C.packs_dir()
     if args.lint:
@@ -610,7 +646,9 @@ def main(argv=None) -> int:
     else:
         out = RUNS_DIR / ("compare-" + "-vs-".join(pathlib.Path(r).name.replace("+", "_") for r in args.runs))
     md = report(runs, out, meta)
-    if not args.quiet:
+    if args.summary:
+        print((out / "summary.md").read_text(encoding="utf-8"))
+    elif not args.quiet:
         print(md)
     print(f"→ {out / 'scorecard.md'}", file=sys.stderr)
     return 0
