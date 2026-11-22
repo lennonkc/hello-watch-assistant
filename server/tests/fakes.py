@@ -79,8 +79,9 @@ MARGIN_REVEAL = 1.0          # gate_margin_reviewed_reveal_s of the test pack
 def oracle_leaks(pack: dict, text: str, P: float, prose: bool = True) -> list[str]:
     """What must not be in `text` at P, checked with plain substrings straight from the pack's rows — no guard, no
     textnorm, no word boundaries — so a matcher bug cannot hide a leak from the sweep. `prose`: also the identity
-    co-occurrence rule (a sentence naming both sides of a pending link); off for structured lists such as the
-    character list, where both characters legitimately appear as separate entries."""
+    co-occurrence rule, built from the pack rows on its own terms (any word of a label, a pronoun continuing the
+    sentence before) rather than from the guard's reference patterns; off for structured lists such as the character
+    list, where both characters legitimately appear as separate entries."""
     import re
     low, out = text.lower(), []
     hidden = lambda known: known is None or P + 1e-9 < known + MARGIN_REVEAL      # noqa: E731
@@ -101,13 +102,37 @@ def oracle_leaks(pack: dict, text: str, P: float, prose: bool = True) -> list[st
                 out.append(k["term"])
     chars = {c["character_id"]: c for c in pack["characters"]}
     for lk in pack["identity_links"] if prose else []:
-        if P + 1e-9 < lk["reveal_at_s"] + MARGIN_REVEAL:
+        if lk["review_state"] != "rejected" and P + 1e-9 < lk["reveal_at_s"] + MARGIN_REVEAL:
             a, b = chars[lk["a_character_id"]], chars[lk["b_character_id"]]
-            a_terms = [t for t in (a["display_label_pre_name"], a["display_label_pre_name_zh"]) if t]
-            b_terms = [t for t in (b["canonical_name"], b["name_zh"]) if t]
-            b_terms += [x["alias"] for x in pack.get("character_aliases", [])
-                        if x["character_id"] == b["character_id"] and not x["generic"]]
-            for s in re.split(r"(?<=[.!?。！？])", text):
-                if any(t.lower() in s.lower() for t in a_terms) and any(t in s for t in b_terms):
-                    out.append(f"{a_terms[0]} + {b_terms[0]}")
+            a_words, b_words = _ways(pack, a), _ways(pack, b)
+            for s in _passages(text):
+                if any(w in s.lower() for w in a_words) and any(w in s.lower() for w in b_words):
+                    out.append(f"{a['display_label_pre_name']} + {b['display_label_pre_name']}")
+    return out
+
+
+def _ways(pack: dict, c: dict) -> set[str]:
+    """Lower-case substrings that refer to a character: every word of its labels except articles (so "the grey
+    wolf" gives "grey" and "wolf"), its Chinese label, its names and aliases."""
+    import re
+    out = {w for lab in (c["display_label_pre_name"], c["canonical_name"]) if lab
+           for w in re.findall(r"[a-z]+", lab.lower()) if w not in ("the", "a", "an") and len(w) > 2}
+    out |= {t.lower() for t in (c["display_label_pre_name_zh"], c["name_zh"], c["canonical_name"]) if t}
+    out |= {x["alias"].lower() for x in pack.get("character_aliases", []) if x["character_id"] == c["character_id"]}
+    return out
+
+
+def _passages(text: str) -> list[str]:
+    """Sentences (newlines end one too); a sentence that opens with a pronoun, or has it / he / she in its first few
+    words, continues the one before."""
+    import re
+    out = []
+    for s in (x.strip() for x in re.split(r"(?<=[.!?。！？])|\n", text)):
+        if not s:
+            continue
+        first = " ".join(s.lower().split()[:5])
+        if out and (s[:1] in "它他她这那" or re.search(r"\b(it|he|she|they|this|that)\b", first)):
+            out[-1] += " " + s
+        else:
+            out.append(s)
     return out

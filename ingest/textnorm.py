@@ -60,10 +60,20 @@ def word_pattern(t: str, prefix: bool = False) -> str:
     return rf"(?<![{LATIN_WORD}])" + re.escape(t) + ("" if prefix else rf"(?![{LATIN_WORD}])")
 
 
+_L = rf"[{LATIN_WORD}]"
+_REGEX_B = {"b": rf"(?:(?<={_L})(?!{_L})|(?<!{_L})(?={_L}))", "B": rf"(?:(?<={_L})(?={_L})|(?<!{_L})(?!{_L}))"}
+
+
+def latin_boundaries(pattern: str) -> str:
+    """A regex term's `\\b` / `\\B` on the same Latin word class as `word_pattern`: Python's `\\b` counts CJK
+    characters as word characters, so `\\bolder\\b` would miss "他变older了"."""
+    return re.sub(r"(?<!\\)((?:\\\\)*)\\([bB])", lambda mo: mo.group(1) + _REGEX_B[mo.group(2)], pattern)
+
+
 @functools.lru_cache(maxsize=8192)
 def _compile(term: str, match: str, case_sensitive: bool) -> re.Pattern:
     if match == "regex":
-        return re.compile(normalize(term, True), 0 if case_sensitive else re.IGNORECASE)
+        return re.compile(latin_boundaries(normalize(term, True)), 0 if case_sensitive else re.IGNORECASE)
     return re.compile(word_pattern(normalize(term, case_sensitive)))
 
 

@@ -78,3 +78,6 @@ ASK_DEADLINE_S = float(os.environ.get("WATCH_ASK_DEADLINE_S", "10"))         # w
 LOOK_TIMEOUT_S = float(os.environ.get("WATCH_LOOK_TIMEOUT_S", "6"))          # nested look_closer model call
 LOOK_STILLS = int(os.environ.get("WATCH_LOOK_STILLS", "8"))                  # look_closer: stills from the window, at most
 HISTORY_TURNS = int(os.environ.get("WATCH_HISTORY_TURNS", "6"))              # earlier turns sent with a question
+SOURCES_TIMEOUT_S = float(os.environ.get("WATCH_SOURCES_TIMEOUT_S", "0.8"))  # evidence + frames after the answer
+# X-Forwarded-For entries appended by proxies we trust (Google's front end = 1; add one per load balancer in front)
+TRUSTED_PROXY_HOPS = max(1, int(os.environ.get("WATCH_TRUSTED_PROXY_HOPS", "1")))

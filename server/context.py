@@ -45,7 +45,8 @@ class Context:
     lookups: list[Lookup]
     tapped_terms: list[str]               # words by which an answer refers to the tapped entity
     highlight_fresh: bool                 # the tapped entity's box was measured on (about) the paused frame
-    subjects: frozenset = frozenset()     # characters the answer is about (identity co-occurrence, server/guard.py)
+    subjects: frozenset = frozenset()     # the tapped character (identity co-occurrence, server/guard.py)
+    screen: frozenset = frozenset()       # the characters on screen
 
     def parts(self) -> list[types.Part]:
         out = [types.Part.from_text(text=self.text)]
@@ -96,16 +97,14 @@ def fresh(m: Moment, screen: dict, e: dict) -> bool:
     return bool(screen.get("current_shot")) and m.fp - int(e["frame_t"]) <= FRESH_BOX_S
 
 
-def focus(m: Moment, screen: dict) -> frozenset:
-    """Who the answer is about, for the identity co-occurrence guard: the tapped character; without a tap, every
-    on-screen character that is the a-side of a pending identity link whose b-side is not on screen too."""
-    ents = screen.get("entities", [])
-    refs = [e.get("ref") for e in ents]
-    if "tapped" in screen:
-        ref = refs[screen["tapped"]]
-        return frozenset([ref[1]]) if ref and ref[0] == "character" else frozenset()
-    on = {r[1] for r in refs if r and r[0] == "character"}
-    return frozenset(lk["a"] for lk in m.gate.pending if lk["a"] in on and lk["b"] not in on)
+def focus(screen: dict) -> tuple[frozenset, frozenset]:
+    """(tapped, on screen) characters, for the identity co-occurrence guard (`guard.identity_links`): the character the
+    tap falls on, and every character among the shot's entities (those from the shot before a cut included — they
+    may still be in view)."""
+    refs = [e.get("ref") for e in screen.get("entities", [])]
+    on = frozenset(r[1] for r in refs if r and r[0] == "character")
+    ref = refs[screen["tapped"]] if "tapped" in screen else None
+    return (frozenset([ref[1]]) if ref and ref[0] == "character" else frozenset()), on
 
 
 def _tap_text(m: Moment, tap: dict, out: dict, ents: list[dict], ringed: bool) -> str:
@@ -182,8 +181,13 @@ def build(m: Moment, tap: dict | None, turn: A.Turn) -> Context:
             frame, ringed = marked, True
         note = (f"PAUSED FRAME at {pos} (exactly what the viewer sees now)"
                 + ("; the red ring marks where they tapped" if ringed else "") + ":")
-        turn.add_frame(m.fp, f"Paused frame {pos}")
-    if ents:
+    if ents and not screen.get("current_shot"):
+        started = screen.get("shot_started")
+        sections.append(f"ON SCREEN: nothing identified yet in the current shot (a cut just happened). JUST BEFORE THE "
+                        f"CUT, in the shot that started at {started}, these were identified; they may no longer be in "
+                        f"view, so go by the attached frame (boxes are [ymin, xmin, ymax, xmax] on a 0–1000 grid):\n"
+                        + "\n".join(_entity_line(i + 1, e) for i, e in enumerate(ents)))
+    elif ents:
         sections.append("ON SCREEN (entities identified in the current shot; boxes are [ymin, xmin, ymax, xmax] on a "
                         "0–1000 grid, measured on a keyframe at the time given):\n"
                         + "\n".join(_entity_line(i + 1, e) for i, e in enumerate(ents)))
@@ -202,9 +206,10 @@ def build(m: Moment, tap: dict | None, turn: A.Turn) -> Context:
     sections.append(dialogue)
     lookups.append(Lookup("ctx-2", "recent_dialogue", A.TOOL_LABELS["recent_dialogue"], A.note_dialogue(turn, lines)))
 
-    story = m.story_so_far(limit=STORY_ITEMS)
+    story = m.story_so_far(limit=STORY_ITEMS, refs=True)
     sections.append(_story(story))
-    lookups.append(Lookup("ctx-3", "story_so_far", A.TOOL_LABELS["story_so_far"], A.note_story(turn, m, story, frames=False)))
+    lookups.append(Lookup("ctx-3", "story_so_far", A.TOOL_LABELS["story_so_far"], A.note_story(turn, m, story)))
 
+    tapped, on = focus(screen)
     return Context(text="\n\n".join(sections), frame=frame, frame_note=note, lookups=lookups,
-                   tapped_terms=terms, highlight_fresh=box_fresh, subjects=focus(m, screen))
+                   tapped_terms=terms, highlight_fresh=box_fresh, subjects=tapped, screen=on)

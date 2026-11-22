@@ -125,13 +125,14 @@ def test_speaker_withheld_while_identity_is_isolated(title):
 
 
 def test_evidence_dedup():
-    from server.agent import Turn
-    t = Turn()
-    t.add_evidence("shot_caption", 1.0, 2.0, "A girl.")
-    t.add_evidence("shot_caption", 1.0, 2.0, "A girl.")
-    t.add_evidence("character_fact", 5.0, 5.0, "Alice: fact one")
-    t.add_evidence("character_fact", 5.0, 5.0, "Alice: fact two")
-    assert [e["text"] for e in t.evidence] == ["A girl.", "Alice: fact one", "Alice: fact two"]
+    from server.evidence import Candidate, select
+    cands = [Candidate("search", "shot", 1.0, 2.0, "A girl walks through the meadow."),
+             Candidate("search", "shot", 1.0, 2.0, "A girl walks through the meadow."),
+             Candidate("fact", "character", 5.0, 5.0, "Alice: walks through the meadow, fact one"),
+             Candidate("fact", "character", 5.0, 5.0, "Alice: walks through the meadow, fact two")]
+    kept = select(cands, "A girl walks through the meadow.", lambda _s: [])
+    assert [c.text for c in kept] == ["A girl walks through the meadow.", "Alice: walks through the meadow, fact one",
+                                      "Alice: walks through the meadow, fact two"]
 
 
 def _views(m: Moment) -> tuple[list, list]:

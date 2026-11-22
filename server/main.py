@@ -295,10 +295,15 @@ BENCH_HEADER = "x-watch-bench-token"
 
 
 def client_ip(request: Request) -> str:
-    """The address Google's front end saw. It appends that to X-Forwarded-For, so the LAST hop is the real client;
-    earlier hops are whatever the client sent and cannot be trusted for rate limiting."""
-    fwd = [h.strip() for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
-    return fwd[-1] if fwd else (request.client.host if request.client else "?")
+    """The client address as the first trusted proxy saw it. Google's front end appends the address it saw to
+    X-Forwarded-For, so with `WATCH_TRUSTED_PROXY_HOPS=1` (the default) the LAST entry is the client; each load balancer
+    in front adds one more trusted entry. Earlier entries are whatever the client sent and cannot be trusted for rate
+    limiting. Repeated header lines count as one comma-separated list."""
+    raw = ",".join(request.headers.getlist("x-forwarded-for"))
+    fwd = [h.strip() for h in raw.split(",") if h.strip()]
+    if not fwd:
+        return request.client.host if request.client else "?"
+    return fwd[-config.TRUSTED_PROXY_HOPS] if len(fwd) >= config.TRUSTED_PROXY_HOPS else fwd[0]
 
 
 def is_bench(request: Request) -> bool:
@@ -405,14 +410,32 @@ def sse(event: str, data) -> str:
     return f"event: {event}\ndata: {A.dumps(data)}\n\n"
 
 
+PREAMBLE = re.compile(
+    r"^\W*(?:(?:ok(?:ay)?|sure|alright|all right|first|right)\W+)?(?:let me|let's (?:see|check|look|take)|"
+    r"i'll (?:check|look|search|take|need|have to|watch|see|find|go|start)|"
+    r"i will (?:check|look|search|take|watch|see|find)|"
+    r"i'm going to|i am going to|i need to (?:check|look|search|watch|see)|one moment|just a (?:moment|second|sec)|"
+    r"give me a (?:moment|second|sec)|hold on|bear with me)\b"
+    r"|^\W*(?:好的?[,，]?\s*)?(?:让我|我来|我先|我去|我需要|我要(?:先)?(?:看|查|找|检查|搜)|稍等|请稍等|等一下|我查|我看一下|先看)",
+    re.IGNORECASE)
+
+
+def looks_like_preamble(sentence: str) -> bool:
+    """"Let me look at the last scene." / "稍等，我查一下。" — words about what the model is about to do."""
+    return bool(PREAMBLE.search(sentence or ""))
+
+
 class Streamer:
     """Routes streamed model text into the guarded answer, one model call ("step") at a time.
 
-    A step's first sentence is held until a second sentence starts or the step ends without a function call, so a
-    one-sentence "Let me look closer." before a tool call is never sent (`held_preamble`). A longer preamble can get
-    its first sentence out before the call arrives (`leaked_preamble`; guarded, so safe, just out of place). Text from
-    a step that ended in a tool call never counts as the answer: `answer_text()` leaves it out, so the final `answer`
-    event replaces it, and if nothing else was written the question gets a fallback instead."""
+    The hold rule: a step's text is held until its first sentence is complete and a second one has started (or the
+    step ends without a function call); if that first sentence looks like a preamble ("Let me look closer."), the
+    whole step is held until the step ends — sent if it ends without a function call, dropped if it calls a tool
+    (`held_preamble`). If the run stops early (deadline, stall, error) the held text is sent only when its first
+    sentence is a complete sentence that does not look like a preamble. Text that did go out in a step that then
+    called a tool (`leaked_preamble`; guarded, so safe, just out of place) never counts as the answer: `answer_text()`
+    leaves it out, so the final `answer` event replaces it, and if nothing else was written the question gets a
+    fallback instead."""
 
     def __init__(self, answer: GuardedAnswer, emit, rec: dict):
         self.answer, self.emit, self.rec = answer, emit, rec
@@ -444,7 +467,7 @@ class Streamer:
             return
         self.pending += chunk
         ready, rest = split_ready(self.pending)
-        if ready and rest.strip():
+        if ready and rest.strip() and not looks_like_preamble(ready[0]):
             self.released = True
             held, self.pending = self.pending, ""
             await self._send(self.answer.feed(held))
@@ -465,9 +488,14 @@ class Streamer:
         self.step_sent, self.released = [], False
 
     async def abort(self) -> None:
-        """The run stopped early (deadline, error): send the sentences that are complete — including a last one that
-        ends with sentence punctuation — and drop a half-written one."""
+        """The run stopped early (deadline, stall, error): send the sentences that are complete — including a last one
+        that ends with sentence punctuation — and drop a half-written one; held text that starts like a preamble is
+        dropped (a tool call was probably on its way)."""
         held, self.pending = self.pending, ""
+        if not self.released and looks_like_preamble(held):
+            self.rec["held_preamble"] += 1
+            log.info("dropped text written before a stop: %r", held[:200])
+            held = ""
         deltas = self.answer.feed(held)
         if re.search(r"[.!?。！？…][\"'”’)）]*$", self.answer.buf.rstrip()):
             deltas += self.answer.flush()
@@ -509,11 +537,11 @@ async def _run(runner: Runner, user: str, sid: str, text: str, emit, turn: A.Tur
             calls = ev.get_function_calls()
             for fc in calls:
                 turn.tools.append(fc.name)
-                args = A.args_preview(fc.args)
-                if args and turn.args_filter:
+                args = A.tool_args(fc.args)
+                if args and turn.args_filter:                  # whole arguments: a cut could hide part of a name
                     args = await asyncio.to_thread(turn.args_filter, args)
                 await emit("tool", {"id": fc.id, "name": fc.name, "label": A.TOOL_LABELS.get(fc.name, fc.name),
-                                    "args": args})
+                                    "args": A.args_preview(args)})
             for fr in ev.get_function_responses():
                 await emit("tool_result", {"id": fr.id, "name": fr.name, "summary": turn.summaries.get(fr.id, "done")})
             if ev.content and ev.content.role == "model":            # one model call completed
@@ -569,11 +597,11 @@ class AskFailed(Exception):
     pass
 
 
-def _checker(t, m, p: float, subjects, question: str, turn: A.Turn):
+def _checker(t, m, p: float, tapped, screen, question: str, turn: A.Turn):
     """The output guard for this question (spec §7 plus identity co-occurrence, `server/guard.py`). It also filters the
     model-written tool arguments the step trace shows: names not visible yet become labels, and arguments the guard
     still objects to are not shown at all. Blocking: call it in a worker thread."""
-    links = guard.identity_links(m, subjects, question)
+    links = guard.identity_links(m, tapped, question, screen)
 
     def check(text: str) -> list[dict]:
         return guard.violations(t.pack, text, p, links)
@@ -590,7 +618,7 @@ async def flow_context(t, body: Ask, p: float, user: str, state: dict, emit, tur
     """Server-built context, then one streamed run; each finished sentence is guarded before it is sent."""
     m = A.moment_of(state)
     ctx = await asyncio.to_thread(C.build, m, state["tap"], turn)
-    check, links = await asyncio.to_thread(_checker, t, m, p, ctx.subjects, body.question, turn)
+    check, links = await asyncio.to_thread(_checker, t, m, p, ctx.subjects, ctx.screen, body.question, turn)
     for lk in ctx.lookups:
         turn.tools.append(f"ctx:{lk.name}")
         await emit("tool", {"id": lk.id, "name": lk.name, "label": lk.label, "args": {}})
@@ -618,13 +646,15 @@ async def flow_context(t, body: Ask, p: float, user: str, state: dict, emit, tur
     if not text:
         if status == "error" and not sink.preamble:
             raise AskFailed
-        rec["fallback"] = "timeout" if status in ("timeout", "error") else "spoiler"
+        # the spoiler wording only when the guard held something back; otherwise (time, tool rounds, nothing written)
+        # the neutral one
+        rec["fallback"] = "spoiler" if answer.dropped else "timeout"
         rec["preamble_only"] = bool(sink.preamble)
         await sink.send_final((TIMEOUT_FALLBACK if rec["fallback"] == "timeout" else FALLBACK)[body.lang])
         text = sink.answer_text()
-    elif body.session_id:                              # a question without a session has no conversation to keep
-        HISTORY.add(user, p, question, text)
-    rec["cut_off"] = rec["cut_off"] or (status in ("timeout", "error") and not rec["fallback"])
+    rec["cut_off"] = bool(rec["cut_off"] or (status in ("timeout", "error") and not rec["fallback"]))
+    if body.session_id and not rec["fallback"] and not rec["cut_off"]:
+        HISTORY.add(user, p, question, text)          # only whole answers; no session: no conversation to keep
     rec["dropped"] = len(answer.dropped)
     return {"text": text, "terms": ctx.tapped_terms, "links": links,
             "rewritten": bool(answer.dropped or rec["retried"] or rec["fallback"] or sink.preamble)}
@@ -634,8 +664,8 @@ async def flow_tools(t, body: Ask, p: float, user: str, state: dict, emit, turn:
     """The earlier design: the agent picks among five tools; the whole answer is guarded, then sent at once."""
     runner, deadline, question = RUNNERS["tools"], turn.started + config.ASK_DEADLINE_S, body.question.strip()
     m = A.moment_of(state)
-    subjects = await asyncio.to_thread(lambda: C.focus(m, m.on_screen(state["tap"], refs=True)))
-    check, links = await asyncio.to_thread(_checker, t, m, p, subjects, body.question, turn)
+    tapped, screen = await asyncio.to_thread(lambda: C.focus(m.on_screen(state["tap"], refs=True)))
+    check, links = await asyncio.to_thread(_checker, t, m, p, tapped, screen, body.question, turn)
     anon = not body.session_id                         # no conversation to keep: a session that is deleted after
 
     async def run(text: str, fresh: bool = False) -> tuple[str, str]:
@@ -657,8 +687,8 @@ async def flow_tools(t, body: Ask, p: float, user: str, state: dict, emit, turn:
         raise AskFailed
     if not text or check(text):
         rewritten = True
-        rec["fallback"] = "timeout" if status == "timeout" else "spoiler"
-        text = (TIMEOUT_FALLBACK if status == "timeout" else FALLBACK)[body.lang]
+        rec["fallback"] = "spoiler" if (text or rec["dropped_kinds"]) else "timeout"
+        text = (TIMEOUT_FALLBACK if rec["fallback"] == "timeout" else FALLBACK)[body.lang]
         if not anon:
             await CONVERSATIONS.get(user, p, fresh=True)
     rec["first_text_ms"] = int((time.monotonic() - rec["t0"]) * 1000)
@@ -702,7 +732,7 @@ async def ask(body: Ask, request: Request):
             await emit("gate", {"p": round(p, 2), "eligible_total": elig,
                                 "locked_total": sum(counts["total"].values()) - elig})
             out = await FLOWS[flow](t, body, p, user, state, emit, turn, rec)
-            evidence, frames, highlight = await asyncio.to_thread(_sources, flow, t, p, state, turn, out, rec)
+            evidence, frames, highlight = await _sources(t, p, state, turn, out, rec)
             total = int((time.monotonic() - turn.started) * 1000)
             rec["highlight"], rec["evidence"] = highlight is not None, len(evidence)
             await emit("answer", {"text": out["text"], "evidence": evidence, "frames": frames,
@@ -736,26 +766,46 @@ async def ask(body: Ask, request: Request):
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-def _sources(flow: str, t, p: float, state: dict, turn: A.Turn, out: dict, rec: dict):
-    """(evidence, frames, highlight) to show with the final answer. Every evidence line, frame caption and the
-    highlight label goes through the guard relative to the answer's subject (`guard.source_violations`). In the
-    context flow only the sources the answer rests on are listed (`server.evidence`); a refusal or fallback lists
-    none. The highlight only when the answer is about the tapped entity, so the box never contradicts the text.
-    Blocking (frames may be fetched): call it in a worker thread."""
-    text = out["text"]
+def _pick_sources(t, p: float, state: dict, turn: A.Turn, out: dict, rec: dict):
+    """(evidence rows, frame plan, highlight, check) to show with the final answer, both flows. Only the sources the
+    answer rests on (`server.evidence`); a pure refusal or a fallback lists none. Every evidence line, frame caption and
+    the highlight label goes through the guard relative to the answer's subject (`guard.source_violations`). The
+    highlight only when the answer is about the tapped entity, so the box never contradicts the text."""
+    text, m = out["text"], A.moment_of(state)
 
     def check(s: str) -> list[dict]:
         return guard.source_violations(t.pack, s or "", p, out["links"], text)
 
     about_tapped = C.mentions(text, out["terms"])
     highlight = turn.highlight if turn.highlight and about_tapped and not check(turn.highlight["label"]) else None
-    if flow != "context":
-        return ([e for e in turn.evidence if not check(e["text"])],
-                [f for f in turn.frames if not check(f["caption"])], highlight)
-    m, refusal = A.moment_of(state), bool(rec.get("fallback"))
-    kept = E.select(turn.support, text, check, about_tapped=about_tapped, refusal=refusal)
-    frames = E.frames(m, kept, text, check, ref_frames=turn.ref_frames if about_tapped else (), refusal=refusal)
-    return [c.row() for c in kept], frames, highlight
+    refusal = bool(rec.get("fallback")) or E.is_refusal(text)
+    kept = E.select(turn.support, text, check, about_tapped=about_tapped, refusal=refusal, lang=m.lang,
+                    names=m.zh_names() if m.lang == "zh" else ())
+    plan = [] if refusal else E.frame_plan(m, kept, ref_frames=turn.ref_frames if about_tapped else ())
+    return [c.row(m.lang) for c in kept], plan, highlight, check
+
+
+async def _sources(t, p: float, state: dict, turn: A.Turn, out: dict, rec: dict):
+    """(evidence, frames, highlight) within `SOURCES_TIMEOUT_S`: the answer is complete, so a slow frame fetch or a
+    failure costs the sources, never the answer (frames first, then everything)."""
+    end = time.monotonic() + config.SOURCES_TIMEOUT_S
+    try:
+        evidence, plan, highlight, check = await asyncio.wait_for(
+            asyncio.to_thread(_pick_sources, t, p, state, turn, out, rec), config.SOURCES_TIMEOUT_S)
+    except Exception as e:                                       # noqa: BLE001
+        rec["sources"] = f"failed: {type(e).__name__}"
+        log.warning("sources skipped: %r", e)
+        return [], [], None
+    if not plan:
+        return evidence, [], highlight
+    try:
+        frames = await asyncio.wait_for(asyncio.to_thread(E.frames, A.moment_of(state), plan, check),
+                                        max(0.05, end - time.monotonic()))
+    except Exception as e:                                       # noqa: BLE001
+        rec["sources"] = f"frames failed: {type(e).__name__}"
+        log.warning("frames skipped: %r", e)
+        frames = []
+    return evidence, frames, highlight
 
 
 def _log_question(flow: str, t, p: float, body: Ask, bench: bool, turn: A.Turn, rec: dict) -> None:
