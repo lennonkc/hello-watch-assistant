@@ -16,13 +16,7 @@
 
 /* ---------- take over the page's own one-shot entrance animations ---------- */
 
-:root.hwa-m .xp-turn,
-:root.hwa-m .xp-answer,
-:root.hwa-m .xp-ring.is-in,
-:root.hwa-m .xp-hl.is-in,
-:root.hwa-m .xp-shield.is-pulse .xp-shield__badge,
-:root.hwa-m .arch-cell.is-new,
-:root.hwa-m .xp-pill { animation: none; }
+:root.hwa-m .arch-cell.is-new { animation: none; }
 
 :root.hwa-m .xp-q { transform-origin: 100% 100%; }
 :root.hwa-m .xp-turn { transition: opacity var(--dur-slow, .6s) var(--ease-out, ease); }
@@ -43,24 +37,6 @@
 }
 :root:not(.hwa-m) .hwa-tab-ink { display: none; }
 
-/* ---------- answer text word reveal ---------- */
-
-/* Plain inline spans (opacity only) so line breaking is identical to the unwrapped text. */
-.hwa-w { animation: hwa-word .5s var(--ease-out, cubic-bezier(.2,.8,.2,1)) backwards; }
-@keyframes hwa-word { from { opacity: 0; } }
-
-/* ---------- film cards: tilt glare ---------- */
-
-:root.hwa-m .xp-cards > [role="listitem"] { perspective: 1100px; }
-.hwa-glare {
-  position: absolute; inset: 0; z-index: 1; pointer-events: none; opacity: 0;
-  background: radial-gradient(60% 70% at var(--hwa-gx, 50%) var(--hwa-gy, 30%), rgb(255 255 255 / .28), transparent 65%);
-  mix-blend-mode: soft-light;
-  transition: opacity var(--dur, .28s) var(--ease-out, ease);
-}
-:root.hwa-m .xp-card.hwa-tilting .hwa-glare { opacity: 1; }
-:root:not(.hwa-m) .hwa-glare { display: none; }
-
 /* ---------- pick mode ---------- */
 
 :root.hwa-m .xp-player.is-picking .xp-cross { animation: hwa-breathe 1.6s var(--ease-out, ease) infinite alternate; }
@@ -73,11 +49,6 @@
   box-shadow: 0 0 0 2px var(--accent), 0 0 18px color-mix(in srgb, var(--accent) 60%, transparent);
 }
 
-/* ---------- small delights ---------- */
-
-:root.hwa-m .xp-chip:not(:disabled):hover .xp-chip__tap { animation: hwa-tap .9s var(--ease-out, ease); }
-@keyframes hwa-tap { 30% { scale: 1.25; } 60% { scale: .92; } }
-
 .hwa-pulse {
   fill: none; stroke: var(--c, var(--accent)); stroke-width: 2; pointer-events: none;
   transform-box: fill-box; transform-origin: center; opacity: 0;
@@ -85,6 +56,5 @@
 
 @media (prefers-reduced-motion: reduce) {
   [data-hwa-reveal] { opacity: 1 !important; translate: none !important; }
-  .hwa-w { animation: none; }
   .hwa-ripple, .hwa-pulse { display: none; }
 }

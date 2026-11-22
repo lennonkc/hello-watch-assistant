@@ -4,25 +4,22 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Hello Watch Assistant</title>
-  <meta name="description" content="A spoiler-free viewing companion: pause a film and ask about what you have already seen.">
+  <meta name="description" content="A viewing companion: pause a film and ask about what you have already seen. Answers draw only on the film up to your paused moment.">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#e5e8ef" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#1d2029" media="(prefers-color-scheme: dark)">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Hello Watch Assistant">
   <meta property="og:title" content="Hello Watch Assistant">
-  <meta property="og:description" content="A spoiler-free viewing companion: pause a film and ask about what you have already seen.">
+  <meta property="og:description" content="Pause a film and ask about what you have already seen. Answers draw only on the film up to your paused moment.">
   <meta property="og:url" content="https://hello-watch-vspuwrubbq-uw.a.run.app/">
   <meta property="og:image" content="https://hello-watch-vspuwrubbq-uw.a.run.app/brand/og-card.png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="Hello Watch Assistant: pause anywhere, ask anything, get no spoilers.">
+  <meta property="og:image:alt" content="Hello Watch Assistant: pause anywhere and ask about what you have seen so far.">
   <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" href="./brand/mark.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="./brand/apple-touch-icon.png">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght%4012..96,500..800&family=Instrument+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
   <link rel="stylesheet" href="./shared/tokens.css">
   <link rel="stylesheet" href="./shared/motion.css">
   <style>
@@ -181,14 +178,16 @@
     .app-footer__brand img { width: 20px; height: 20px; border-radius: 6px; display: block; }
 
     @media (max-width: 640px) {
-      .app-header__inner { gap: 12px; padding-block: 10px; }
-      .brand__tag { display: none; }
-      .brand__socket { width: 40px; height: 40px; border-radius: 13px; }
-      .brand__mark { width: 27px; height: 27px; }
-      .theme-toggle { width: 40px; height: 40px; }
-      .tabs { order: 3; width: 100%; }
-      .tab { flex: 1; justify-content: center; padding: 8px 10px; }
-      .tab-panel { padding-top: 18px; }
+      .app-header__inner { gap: 10px; padding-block: 8px; flex-wrap: nowrap; }
+      .brand { margin-right: auto; }
+      .brand__text { display: none; }
+      .brand__socket { width: 38px; height: 38px; border-radius: 12px; }
+      .brand__mark { width: 26px; height: 26px; }
+      .theme-toggle { width: 38px; height: 38px; }
+      .tabs { padding: 4px; }
+      .tab { padding: 7px 12px; font-size: 13.5px; }
+      .tab svg { display: none; }
+      .tab-panel { padding: 10px 12px 40px; }
     }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { transition-duration: 0s !important; animation-duration: 0s !important; }
@@ -229,7 +228,7 @@
         <span class="brand__socket"><img class="brand__mark" src="./brand/mark.svg" width="30" height="30" alt=""></span>
         <span class="brand__text">
           <span class="brand__name">Hello Watch Assistant</span>
-          <span class="brand__tag">Ask about the film. Never get spoiled.</span>
+          <span class="brand__tag">Ask about what you've seen so far</span>
         </span>
       </a>
 
@@ -265,7 +264,7 @@
         <li><a href="https://mango.blender.org" rel="noopener" target="_blank">Tears of Steel</a> © Blender Foundation, CC BY 3.0</li>
         <li><a href="https://orange.blender.org" rel="noopener" target="_blank">Elephants Dream</a> © 2006 Blender Foundation / Netherlands Media Art Institute, CC BY 2.5</li>
       </ul>
-      <p class="app-footer__note">Built with Gemini and Google Cloud for the AI Builder Cup 2026. Answers use only what the film has shown up to your paused moment.</p>
+      <p class="app-footer__note">Built with Gemini and Google Cloud for the AI Builder Cup 2026. The assistant is given only what the film has shown up to your paused moment, and every answer passes an output guard.</p>
     </div>
   </footer>
 
@@ -334,7 +333,7 @@
       else apply();
     }
 
-    function fromHash() { return location.hash.replace(/^#/, '') || DEFAULT_TAB; }
+    function fromHash() { return TABS[location.hash.replace(/^#/, '')] ? location.hash.slice(1) : DEFAULT_TAB; }
 
     for (const tab of tabs) {
       tab.addEventListener('click', () => {
@@ -391,6 +390,20 @@
       }, 'theme');
       try { localStorage.setItem(THEME_KEY, next); } catch { /* storage unavailable */ }
     });
+
+    // Private preview titles: a link `/#code=XYZ` unlocks them for this browser. The code is in the fragment, so it
+    // never reaches a server log; it is posted once (204 sets an HttpOnly cookie, 404 means a wrong code: nothing is
+    // said), then removed from the address bar before any title is loaded. It is never stored.
+    const code = new URLSearchParams(location.hash.slice(1)).get('code');
+    if (code) {
+      try {
+        await fetch('/api/unlock', {
+          method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ code }), signal: AbortSignal.timeout?.(6000),
+        });
+      } catch { /* offline or slow: the public titles still load */ }
+      history.replaceState(history.state, '', location.pathname + location.search);
+    }
 
     select(fromHash());
   </script>

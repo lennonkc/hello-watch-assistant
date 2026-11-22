@@ -1,5 +1,5 @@
 /* Tab 2, "How it works". Soft-UI surfaces from the shared tokens in web/shared/tokens.css. SVG shapes get their
-   depth from the #neu-raise / #neu-inset filters defined once in the page (index.html, preview.html).
+   depth from the #neu-raise / #neu-inset filters defined once in the page (index.html).
    Motion lives in web/shared/motion.*; nothing here sets `transform` on .arch-node. */
 
 .arch {

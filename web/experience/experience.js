@@ -1,9 +1,16 @@
-// Tab 1, "Live demo": film picker, player, and the spoiler-safe ask panel.
-// Talks to the service through the contract in docs/web-api.md. Add ?mock=1 to run without a back end.
+// Tab 1, "Live demo": film switcher, player with its own controls, the gate line, and the ask panel where answers
+// stream in sentence by sentence. Contract: docs/web-api.md.
+// Deep links: ?title=<id>&t=<seconds>&q=<text>&lang=en|zh opens that film paused at t with the question filled in;
+// &ask=1 also sends it. Unknown ids fall back to the first film.
 
 const params = new URLSearchParams(location.search);
-const MOCK = params.has('mock') && params.get('mock') !== '0';
 const LANG_KEY = 'hwa-lang';
+const BENCH_URL = 'https://github.com/lennonkc/hello-watch-assistant/blob/main/bench/README.md';
+const TEASER = { id: 'F0LyLRiYJ7I', title: 'Hello Watch Assistant demo walkthrough' };
+const GATE_EVERY_S = 5;          // while playing, refresh the gate line this often (film time)
+
+/** Every request carries the preview cookie (see /api/unlock). */
+const api = (url, opts = {}) => fetch(url, { credentials: 'same-origin', ...opts });
 
 const ICONS = {
   shield: '<path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.4 7.5 9.5 4.3-1.1 7.5-4.9 7.5-9.5V6z"/><path d="m8.8 12 2.3 2.3 4.2-4.6"/>',
@@ -16,15 +23,20 @@ const ICONS = {
   user: '<circle cx="12" cy="8" r="4"/><path d="M4.5 21a7.5 7.5 0 0 1 15 0"/>',
   spark: '<path d="M12 3c.8 4.6 3.4 7.2 8 8-4.6.8-7.2 3.4-8 8-.8-4.6-3.4-7.2-8-8 4.6-.8 7.2-3.4 8-8z"/>',
   pause: '<path d="M8 5v14M16 5v14"/>',
+  play: '<path d="M8 5.5v13l10.5-6.5z"/>',
   send: '<path d="M4 12 20 4l-5 16-3.5-6.5z"/><path d="m11.5 13.5 4-4"/>',
   stop: '<rect x="6" y="6" width="12" height="12" rx="2"/>',
   alert: '<path d="M12 3.5 2.5 20h19z"/><path d="M12 10v4.5M12 17.5v.01"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
   rewind: '<path d="M11 6 4 12l7 6zM20 6l-7 6 7 6z"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',
-  play: '<path d="M8 5.5v13l10.5-6.5z"/>',
-  down: '<path d="M12 5v14M6 13l6 6 6-6"/>',
   tap: '<circle cx="12" cy="12" r="3.5"/><circle cx="12" cy="12" r="8.5" opacity=".5"/>',
+  volume: '<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11"/>',
+  mute: '<path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="m16 9.5 5 5M21 9.5l-5 5"/>',
+  expand: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
+  shrink: '<path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>',
+  chart: '<path d="M4 20V11M10 20V5M16 20v-6M2.5 20h19"/>',
+  down: '<path d="m6 9 6 6 6-6"/>',
 };
 
 function icon(name, cls = '') {
@@ -54,6 +66,8 @@ function fmt(s) {
   return hh ? `${hh}:${mm}:${ss}` : `${mm}:${ss}`;
 }
 
+const num = (n) => (Number(n) || 0).toLocaleString('en');
+
 function newId() {
   if (crypto.randomUUID) return crypto.randomUUID();
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -78,24 +92,17 @@ function toolIcon(name = '') {
   if (/shot|frame|tap|look|screen|bbox|who/.test(n)) return 'target';
   if (/dialog|cue|said|line|transcript|speech/.test(n)) return 'quote';
   if (/window|clip|video|watch/.test(n)) return 'film';
-  if (/character|person|cast/.test(n)) return 'user';
   if (/search|find|retriev|lookup|query/.test(n)) return 'search';
   return 'spark';
 }
 
+// The four one-tap questions. `pick`: ask the viewer to point at something first (unless they already tapped).
 const QUICK = [
-  { key: 'miss', label: 'What did I miss?', question: 'What did I miss?', icon: 'book' },
-  { key: 'who', label: 'Who is this?', question: 'Who is this?', icon: 'user', pick: 'Tap the person you mean' },
-  { key: 'what', label: 'What is that?', question: 'What is that?', icon: 'target', pick: 'Tap the thing you mean' },
-  { key: 'say', label: 'What did they just say?', question: 'What did they just say?', icon: 'quote' },
+  { key: 'who', label: 'Who is this?', zh: '这是谁？', icon: 'user', pick: 'Tap the person you mean' },
+  { key: 'miss', label: 'What did I miss?', zh: '我错过了什么？', icon: 'book' },
+  { key: 'say', label: 'What did they just say?', zh: '他们刚才说了什么？', icon: 'quote' },
+  { key: 'what', label: 'What is that?', zh: '那是什么？', icon: 'target', pick: 'Tap the thing you mean' },
 ];
-
-const HOWTO = [
-  ['film', 'Pick a film', 'and press play'],
-  ['pause', 'Pause anywhere', 'the story locks there'],
-  ['tap', 'Ask or tap', 'someone on screen'],
-];
-const TEASER = { id: 'F0LyLRiYJ7I', title: 'Hello Watch Assistant demo walkthrough' };
 
 function loadStyles() {
   const href = new URL('./experience.css', import.meta.url).href;
@@ -109,33 +116,188 @@ function loadStyles() {
 }
 
 export async function mount(el) {
-  const [, mock] = await Promise.all([loadStyles(), MOCK ? import('./mock.js') : null]);
-  const app = new Experience(el, mock ? mock.mockFetch : (...a) => fetch(...a));
+  await loadStyles();
+  const app = new Experience(el);
   app.render();
   await app.loadTitles();
 }
 
 class Experience {
-  constructor(root, fetchImpl) {
+  constructor(root) {
     this.root = root;
-    this.fetch = fetchImpl;
     this.titles = [];
     this.title = null;
     this.sessions = new Map();
     this.lang = 'en';
     try { this.lang = localStorage.getItem(LANG_KEY) === 'zh' ? 'zh' : 'en'; } catch { /* storage unavailable */ }
+    if (['en', 'zh'].includes(params.get('lang'))) this.lang = params.get('lang');
     this.busy = false;
     this.abort = null;
-    this.pick = null;           // {question, x, y} while choosing a point on the frame
+    this.pick = null;           // {question, x, y} while choosing a point for a "who / what" chip
+    this.tap = null;            // {x, y, p}: the viewer's tap on the paused picture, sent with the next question
+    this.at = null;             // position to open at (deep link), until the video has seeked there
     this.lastAskP = null;
     this.gateTimer = 0;
     this.gateSeq = 0;
-    this.overlayP = null;       // P at which the ring / highlight were drawn
+    this.gateP = null;
+    this.gateShown = null;
+    this.hlP = null;            // P whose answer drew the highlight box
+    this.cooldownUntil = 0;     // per-minute limit: no request before this (ms since epoch)
+    this.cooldownNotice = null;
   }
 
   // ---------- layout ----------
 
-  /** Demo video. A static poster until clicked, so YouTube is only contacted when the viewer asks for it. */
+  render() {
+    const r = this.root;
+    r.classList.add('xp');
+    r.innerHTML = '';
+
+    this.films = h('div', { class: 'xp-films', role: 'group', 'aria-label': 'Choose a film' },
+      [0, 1, 2].map(() => h('span', { class: 'xp-film xp-film--skeleton', 'aria-hidden': 'true' })));
+
+    // Player: the picture (video + overlays + tap layer) above its own controls, so the whole paused picture can
+    // take a tap and nothing of the native controls sits on top of it.
+    this.video = h('video', { class: 'xp-video', playsinline: true, preload: 'metadata', 'aria-label': 'Film' });
+    this.content = h('div', { class: 'xp-content', 'aria-hidden': 'true' });
+    this.ring = h('div', { class: 'xp-ring', hidden: true });
+    this.hl = h('div', { class: 'xp-hl', hidden: true }, h('span', { class: 'xp-hl__label' }));
+    this.cross = h('div', { class: 'xp-cross' });
+    this.content.append(this.hl, this.ring, this.cross);
+    this.tapLayer = h('div', {
+      class: 'xp-taplayer', tabindex: '-1', role: 'application',
+      'aria-label': 'Paused picture. Choose a point with the arrow keys and press Enter. Escape cancels.',
+      onclick: (e) => this.onPictureClick(e),
+      onpointermove: (e) => this.onPickHover(e),
+      onkeydown: (e) => this.onPickKey(e),
+    });
+    this.hint = h('div', { class: 'xp-hint', hidden: true, 'aria-hidden': 'true' });
+    this.bigPlay = h('button', {
+      type: 'button', class: 'xp-bigplay', 'aria-label': 'Play the film', html: icon('play'),
+      onclick: () => this.video.play(),
+    });
+    this.pickBar = h('div', { class: 'xp-pickbar', role: 'status' },
+      h('span', { class: 'xp-pickbar__msg' }),
+      h('span', { class: 'xp-pickbar__actions' },
+        h('button', { type: 'button', class: 'xp-btn xp-btn--ghost', onclick: () => this.confirmPick(null) }, 'Whole frame'),
+        h('button', { type: 'button', class: 'xp-btn xp-btn--ghost', onclick: () => this.cancelPick() }, 'Cancel')));
+    this.screen = h('div', { class: 'xp-screen' },
+      this.video, this.content, this.tapLayer, this.hint, this.bigPlay, this.pickBar);
+
+    this.playBtn = h('button', { type: 'button', class: 'xp-ctl', onclick: () => this.togglePlay() });
+    this.scrub = h('input', {
+      type: 'range', class: 'xp-scrub', min: '0', max: '1', step: '0.1', value: '0',
+      'aria-label': 'Position in the film',
+      oninput: () => this.onScrub(),
+      onchange: () => { this.scrubbing = false; },
+    });
+    this.timeEl = h('span', { class: 'xp-time' }, '00:00 / 00:00');
+    this.muteBtn = h('button', { type: 'button', class: 'xp-ctl', onclick: () => { this.video.muted = !this.video.muted; } });
+    this.fsBtn = h('button', { type: 'button', class: 'xp-ctl', onclick: () => this.toggleFullscreen() });
+    this.controls = h('div', { class: 'xp-controls' },
+      this.playBtn, h('div', { class: 'xp-scrub__wrap' }, this.scrub), this.timeEl, this.muteBtn, this.fsBtn);
+    this.player = h('div', { class: 'xp-player', onkeydown: (e) => this.onPlayerKey(e) }, this.screen, this.controls);
+
+    // The gate line: what the assistant can see at this position, live.
+    this.gateText = h('span', { class: 'xp-gate__text' }, 'Checking what the assistant can see…');
+    this.gateMore = h('button', {
+      type: 'button', class: 'xp-gate__more', 'aria-expanded': 'false', 'aria-controls': 'xp-gate-rows',
+      onclick: () => this.toggleGateRows(),
+    }, h('span', {}, 'Details'), h('span', { html: icon('down') }));
+    this.gateRows = h('div', { class: 'xp-gate__rows', id: 'xp-gate-rows', hidden: true });
+    this.gate = h('div', { class: 'xp-gate' },
+      h('div', { class: 'xp-gate__line' },
+        h('span', { class: 'xp-gate__badge', html: icon('shield') }), this.gateText, this.gateMore),
+      this.gateRows);
+
+    // Ask panel: the composer on top, the newest answer right under it.
+    this.langBtns = ['en', 'zh'].map((code) => h('button', {
+      type: 'button', class: 'xp-seg__btn', 'aria-pressed': String(this.lang === code), 'data-lang': code,
+      'aria-label': code === 'en' ? 'Answer in English' : 'Answer in Chinese',
+      title: code === 'en' ? 'Answer in English' : 'Answer in Chinese',
+      onclick: () => this.setLang(code),
+    }, code.toUpperCase()));
+    this.lockChip = h('span', { class: 'xp-lock', title: 'Questions are answered as of this moment' });
+    this.chips = QUICK.map((q) => h('button', {
+      type: 'button', class: 'xp-chip', 'data-key': q.key, onclick: () => this.onQuick(q),
+      html: `${icon(q.icon)}<span>${q.label}</span>`,
+    }));
+    this.input = h('input', {
+      class: 'xp-input', type: 'text', name: 'question', maxlength: '300', autocomplete: 'off', enterkeyhint: 'send',
+      placeholder: 'Ask about this moment…', 'aria-label': 'Your question',
+    });
+    this.sendBtn = h('button', { type: 'submit', class: 'xp-send', 'aria-label': 'Ask', html: icon('send') });
+    this.form = h('form', { class: 'xp-form', onsubmit: (e) => this.onSubmit(e) }, this.input, this.sendBtn);
+    this.tapNote = h('div', { class: 'xp-tapnote', hidden: true },
+      h('span', { html: icon('tap') }),
+      h('span', {}, 'Your tap goes with the next question.'),
+      h('button', { type: 'button', class: 'xp-tapnote__clear', onclick: () => this.clearTap() }, 'Clear'));
+    this.thread = h('div', { class: 'xp-thread', 'aria-label': 'Answers' });
+    this.live = h('div', { class: 'visually-hidden', 'aria-live': 'polite' });
+    this.panel = h('aside', { class: 'xp-panel', 'aria-labelledby': 'xp-panel-h' },
+      h('div', { class: 'xp-panel__head' },
+        h('div', { class: 'xp-panel__titles' },
+          h('h2', { id: 'xp-panel-h', class: 'xp-panel__title' }, 'Ask the assistant'),
+          this.lockChip),
+        h('div', { class: 'xp-seg', role: 'group', 'aria-label': 'Answer language' }, this.langBtns)),
+      h('div', { class: 'xp-composer' },
+        h('div', { class: 'xp-chips', role: 'group', 'aria-label': 'Quick questions' }, this.chips),
+        this.form, this.tapNote),
+      this.thread, this.live);
+
+    this.stage = h('section', { class: 'xp-stage', 'aria-labelledby': 'xp-stage-h' },
+      h('h1', { id: 'xp-stage-h', class: 'visually-hidden' }, 'Live demo: pause the film and ask about it'),
+      h('div', { class: 'xp-main' }, this.films, this.player, this.gate),
+      this.panel);
+
+    r.append(this.stage, this.renderAbout());
+    r.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.pick) { this.cancelPick(); this.input.focus(); }
+    });
+    if (params.get('q')) this.input.value = params.get('q').slice(0, 300);
+    this.renderEmptyThread();
+    this.bindVideo();
+    this.updateControls();
+    this.updateLock();
+  }
+
+  /** Below the fold: what the demo is, how it keeps answers spoiler-free, and where that is measured. */
+  renderAbout() {
+    const points = [
+      ['lock', 'Time-gated retrieval, before the model',
+        'When you ask, the server works out what the film has shown up to your paused moment. Lookups and search run ' +
+        'only inside that set, so later scenes, lines and names are not part of what the model is given.'],
+      ['shield', 'An output guard, after it',
+        'Gemini may still know a well-known film from its training. Every sentence of an answer is checked for names ' +
+        'the film has not revealed yet, terms from later in the plot and real people’s names before it is shown; a ' +
+        'sentence that fails is dropped.'],
+      ['chart', 'Measured, not promised',
+        'Spoiler leaks, accuracy and speed are measured on a fixed set of questions at fixed positions in each film.'],
+    ];
+    const steps = [
+      ['film', 'Pick a film', 'and press play'],
+      ['pause', 'Pause anywhere', 'that moment is the limit'],
+      ['tap', 'Tap or ask', 'someone on screen, or anything so far'],
+    ];
+    return h('section', { class: 'xp-about', 'aria-labelledby': 'xp-about-h' },
+      h('div', { class: 'xp-about__copy' },
+        h('p', { class: 'xp-eyebrow' }, 'How it works'),
+        h('h2', { id: 'xp-about-h', class: 'xp-title' }, 'Pause anywhere.', h('span', {}, ' Ask about what you’ve seen.')),
+        h('ol', { class: 'xp-howto', 'aria-label': 'How to try it' },
+          steps.map(([ic, head, sub], i) => h('li', {},
+            h('span', { class: 'xp-howto__icon', html: icon(ic) }),
+            h('span', { class: 'xp-howto__text' }, h('small', {}, `Step ${i + 1}`), h('b', {}, head), h('span', {}, sub))))),
+        h('ul', { class: 'xp-points' }, points.map(([ic, head, body]) => h('li', {},
+          h('span', { class: 'xp-points__icon', html: icon(ic) }),
+          h('span', {}, h('b', {}, head), h('span', {}, body))))),
+        h('p', { class: 'xp-about__links' },
+          h('a', { class: 'xp-cta', href: BENCH_URL, target: '_blank', rel: 'noopener' },
+            h('span', { html: icon('chart') }), 'Benchmark scorecard'),
+          h('a', { class: 'xp-cta xp-cta--ghost', href: '#architecture' }, 'Architecture'))),
+      this.renderTeaser());
+  }
+
+  /** Demo video. A film frame as poster until clicked, so YouTube is only contacted when the viewer asks for it. */
   renderTeaser() {
     const frame = h('div', { class: 'xp-teaser__frame' });
     const play = () => {
@@ -144,182 +306,33 @@ class Experience {
         src, title: TEASER.title, allow: 'autoplay; encrypted-media; picture-in-picture; fullscreen',
         referrerpolicy: 'strict-origin-when-cross-origin',
       }));
-      frame.classList.add('is-playing');
       this.video?.pause();
     };
-    frame.append(h('button', { type: 'button', class: 'xp-teaser__poster', onclick: play, 'aria-label': `Play video: ${TEASER.title}` },
-      h('img', { src: `https://i.ytimg.com/vi/${TEASER.id}/maxresdefault.jpg`, alt: '', loading: 'lazy', decoding: 'async' }),
+    frame.append(h('button', { type: 'button', class: 'xp-teaser__poster', onclick: play, 'aria-label': `Play video: ${TEASER.title} (YouTube)` },
+      this.teaserImg = h('img', { alt: '', loading: 'lazy', decoding: 'async', hidden: true }),
       h('span', { class: 'xp-teaser__play', html: icon('play') })));
     return h('figure', { class: 'xp-teaser' }, frame,
       h('figcaption', { class: 'xp-teaser__cap' },
-        h('b', {}, 'See it in action'),
-        h('span', {}, 'Gemini on Google Cloud, answering mid-film without spoilers')));
-  }
-
-
-  render() {
-    const r = this.root;
-    r.classList.add('xp');
-    r.innerHTML = '';
-
-    const intro = h('section', { class: 'xp-hero', 'aria-labelledby': 'xp-hero-h' },
-      h('div', { class: 'xp-hero__copy' },
-        h('p', { class: 'xp-eyebrow' }, MOCK ? 'Live demo · mock data' : 'Live demo'),
-        h('h1', { id: 'xp-hero-h', class: 'xp-title' }, 'Pause anywhere. Ask anything.', h('span', {}, ' Get no spoilers.')),
-        h('p', { class: 'xp-lede' },
-          'The assistant only knows what the film has shown up to the moment you pause. ',
-          'Everything later stays locked on the server, so it cannot leak into an answer.'),
-        h('ol', { class: 'xp-howto', 'aria-label': 'How to try it' },
-          HOWTO.map(([ic, head, sub], i) => h('li', {},
-            h('span', { class: 'xp-howto__icon', html: icon(ic) }),
-            h('span', { class: 'xp-howto__text' },
-              h('small', {}, `Step ${i + 1}`), h('b', {}, head), h('span', {}, sub))))),
-        h('div', { class: 'xp-hero__cta' },
-          h('button', {
-            type: 'button', class: 'xp-cta',
-            onclick: () => document.getElementById('xp-picker-h')?.scrollIntoView({ behavior: 'smooth', block: 'start' }),
-          }, 'Try it now', h('span', { html: icon('down') })),
-          h('a', { class: 'xp-cta xp-cta--ghost', href: `https://www.youtube.com/watch?v=${TEASER.id}`, target: '_blank', rel: 'noopener' },
-            h('span', { html: icon('play') }), 'Watch on YouTube')),
-      ),
-      this.renderTeaser(),
-    );
-
-    this.cards = h('div', { class: 'xp-cards', role: 'list' },
-      [0, 1, 2].map(() => h('div', { class: 'xp-card xp-card--skeleton', role: 'listitem', 'aria-hidden': 'true' },
-        h('div', { class: 'xp-card__poster' }), h('div', { class: 'xp-card__body' }, h('span'), h('span')))));
-    const picker = h('section', { class: 'xp-picker', 'aria-labelledby': 'xp-picker-h' },
-      h('h2', { id: 'xp-picker-h', class: 'xp-section-h' }, 'Choose a film'),
-      this.cards);
-
-    // Player
-    this.video = h('video', {
-      class: 'xp-video', controls: true, playsinline: true, preload: 'metadata',
-      'aria-label': 'Film player',
-    });
-    this.content = h('div', { class: 'xp-content', 'aria-hidden': 'true' });
-    this.ring = h('div', { class: 'xp-ring', hidden: true });
-    this.hl = h('div', { class: 'xp-hl', hidden: true }, h('span', { class: 'xp-hl__label' }));
-    this.cross = h('div', { class: 'xp-cross' });
-    this.content.append(this.hl, this.ring, this.cross);
-
-    this.pickLayer = h('div', {
-      class: 'xp-picklayer', tabindex: '-1', role: 'application',
-      'aria-label': 'Choose a point on the frame. Use the arrow keys to move and Enter to ask. Escape cancels.',
-      onpointerdown: (e) => this.onPickPointer(e),
-      onpointermove: (e) => this.onPickHover(e),
-      onkeydown: (e) => this.onPickKey(e),
-    });
-    this.pickBar = h('div', { class: 'xp-pickbar', role: 'status' },
-      h('span', { class: 'xp-pickbar__msg' }),
-      h('span', { class: 'xp-pickbar__nudge' }, 'Tap inside the picture'),
-      h('span', { class: 'xp-pickbar__actions' },
-        h('button', { type: 'button', class: 'xp-btn xp-btn--ghost', onclick: () => this.confirmPick(null) },
-          'Ask about the whole frame'),
-        h('button', { type: 'button', class: 'xp-btn xp-btn--ghost', onclick: () => this.cancelPick() },
-          'Cancel')));
-    this.pausedPill = h('button', {
-      type: 'button', class: 'xp-pill', hidden: true,
-      onclick: () => this.input.focus(),
-    });
-    this.player = h('div', { class: 'xp-player' },
-      this.video, this.content, this.pickLayer, this.pickBar, this.pausedPill);
-
-    this.nowTitle = h('span', { class: 'xp-now__title' });
-    this.nowTime = h('span', { class: 'xp-now__time' });
-    const now = h('div', { class: 'xp-now' }, this.nowTitle, this.nowTime);
-
-    // Spoiler shield
-    this.shieldStat = h('span', { class: 'xp-shield__stat' }, 'Pause to see what is unlocked');
-    this.shieldChars = h('span', { class: 'xp-shield__chars' });
-    this.trackSeen = h('div', { class: 'xp-track__seen' });
-    this.trackMark = h('div', { class: 'xp-track__mark' }, h('span'));
-    this.gateRows = h('div', { class: 'xp-gate-rows' });
-    this.shield = h('section', { class: 'xp-shield', 'aria-labelledby': 'xp-shield-h' },
-      h('div', { class: 'xp-shield__head' },
-        h('span', { class: 'xp-shield__badge', html: icon('shield') }),
-        h('h2', { id: 'xp-shield-h', class: 'xp-shield__title' }, 'Spoiler shield'),
-        this.shieldStat),
-      h('div', { class: 'xp-track', role: 'img', 'aria-label': 'Film timeline: watched part unlocked, the rest locked' },
-        this.trackSeen, h('div', { class: 'xp-track__lock', html: icon('lock') }), this.trackMark),
-      h('div', { class: 'xp-track__legend' },
-        h('span', {}, h('i', { class: 'xp-dot xp-dot--ok' }), 'Unlocked: already on screen'),
-        this.shieldChars,
-        h('span', {}, h('i', { class: 'xp-dot xp-dot--locked' }), 'Locked: never sent to the model')),
-      h('details', { class: 'xp-gate-details' },
-        h('summary', {}, 'What the gate lets through right now'),
-        h('p', { class: 'xp-muted xp-small' },
-          'Counts only. The browser never receives locked content; the gate runs on the server before any search.'),
-        this.gateRows));
-
-    // Ask panel
-    this.langBtns = ['en', 'zh'].map((code) => h('button', {
-      type: 'button', class: 'xp-seg__btn', 'aria-pressed': String(this.lang === code), 'data-lang': code,
-      'aria-label': code === 'en' ? 'Answer in English' : 'Answer in Chinese',
-      title: code === 'en' ? 'Answer in English' : 'Answer in Chinese',
-      onclick: () => this.setLang(code),
-    }, code.toUpperCase()));
-    this.lockChip = h('span', { class: 'xp-lock', title: 'Questions are answered as of this moment' });
-    this.thread = h('div', { class: 'xp-thread', role: 'log', 'aria-label': 'Questions and answers' });
-    this.live = h('div', { class: 'visually-hidden', 'aria-live': 'polite' });
-    this.chips = QUICK.map((q) => h('button', {
-      type: 'button', class: 'xp-chip', 'data-key': q.key, onclick: () => this.onQuick(q),
-      html: `${icon(q.icon)}<span>${q.label}</span>${q.pick ? icon('tap', 'xp-chip__tap') : ''}`,
-    }));
-    this.input = h('input', {
-      class: 'xp-input', type: 'text', name: 'question', maxlength: '300', autocomplete: 'off',
-      placeholder: 'Ask about this moment…', 'aria-label': 'Your question',
-    });
-    this.sendBtn = h('button', { type: 'submit', class: 'xp-send', 'aria-label': 'Ask', html: icon('send') });
-    this.form = h('form', { class: 'xp-form', onsubmit: (e) => this.onSubmit(e) }, this.input, this.sendBtn);
-    this.panel = h('aside', { class: 'xp-panel', 'aria-labelledby': 'xp-panel-h' },
-      h('div', { class: 'xp-panel__inner' },
-        h('div', { class: 'xp-panel__head' },
-          h('div', {},
-            h('h2', { id: 'xp-panel-h', class: 'xp-panel__title' }, 'Ask the assistant'),
-            this.lockChip),
-          h('div', { class: 'xp-seg', role: 'group', 'aria-label': 'Answer language' }, this.langBtns)),
-        this.thread,
-        h('div', { class: 'xp-composer' },
-          h('div', { class: 'xp-chips', role: 'group', 'aria-label': 'Quick questions' }, this.chips),
-          this.form),
-        this.live));
-
-    this.stage = h('section', { class: 'xp-stage', 'aria-label': 'Player and assistant' },
-      h('div', { class: 'xp-main' }, this.player, now, this.shield),
-      this.panel);
-
-    r.append(intro, picker, this.stage);
-    r.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && this.pick) { this.cancelPick(); this.input.focus(); }
-    });
-    this.renderEmptyThread();
-    this.bindVideo();
-    this.updateLock();
+        h('b', {}, 'Walkthrough video'), h('span', {}, 'Plays from YouTube')));
   }
 
   renderEmptyThread() {
-    this.thread.innerHTML = '';
-    this.thread.append(h('div', { class: 'xp-empty' },
-      h('div', { class: 'xp-empty__icon', html: icon('pause') }),
-      h('p', { class: 'xp-empty__title' }, 'Pause the film, then ask'),
-      h('p', { class: 'xp-muted' },
-        'Try ', h('b', {}, 'What did I miss?'), ' a few minutes in, or ', h('b', {}, 'Who is this?'),
-        ' and tap a face on screen. Answers only use what you have already seen.')));
+    this.thread.replaceChildren(h('div', { class: 'xp-empty' },
+      h('p', {}, h('b', {}, 'Pause anywhere, then ask. '),
+        'To ask about someone, tap them on the paused picture first. Answers use what the film has shown up to that moment.')));
   }
 
   // ---------- titles ----------
 
   async loadTitles() {
     try {
-      const res = await this.fetch('/api/titles');
+      const res = await api('/api/titles');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       this.titles = await res.json();
       if (!Array.isArray(this.titles) || !this.titles.length) throw new Error('no titles');
     } catch (err) {
       console.warn('Could not load titles', err);
-      this.cards.innerHTML = '';
-      this.cards.append(h('div', { class: 'xp-notice', role: 'alert' },
+      this.films.replaceChildren(h('div', { class: 'xp-notice', role: 'alert' },
         h('span', { html: icon('alert') }),
         h('div', {},
           h('strong', {}, 'The film list did not load.'),
@@ -327,88 +340,114 @@ class Experience {
           h('button', { type: 'button', class: 'xp-btn', onclick: () => this.loadTitles() }, 'Try again'))));
       return;
     }
-    this.renderCards();
+    this.renderFilms();
+    const first = this.titles[0];
+    this.teaserImg.src = frameUrl(first.id, first.poster_t ?? 60);
+    this.teaserImg.hidden = false;
     const wanted = params.get('title');
-    this.selectTitle(this.titles.find((t) => t.id === wanted || t.title === wanted) || this.titles[0], false);
+    const match = wanted && this.titles.find((t) => t.id === wanted || t.title === wanted);
+    const t0 = Number(params.get('t'));
+    this.selectTitle(match || this.titles[0], {
+      at: Number.isFinite(t0) && t0 > 0 ? t0 : null,
+      ask: Boolean(match) && params.get('ask') === '1' && Boolean(params.get('q')),
+    });
   }
 
-  renderCards() {
-    this.cards.innerHTML = '';
-    for (const t of this.titles) {
-      const img = h('img', {
-        src: `/api/titles/${encodeURIComponent(t.id)}/frames/${Math.floor(t.poster_t ?? 60)}.jpg`,
-        alt: '', loading: 'lazy', decoding: 'async',
-      });
+  renderFilms() {
+    this.films.replaceChildren(...this.titles.map((t) => {
+      const img = h('img', { src: frameUrl(t.id, t.poster_t ?? 60), alt: '', loading: 'lazy', decoding: 'async' });
       img.addEventListener('error', () => img.remove(), { once: true });
-      const card = h('button', {
-        type: 'button', class: 'xp-card', 'data-id': t.id, 'aria-pressed': 'false',
-        onclick: () => this.selectTitle(t, true),
-      },
-        h('div', { class: 'xp-card__poster' }, img,
-          h('span', { class: 'xp-card__dur' }, fmt(t.duration_s)),
-          h('span', { class: 'xp-card__now', html: `${icon('film')}Now playing` })),
-        h('div', { class: 'xp-card__body' },
-          h('span', { class: 'xp-card__title' }, t.title),
-          h('span', { class: 'xp-card__syn' }, t.synopsis || ''),
-          h('span', { class: 'xp-card__lic' }, (t.license || '').replace(/-/g, ' '))));
-      this.cards.append(h('div', { role: 'listitem' }, card));
-    }
+      return h('button', {
+        type: 'button', class: 'xp-film', 'data-id': t.id, 'aria-pressed': 'false',
+        title: t.synopsis || t.title, onclick: () => this.selectTitle(t),
+      }, h('span', { class: 'xp-film__thumb' }, img), h('span', { class: 'xp-film__name' }, t.title),
+      t.playback === 'preview' ? h('span', { class: 'xp-badge xp-badge--preview' }, 'Preview quality') : null);
+    }));
   }
 
-  selectTitle(t, user) {
-    if (!t) return;
-    if (this.title && this.title.id === t.id) {
-      if (user) this.player.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      return;
-    }
+  selectTitle(t, { at = null, ask = false } = {}) {
+    if (!t || (this.title && this.title.id === t.id)) return;
     this.stopStream();
     this.cancelPick();
+    this.clearTap();
     this.title = t;
     if (!this.sessions.has(t.id)) this.sessions.set(t.id, newId());
     this.lastAskP = null;
-    for (const c of this.cards.querySelectorAll('.xp-card')) c.setAttribute('aria-pressed', String(c.dataset.id === t.id));
+    this.at = at != null ? Math.min(at, t.duration_s || at) : null;
+    for (const b of this.films.querySelectorAll('.xp-film')) b.setAttribute('aria-pressed', String(b.dataset.id === t.id));
+    this.player.classList.toggle('is-fresh', this.at == null);
+    this.video.poster = frameUrl(t.id, this.at ?? t.poster_t ?? 60);
+    // Until the video's metadata arrives (slow network), take the picture's shape from the poster frame, so the box
+    // already has the film's aspect and a tap maps to the right point.
+    this.posterDims = null;
+    const im = new Image();
+    im.onload = () => {
+      if (this.title !== t || this.video.videoWidth) return;
+      this.posterDims = [im.naturalWidth, im.naturalHeight];
+      this.player.style.setProperty('--xp-ar', `${im.naturalWidth} / ${im.naturalHeight}`);
+      this.layoutContent();
+    };
+    im.src = this.video.poster;
     this.video.src = `/api/titles/${encodeURIComponent(t.id)}/video`;
-    this.video.poster = `/api/titles/${encodeURIComponent(t.id)}/frames/${Math.floor(t.poster_t ?? 60)}.jpg`;
-    this.nowTitle.textContent = t.title;
+    if (this.at != null) {
+      const v = this.video;
+      const go = () => { v.currentTime = this.at; };
+      if (v.readyState >= 1) go(); else v.addEventListener('loadedmetadata', go, { once: true });
+      if (ask) v.addEventListener('seeked', () => this.onSubmit(), { once: true });
+    }
     this.clearOverlay();
     this.renderEmptyThread();
-    this.updateTime();
-    this.updatePausedPill();
-    this.refreshGate(0, true);
-    if (user) this.player.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    this.updateControls();
+    this.updateLock();
+    this.refreshGate(this.at ?? 0, true);
   }
 
-  // ---------- video ----------
+  // ---------- player ----------
+
+  /** The position questions are asked at: where the video is, or where a deep link is taking it. */
+  position() {
+    const v = this.video;
+    return this.at != null && (v.readyState < 1 || v.seeking) ? this.at : (v.currentTime || 0);
+  }
 
   bindVideo() {
     const v = this.video;
-    v.addEventListener('loadedmetadata', () => { this.layoutContent(); this.updateTime(); });
-    v.addEventListener('timeupdate', () => this.updateTime());
+    v.addEventListener('loadedmetadata', () => {
+      if (v.videoWidth && v.videoHeight) this.player.style.setProperty('--xp-ar', `${v.videoWidth} / ${v.videoHeight}`);
+      this.scrub.max = String(v.duration || this.title?.duration_s || 1);
+      this.layoutContent();
+      this.updateControls();
+    });
+    v.addEventListener('timeupdate', () => {
+      this.updateControls();
+      if (!v.paused && !v.seeking && Math.abs(v.currentTime - (this.gateP ?? -1e9)) >= GATE_EVERY_S) {
+        this.refreshGate(v.currentTime, true);
+      }
+    });
     v.addEventListener('play', () => {
+      this.player.classList.remove('is-fresh');
       this.cancelPick();
+      this.clearTap();
       this.clearOverlay();
-      this.updatePausedPill();
+      this.updateControls();
     });
-    v.addEventListener('pause', () => {
-      this.updatePausedPill();
-      this.refreshGate(v.currentTime);
-    });
+    v.addEventListener('pause', () => { this.updateControls(); this.refreshGate(v.currentTime); });
     v.addEventListener('seeking', () => {
-      if (this.overlayP != null && Math.abs(v.currentTime - this.overlayP) > 0.5) this.clearOverlay();
+      if (this.tap && Math.abs(v.currentTime - this.tap.p) > 0.3) this.clearTap();
+      if (this.hlP != null && Math.abs(v.currentTime - this.hlP) > 0.3) this.clearOverlay();
+      this.updateControls();
     });
-    v.addEventListener('seeked', () => {
-      this.updateTime();
-      this.updatePausedPill();
-      if (v.paused) this.refreshGate(v.currentTime);
-    });
-    v.addEventListener('ended', () => this.updatePausedPill());
+    v.addEventListener('seeked', () => { this.at = null; this.updateControls(); this.refreshGate(v.currentTime); });
+    v.addEventListener('volumechange', () => this.updateControls());
+    v.addEventListener('ended', () => this.updateControls());
     v.addEventListener('error', () => {
-      if (!this.title) return;
-      this.pausedPill.hidden = false;
-      this.pausedPill.className = 'xp-pill xp-pill--warn';
-      this.pausedPill.innerHTML = `${icon('alert')}<span>The video could not be loaded. Try another film or reload.</span>`;
+      if (!this.title || !v.getAttribute('src')) return;
+      this.showHint('The video could not be loaded. Try another film or reload.', true);
     });
     new ResizeObserver(() => this.layoutContent()).observe(v);
+    for (const ev of ['fullscreenchange', 'webkitfullscreenchange']) {
+      document.addEventListener(ev, () => { this.updateControls(); this.layoutContent(); });
+    }
   }
 
   /** Positions the overlay box on the visible picture (object-fit: contain leaves letterbox bars). */
@@ -416,8 +455,8 @@ class Experience {
     const v = this.video;
     const w = v.clientWidth;
     const hh = v.clientHeight;
-    const vw = v.videoWidth || 16;
-    const vh = v.videoHeight || 9;
+    const vw = v.videoWidth || this.posterDims?.[0] || 16;
+    const vh = v.videoHeight || this.posterDims?.[1] || 9;
     const scale = Math.min(w / vw, hh / vh);
     const cw = vw * scale;
     const ch = vh * scale;
@@ -427,47 +466,97 @@ class Experience {
     });
   }
 
-  contentRect() { return this.content.getBoundingClientRect(); }
+  togglePlay() {
+    const v = this.video;
+    if (v.paused || v.ended) v.play().catch(() => {}); else v.pause();
+  }
 
-  updateTime() {
-    const t = this.title;
-    if (!t) return;
-    const cur = this.video.currentTime || 0;
-    const dur = this.video.duration || t.duration_s || 1;
-    this.nowTime.textContent = `${fmt(cur)} / ${fmt(dur)}`;
-    const pct = Math.min(100, (cur / dur) * 100);
-    this.trackSeen.style.width = `${pct}%`;
-    this.trackMark.style.left = `${pct}%`;
-    this.trackMark.firstChild.textContent = fmt(cur);
-    this.trackMark.firstChild.style.transform = `translateX(-${pct}%)`;
+  toggleFullscreen() {
+    const d = document;
+    if (d.fullscreenElement || d.webkitFullscreenElement) {
+      (d.exitFullscreen || d.webkitExitFullscreen).call(d)?.catch?.(() => {});
+      return;
+    }
+    const el = this.player;
+    const req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (req) req.call(el)?.catch?.(() => {});
+    else if (this.video.webkitEnterFullscreen) this.video.webkitEnterFullscreen();     // iPhone: native player only
+  }
+
+  onScrub() {
+    this.scrubbing = true;
+    const t = Number(this.scrub.value);
+    this.video.currentTime = t;
+    this.updateControls(t);
+    this.refreshGate(t);
+  }
+
+  onPlayerKey(e) {
+    if (e.target !== this.player && e.target !== this.tapLayer && e.target !== this.playBtn) return;
+    if (this.pick) return;
+    if (e.key === ' ' || e.key === 'k') { e.preventDefault(); this.togglePlay(); }
+  }
+
+  updateControls(at) {
+    const v = this.video;
+    const playing = !v.paused && !v.ended;
+    const cur = at ?? this.position();
+    const dur = v.duration || this.title?.duration_s || 0;
+    const fs = Boolean(document.fullscreenElement || document.webkitFullscreenElement);
+    const key = `${playing}${v.muted}${fs}`;
+    if (this.ctlKey !== key) {                         // icons only change with the state (timeupdate fires 4×/s)
+      this.ctlKey = key;
+      this.playBtn.innerHTML = icon(playing ? 'pause' : 'play', playing ? '' : 'xp-icon--fill');
+      this.playBtn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+      this.muteBtn.innerHTML = icon(v.muted ? 'mute' : 'volume');
+      this.muteBtn.setAttribute('aria-label', v.muted ? 'Unmute' : 'Mute');
+      this.fsBtn.innerHTML = icon(fs ? 'shrink' : 'expand');
+      this.fsBtn.setAttribute('aria-label', fs ? 'Exit full screen' : 'Full screen');
+    }
+    this.timeEl.textContent = `${fmt(cur)} / ${fmt(dur)}`;
+    if (!this.scrubbing) this.scrub.value = String(cur);
+    this.scrub.setAttribute('aria-valuetext', `${fmt(cur)} of ${fmt(dur)}`);
+    this.scrub.style.setProperty('--pct', `${dur ? Math.min(100, (cur / dur) * 100) : 0}%`);
+    this.player.classList.toggle('is-paused', !playing);
+    this.bigPlay.hidden = playing || !this.player.classList.contains('is-fresh');
+    this.updateHint();
     if (!this.busy) this.updateLock();
   }
 
-  updatePausedPill() {
+  updateHint() {
     const v = this.video;
-    const show = this.title && v.paused && !v.ended && v.currentTime > 0.5 && !this.pick && !this.busy;
-    this.pausedPill.hidden = !show;
-    if (!show) return;
-    this.pausedPill.className = 'xp-pill';
-    this.pausedPill.innerHTML = `${icon('pause')}<span>Paused at <b>${fmt(v.currentTime)}</b></span>` +
-      '<span class="xp-pill__cta">Ask about this moment</span>';
+    const show = this.title && v.paused && !this.pick && !this.busy && !this.tap && !this.bigPlayVisible()
+      && this.position() > 0.5;
+    if (!show) { if (!this.hint.classList.contains('is-warn')) this.hint.hidden = true; return; }
+    if (!this.hint.hidden && !this.hint.classList.contains('is-warn')) return;
+    this.showHint('Tap someone on screen to ask about them');
+  }
+
+  bigPlayVisible() { return !this.bigPlay.hidden; }
+
+  showHint(text, warn = false) {
+    this.hint.hidden = false;
+    this.hint.classList.toggle('is-warn', warn);
+    this.hint.innerHTML = `${icon(warn ? 'alert' : 'tap')}<span></span>`;
+    this.hint.lastChild.textContent = text;
   }
 
   updateLock(p) {
-    const at = p ?? (this.video.currentTime || 0);
+    const at = p ?? this.position();
     this.lockChip.innerHTML = `${icon('lock')}<span>Answers as of <b>${fmt(at)}</b></span>`;
   }
 
-  // ---------- spoiler gate ----------
+  // ---------- the gate line ----------
 
   refreshGate(p, immediate = false) {
     clearTimeout(this.gateTimer);
+    this.gateP = p;
     const run = async () => {
       const t = this.title;
       if (!t) return;
       const seq = ++this.gateSeq;
       try {
-        const res = await this.fetch(`/api/titles/${encodeURIComponent(t.id)}/gate?p=${p.toFixed(1)}`);
+        const res = await api(`/api/titles/${encodeURIComponent(t.id)}/gate?p=${p.toFixed(1)}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const g = await res.json();
         if (seq === this.gateSeq && this.title === t) this.renderGate(g);
@@ -486,80 +575,117 @@ class Experience {
       eligible += Number(g.eligible?.[k]) || 0;
       total += Number(g.total?.[k]) || 0;
     }
-    this.setShieldCounts(eligible, Math.max(0, total - eligible), g.p);
-    if (g.characters_total != null) {
-      this.shieldChars.innerHTML = `${icon('user')}<span><b>${g.characters_known ?? 0}</b> of ${g.characters_total} characters introduced</span>`;
-    }
-    this.gateRows.innerHTML = '';
+    this.setGateCounts(eligible, Math.max(0, total - eligible));
     const rows = GATE_ROWS.filter(([k]) => keys.has(k));
     for (const k of keys) if (!GATE_ROWS.some(([r]) => r === k) && Number(g.total?.[k])) rows.push([k, TYPE_LABELS[k] || k]);
-    for (const [k, label] of rows) {
-      const e = Number(g.eligible?.[k]) || 0;
-      const n = Number(g.total?.[k]) || 0;
-      const pct = n ? (e / n) * 100 : 0;
-      this.gateRows.append(h('div', { class: 'xp-gate-row' },
-        h('span', { class: 'xp-gate-row__label' }, label),
-        h('span', { class: 'xp-gate-row__bar' }, h('i', { style: `width:${pct.toFixed(1)}%` })),
-        h('span', { class: 'xp-gate-row__num' }, `${e} / ${n}`)));
+    this.gateRows.replaceChildren(
+      ...rows.map(([k, label]) => {
+        const e = Number(g.eligible?.[k]) || 0;
+        const n = Number(g.total?.[k]) || 0;
+        return h('div', { class: 'xp-gate-row' },
+          h('span', { class: 'xp-gate-row__label' }, label),
+          h('span', { class: 'xp-gate-row__bar' }, h('i', { style: `width:${n ? ((e / n) * 100).toFixed(1) : 0}%` })),
+          h('span', { class: 'xp-gate-row__num' }, `${e} / ${n}`));
+      }),
+      g.characters_total != null
+        ? h('p', { class: 'xp-gate__chars' }, `${g.characters_known ?? 0} of ${g.characters_total} characters introduced`)
+        : null,
+      h('p', { class: 'xp-gate__note' },
+        `Counts only, at ${fmt(g.p)}. Locked items stay on the server; the gate runs there before any lookup or search.`));
+  }
+
+  setGateCounts(eligible, locked) {
+    const key = `${eligible}/${locked}`;
+    if (this.gateShown === key) return;
+    this.gateShown = key;
+    this.gateText.innerHTML = eligible
+      ? `Assistant can see <b class="xp-ok">${num(eligible)}</b> moments · <b class="xp-locked">${num(locked)}</b> still locked`
+      : `Nothing unlocked yet · <b class="xp-locked">${num(locked)}</b> moments locked until they play`;
+    this.gate.classList.remove('is-pulse');
+    void this.gate.offsetWidth;
+    this.gate.classList.add('is-pulse');
+  }
+
+  toggleGateRows() {
+    const open = this.gateRows.hidden;
+    this.gateRows.hidden = !open;
+    this.gateMore.setAttribute('aria-expanded', String(open));
+  }
+
+  // ---------- tapping the picture ----------
+
+  pointToTap(e) {
+    const r = this.content.getBoundingClientRect();
+    const x = (e.clientX - r.left) / r.width;
+    const y = (e.clientY - r.top) / r.height;
+    if (!(x >= 0 && x <= 1 && y >= 0 && y <= 1)) return null;
+    return { x, y };
+  }
+
+  onPictureClick(e) {
+    const v = this.video;
+    if (this.pick) {
+      const p = this.pointToTap(e);
+      if (p) this.confirmPick(p); else this.nudge();
+      return;
     }
+    if (!this.title) return;
+    if (!v.paused && !v.ended) { v.pause(); return; }
+    if (this.bigPlayVisible()) { v.play().catch(() => {}); return; }
+    const p = this.pointToTap(e);
+    if (!p) { this.nudge(); return; }
+    this.setTap(p);
   }
 
-  setShieldCounts(eligible, locked, p) {
-    this.shieldStat.innerHTML =
-      `<b class="xp-ok">${eligible.toLocaleString('en')}</b> facts unlocked · ` +
-      `<b class="xp-locked">${locked.toLocaleString('en')}</b> still locked` +
-      (p != null ? ` <span class="xp-muted">at ${fmt(p)}</span>` : '');
-    this.shield.classList.remove('is-pulse');
-    void this.shield.offsetWidth;
-    this.shield.classList.add('is-pulse');
+  nudge() {
+    this.showHint('That is outside the picture. Tap inside it.', true);
+    this.live.textContent = 'That is outside the picture.';
+    clearTimeout(this.nudgeTimer);
+    this.nudgeTimer = setTimeout(() => { this.hint.classList.remove('is-warn'); this.updateHint(); }, 1600);
   }
 
-  // ---------- asking ----------
-
-  setLang(code) {
-    this.lang = code;
-    for (const b of this.langBtns) b.setAttribute('aria-pressed', String(b.dataset.lang === code));
-    try { localStorage.setItem(LANG_KEY, code); } catch { /* storage unavailable */ }
+  setTap(p) {
+    this.tap = { x: p.x, y: p.y, p: this.position() };
+    this.clearOverlay();
+    this.drawRing(p);
+    this.tapNote.hidden = false;
+    for (const c of this.chips) c.classList.toggle('is-ready', c.dataset.key === 'who' || c.dataset.key === 'what');
+    this.live.textContent = 'Point set. Ask who or what it is.';
+    this.updateHint();
   }
 
-  onQuick(q) {
-    if (this.busy || !this.title) return;
-    if (q.pick) this.startPick(q);
-    else this.ask(q.question, null);
+  clearTap() {
+    this.tap = null;
+    this.tapNote.hidden = true;
+    for (const c of this.chips) c.classList.remove('is-ready');
+    this.ring.hidden = true;
+    this.updateHint();
   }
 
-  onSubmit(e) {
-    e.preventDefault();
-    if (this.busy) { this.stopStream(); return; }
-    const q = this.input.value.trim();
-    if (!q || !this.title) return;
-    this.input.value = '';
-    this.cancelPick();
-    this.ask(q, null);
-  }
+  /** The tap to send with a question at p: only if it was made at that moment. */
+  tapAt(p) { return this.tap && Math.abs(this.tap.p - p) < 0.3 ? { x: this.tap.x, y: this.tap.y } : null; }
 
   startPick(q) {
     this.video.pause();
     this.clearOverlay();
     this.pick = { question: q.question, x: 0.5, y: 0.5 };
     this.player.classList.add('is-picking');
-    this.pickBar.querySelector('.xp-pickbar__msg').innerHTML =
-      `${icon('tap')}<span><b>${q.pick}</b> on the video</span>`;
+    this.pickBar.querySelector('.xp-pickbar__msg').innerHTML = `${icon('tap')}<span><b>${q.pick}</b></span>`;
     this.moveCross(0.5, 0.5, false);
     for (const c of this.chips) c.classList.toggle('is-active', c.dataset.key === q.key);
-    this.updatePausedPill();
-    this.pickLayer.focus({ preventScroll: true });
+    this.updateHint();
+    this.tapLayer.focus({ preventScroll: true });
     const r = this.player.getBoundingClientRect();
     if (r.top < 0 || r.bottom > innerHeight) this.player.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    this.live.textContent = `${q.pick} on the video, or use the arrow keys and Enter.`;
+    this.live.textContent = `${q.pick} on the picture, or use the arrow keys and Enter.`;
   }
 
   cancelPick() {
     if (!this.pick) return;
     this.pick = null;
-    this.player.classList.remove('is-picking', 'is-keyboard');
+    this.player.classList.remove('is-picking', 'is-keyboard', 'is-outside');
     for (const c of this.chips) c.classList.remove('is-active');
-    this.updatePausedPill();
+    this.updateHint();
   }
 
   moveCross(x, y, keyboard) {
@@ -570,35 +696,11 @@ class Experience {
     this.player.classList.toggle('is-keyboard', keyboard);
   }
 
-  pointToTap(e) {
-    const r = this.contentRect();
-    const x = (e.clientX - r.left) / r.width;
-    const y = (e.clientY - r.top) / r.height;
-    if (x < 0 || x > 1 || y < 0 || y > 1) return null;
-    return { x, y };
-  }
-
   onPickHover(e) {
-    if (!this.pick) return;
+    if (!this.pick || e.pointerType === 'touch') return;
     const p = this.pointToTap(e);
     this.player.classList.toggle('is-outside', !p);
     if (p) this.moveCross(p.x, p.y, false);
-  }
-
-  onPickPointer(e) {
-    if (!this.pick) return;
-    e.preventDefault();
-    const p = this.pointToTap(e);
-    if (!p) {
-      this.live.textContent = 'That is outside the picture. Tap inside the frame.';
-      this.pickBar.classList.remove('is-nudge');
-      void this.pickBar.offsetWidth;
-      this.pickBar.classList.add('is-nudge');
-      clearTimeout(this.nudgeTimer);
-      this.nudgeTimer = setTimeout(() => this.pickBar.classList.remove('is-nudge'), 1600);
-      return;
-    }
-    this.confirmPick(p);
   }
 
   onPickKey(e) {
@@ -622,7 +724,7 @@ class Experience {
     if (!this.pick) return;
     const question = this.pick.question;
     this.cancelPick();
-    if (tap) this.drawRing(tap);
+    if (tap) this.setTap(tap);
     this.ask(question, tap);
   }
 
@@ -633,12 +735,13 @@ class Experience {
     this.ring.classList.remove('is-in');
     void this.ring.offsetWidth;
     this.ring.classList.add('is-in');
-    this.overlayP = this.video.currentTime;
   }
 
-  drawHighlight(hl) {
+  /** Draws the server's box, only while the player still shows the moment it belongs to. */
+  drawHighlight(hl, p) {
     const b = hl?.bbox;
-    if (!Array.isArray(b) || b.length !== 4) return;
+    const v = this.video;
+    if (!Array.isArray(b) || b.length !== 4 || !v.paused || Math.abs(this.position() - p) > 0.6) return;
     const [ymin, xmin, ymax, xmax] = b.map(Number);
     Object.assign(this.hl.style, {
       top: `${ymin / 10}%`, left: `${xmin / 10}%`,
@@ -648,17 +751,51 @@ class Experience {
     label.textContent = hl.label || '';
     label.hidden = !hl.label;
     this.hl.classList.toggle('is-low', ymin < 80);
-    this.hl.hidden = false;
-    this.hl.classList.remove('is-in');
-    void this.hl.offsetWidth;
-    this.hl.classList.add('is-in');
-    this.overlayP = this.video.currentTime;
+    if (this.hl.hidden || this.hlKey !== b.join()) {
+      this.hl.hidden = false;
+      this.hl.classList.remove('is-in');
+      void this.hl.offsetWidth;
+      this.hl.classList.add('is-in');
+    }
+    this.hlKey = b.join();
+    this.hlP = p;
+  }
+
+  clearHighlight() {
+    this.hl.hidden = true;
+    this.hlP = null;
+    this.hlKey = null;
   }
 
   clearOverlay() {
-    this.ring.hidden = true;
-    this.hl.hidden = true;
-    this.overlayP = null;
+    this.clearHighlight();
+    if (!this.tap) this.ring.hidden = true;
+  }
+
+  // ---------- asking ----------
+
+  setLang(code) {
+    this.lang = code;
+    for (const b of this.langBtns) b.setAttribute('aria-pressed', String(b.dataset.lang === code));
+    try { localStorage.setItem(LANG_KEY, code); } catch { /* storage unavailable */ }
+  }
+
+  onQuick(q) {
+    if (this.busy || !this.title) return;
+    const question = this.lang === 'zh' ? q.zh : q.label;
+    if (!q.pick) { this.ask(question, null); return; }
+    const tap = this.tapAt(this.position());
+    if (tap) this.ask(question, tap);
+    else this.startPick({ ...q, question });
+  }
+
+  onSubmit(e) {
+    e?.preventDefault();
+    if (this.busy) { this.stopStream(); return; }
+    const q = this.input.value.trim();
+    if (!q || !this.title) return;
+    this.cancelPick();
+    if (this.ask(q, this.tapAt(this.position()))) this.input.value = '';
   }
 
   setBusy(on) {
@@ -669,7 +806,7 @@ class Experience {
     this.sendBtn.innerHTML = icon(on ? 'stop' : 'send');
     this.sendBtn.setAttribute('aria-label', on ? 'Stop' : 'Ask');
     this.sendBtn.classList.toggle('is-stop', on);
-    this.updatePausedPill();
+    this.updateHint();
   }
 
   stopStream() {
@@ -677,100 +814,127 @@ class Experience {
     this.abort = null;
   }
 
-  scrollThread(force = false) {
-    const t = this.thread;
-    if (force || t.scrollHeight - t.scrollTop - t.clientHeight < 160) t.scrollTop = t.scrollHeight;
+  /** Starts a question. Returns false if it was not sent (busy, or waiting out the per-minute limit). */
+  ask(question, tap) {
+    if (this.busy || !this.title) return false;
+    if (Date.now() < this.cooldownUntil && this.cooldownNotice?.isConnected) {
+      this.cooldownNotice.classList.remove('is-shake');
+      void this.cooldownNotice.offsetWidth;
+      this.cooldownNotice.classList.add('is-shake');
+      return false;
+    }
+    this.run(question, tap);
+    return true;
   }
 
-  /** Brings a new answer card's top into view, inside the thread and (on narrow layouts) on the page. */
-  revealAnswer(card) {
-    const t = this.thread;
-    t.scrollTop = Math.max(0, card.offsetTop - 12);
-    requestAnimationFrame(() => {
-      const r = card.getBoundingClientRect();
-      if (r.top > innerHeight - 120 || r.top < 0) window.scrollBy({ top: r.top - innerHeight * 0.3, behavior: 'smooth' });
-    });
-  }
-
-  async ask(question, tap) {
-    if (this.busy || !this.title) return;
+  async run(question, tap) {
     const v = this.video;
     v.pause();
-    const p = Math.round((v.currentTime || 0) * 10) / 10;
+    const p = Math.round(this.position() * 10) / 10;
     const title = this.title;
+    const lang = this.lang;
 
-    if (this.thread.querySelector('.xp-empty')) this.thread.innerHTML = '';
+    this.thread.querySelector('.xp-empty')?.remove();
     if (this.lastAskP != null && p < this.lastAskP - 0.5) {
       for (const turn of this.thread.querySelectorAll('.xp-turn')) turn.classList.add('is-stale');
-      this.thread.append(h('div', { class: 'xp-divider', role: 'note' },
-        h('span', { html: icon('rewind') }), h('span', {}, `You went back to ${fmt(p)}. New conversation, so earlier answers can't spoil it.`)));
+      this.thread.prepend(h('div', { class: 'xp-divider', role: 'note' },
+        h('span', { html: icon('rewind') }),
+        h('span', {}, `You went back to ${fmt(p)}. The answers below are from later in the film, so the assistant leaves them out now.`)));
     }
     this.lastAskP = p;
     this.updateLock(p);
 
-    const turn = new Turn(this, { question, tap, p, title });
-    this.thread.append(turn.el);
-    this.scrollThread(true);
+    const turn = new Turn(this, { question, tap, p, title, lang });
+    this.thread.prepend(turn.el);
+    this.thread.scrollTop = 0;
+    this.revealTurn(turn.el);
     this.setBusy(true);
     const ctrl = new AbortController();
     this.abort = ctrl;
     const started = performance.now();
 
     try {
-      const res = await this.fetch('/api/ask', {
+      const res = await api('/api/ask', {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
         body: JSON.stringify({
-          title_id: title.id, p, question, lang: this.lang, session_id: this.sessions.get(title.id),
+          title_id: title.id, p, question, lang, session_id: this.sessions.get(title.id),
           ...(tap ? { tap: { x: +tap.x.toFixed(4), y: +tap.y.toFixed(4) } } : {}),
         }),
         signal: ctrl.signal,
       });
       if (!res.ok) {
-        let msg = '';
-        try { msg = (await res.json()).message || ''; } catch { /* not JSON */ }
-        if (res.status === 429) turn.fail('You are asking faster than the demo allows.', msg || 'Wait a minute, then try again.', 'slow');
-        else turn.fail('The assistant could not answer.', msg || `The service returned HTTP ${res.status}.`);
+        let body = {};
+        try { body = await res.json(); } catch { /* not JSON */ }
+        if (res.status === 429) this.limited(turn, body, Number(res.headers.get('retry-after')));
+        else turn.fail('The assistant could not answer.', body.message || body.detail || `The service returned HTTP ${res.status}.`);
         return;
       }
       await readSSE(res, (event, data) => {
         if (this.title !== title) return;
         turn.onEvent(event, data, performance.now() - started);
-        if (event === 'gate') this.setShieldCounts(Number(data.eligible_total) || 0, Number(data.locked_total) || 0, data.p ?? p);
-        if (event === 'answer') {
-          if (data.highlight && Math.abs(v.currentTime - p) < 0.6) this.drawHighlight(data.highlight);
+        if (event === 'gate') this.setGateCounts(Number(data.eligible_total) || 0, Number(data.locked_total) || 0);
+        else if (event === 'highlight') this.drawHighlight(data, p);
+        else if (event === 'answer') {
+          // The answer's box is the truthful one: null when the text is not about the tapped entity.
+          if (data.highlight) this.drawHighlight(data.highlight, p);
+          else if (this.hlP === p) this.clearHighlight();
           this.live.textContent = `Answer: ${data.text || ''}`;
-          const card = turn.el.querySelector('.xp-answer');
-          if (card) this.revealAnswer(card);
-        } else this.scrollThread();
+        }
       });
       turn.finish();
     } catch (err) {
-      if (err.name === 'AbortError') turn.fail('Stopped.', 'You stopped this answer.', 'muted');
+      if (err.name === 'AbortError') turn.stopped();
       else {
         console.warn('Ask failed', err);
-        turn.fail('The connection dropped.', 'Check your network and try again.');
+        turn.dropped();
       }
     } finally {
       if (this.abort === ctrl) this.abort = null;
       this.setBusy(false);
-      if (!turn.answered) this.scrollThread();
     }
+  }
+
+  /** HTTP 429: say which limit was hit; for the per-minute one, count down to when asking works again. */
+  limited(turn, body, retryAfter) {
+    const wait = Math.max(1, Math.round(Number(body.retry_after_s) || retryAfter || 60));
+    if (body.limit === 'per_minute') {
+      this.cooldownUntil = Date.now() + wait * 1000;
+      this.cooldownNotice = turn.countdown(this.cooldownUntil);
+    } else if (body.limit === 'daily' && body.scope === 'total') {
+      turn.fail('The demo has used up today’s question budget.',
+        'It resets within a day. The player and the gate line keep working meanwhile.', 'slow', false);
+    } else if (body.limit === 'daily') {
+      turn.fail('You have reached today’s question limit for this demo.',
+        'Thanks for trying it this much. It resets within a day.', 'slow', false);
+    } else {
+      turn.fail('Too many questions right now.', body.message || 'Wait a minute, then try again.', 'slow');
+    }
+  }
+
+  /** On narrow layouts the panel is below the player: make sure the new turn's top is on screen. */
+  revealTurn(el) {
+    requestAnimationFrame(() => {
+      const r = el.getBoundingClientRect();
+      if (r.top > innerHeight - 140) window.scrollBy({ top: r.top - innerHeight + 220, behavior: 'smooth' });
+    });
   }
 
   retry(question, tap, p) {
     if (this.busy) return;
-    if (Math.abs((this.video.currentTime || 0) - p) > 0.5) this.video.currentTime = p;
-    if (tap) this.drawRing(tap);
+    if (Math.abs(this.position() - p) > 0.5) this.video.currentTime = p;
+    if (tap) this.setTap(tap);
     this.ask(question, tap);
   }
 
   rewindTo(t) {
     this.video.pause();
     this.video.currentTime = t;
-    this.player.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    this.player.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 }
+
+function frameUrl(id, t) { return `/api/titles/${encodeURIComponent(id)}/frames/${Math.floor(Number(t) || 0)}.jpg`; }
 
 /** Reads a text/event-stream body and calls onEvent(event, data) for each message. */
 async function readSSE(res, onEvent) {
@@ -807,62 +971,63 @@ async function readSSE(res, onEvent) {
   if (buf.trim()) flush(buf);
 }
 
-/** One question with its live step timeline and final answer card. */
+/** One question: the step trace (collapsed to one line once text arrives), the streamed answer, its sources. */
 class Turn {
-  constructor(app, { question, tap, p, title }) {
+  constructor(app, { question, tap, p, title, lang }) {
     this.app = app;
     this.q = { question, tap, p };
     this.title = title;
     this.steps = new Map();
+    this.nSteps = 0;
+    this.lookups = 0;
+    this.streamed = '';
     this.answered = false;
     this.failed = false;
-    this.lastMark = 0;
 
     this.stepList = h('ol', { class: 'xp-steps', 'aria-label': 'What the assistant did' });
-    this.thinking = h('li', { class: 'xp-step is-pending xp-step--thinking' },
-      h('span', { class: 'xp-step__icon' }, h('i', { class: 'xp-spinner' })),
-      h('span', { class: 'xp-step__body' }, h('span', { class: 'xp-step__label' }, 'Locking the moment and checking the gate…')));
-    this.stepList.append(this.thinking);
-    this.slot = h('div', { class: 'xp-turn__answer' });
+    this.traceLabel = h('span', { class: 'xp-trace__label' }, 'Locking the moment and checking the gate…');
+    this.trace = h('details', { class: 'xp-trace is-working', open: true },
+      h('summary', {}, h('i', { class: 'xp-spinner', 'aria-hidden': 'true' }), this.traceLabel),
+      this.stepList);
+    this.text = h('p', { class: 'xp-answer__text', lang: lang === 'zh' ? 'zh' : 'en' });
+    this.card = h('div', { class: 'xp-answer is-streaming', hidden: true }, this.text);
+    this.slot = h('div', { class: 'xp-turn__notes' });
     this.el = h('article', { class: 'xp-turn' },
       h('div', { class: 'xp-q' },
         h('p', { class: 'xp-q__text' }, question),
         h('span', { class: 'xp-q__meta' },
           h('span', { class: 'xp-tag', html: `${icon('lock')}<span>${fmt(p)}</span>` }),
           tap ? h('span', { class: 'xp-tag', html: `${icon('tap')}<span>tapped</span>` }) : null)),
-      this.stepList, this.slot);
+      this.trace, this.card, this.slot);
   }
 
-  addStep({ id, iconName, label, summary, ms, pending }) {
+  addStep({ id, iconName, label, summary, pending }) {
     const li = h('li', { class: `xp-step${pending ? ' is-pending' : ''}` },
       h('span', { class: 'xp-step__icon', html: icon(iconName) }),
       h('span', { class: 'xp-step__body' },
         h('span', { class: 'xp-step__label' }, label),
         h('span', { class: 'xp-step__summary' }, summary || '')),
-      h('span', { class: 'xp-step__ms' }, ms >= 50 ? `${(ms / 1000).toFixed(1)} s` : ''));
-    this.stepList.insertBefore(li, this.thinking);
+      h('span', { class: 'xp-step__ms' }));
+    this.stepList.append(li);
+    this.nSteps += 1;
     if (id) this.steps.set(id, { li, start: performance.now() });
     return li;
   }
 
   onEvent(event, data, elapsed) {
     switch (event) {
-      case 'gate': {
+      case 'gate':
         this.addStep({
-          iconName: 'shield', label: `Spoiler gate locked at ${fmt(data.p ?? this.q.p)}`,
-          summary: `${(Number(data.eligible_total) || 0).toLocaleString('en')} facts unlocked · ` +
-            `${(Number(data.locked_total) || 0).toLocaleString('en')} kept away from the model`,
-          ms: elapsed,
+          iconName: 'shield', label: `Spoiler gate at ${fmt(data.p ?? this.q.p)}`,
+          summary: `${num(data.eligible_total)} moments unlocked · ${num(data.locked_total)} kept from the model`,
         }).classList.add('xp-step--gate');
-        this.setThinking('Thinking…');
+        this.setLabel('Looking things up…');
         break;
-      }
       case 'tool': {
-        const id = data.id || `s${this.steps.size}`;
-        this.addStep({
-          id, iconName: toolIcon(data.name), label: `${data.label || data.name || 'Working'}…`, pending: true,
-        }).dataset.tool = data.name || '';
-        this.setThinking(null);
+        const id = data.id || `s${this.nSteps}`;
+        this.addStep({ id, iconName: toolIcon(data.name), label: `${data.label || data.name || 'Working'}…`, pending: true });
+        this.lookups += 1;
+        this.setLabel(`${data.label || data.name || 'Working'}…`);
         break;
       }
       case 'tool_result': {
@@ -872,58 +1037,57 @@ class Turn {
         const label = li.querySelector('.xp-step__label');
         label.textContent = label.textContent.replace(/…$/, '');
         li.querySelector('.xp-step__summary').textContent = data.summary || 'Done';
-        const ms = Number(data.duration_ms ?? data.ms) || (s ? performance.now() - s.start : 0);
+        const ms = s ? performance.now() - s.start : 0;
         li.querySelector('.xp-step__ms').textContent = ms >= 50 ? `${(ms / 1000).toFixed(1)} s` : '';
-        if (![...this.steps.values()].some((x) => x.li.classList.contains('is-pending'))) this.setThinking('Writing the answer…');
+        if (!this.streamed && !this.pending()) this.setLabel('Writing the answer…');
         break;
       }
+      case 'delta':
+        this.addText(data.text || '');
+        break;
       case 'answer':
         this.answered = true;
-        this.setThinking(null);
-        this.renderAnswer(data);
+        this.finalise(data, elapsed);
         break;
       case 'error':
-        this.fail('The assistant ran into a problem.', data.message || 'Please try again.');
+        if (this.streamed) this.cutShort('The answer was cut short.', 'Something went wrong partway through.');
+        else this.fail('The assistant ran into a problem.', data.message || 'Please try again.');
         break;
       default:
         break;
     }
+    this.syncTrace();
   }
 
-  setThinking(text) {
-    this.thinking.hidden = !text;
-    if (text) this.thinking.querySelector('.xp-step__label').textContent = text;
+  pending() { return [...this.steps.values()].some((x) => x.li.classList.contains('is-pending')); }
+
+  setLabel(text) { this.traceLabel.textContent = text; }
+
+  /** Once the answer starts, the trace folds into one line so it never pushes the answer down. */
+  syncTrace() {
+    const working = !this.answered && !this.failed && (this.pending() || !this.streamed);
+    this.trace.classList.toggle('is-working', working);
+    if (this.streamed || this.answered || this.failed) {
+      if (!this.folded) { this.trace.open = false; this.folded = true; }
+      const look = this.lookups === 1 ? '1 lookup' : `${this.lookups} lookups`;
+      const busy = [...this.steps.values()].filter((x) => x.li.classList.contains('is-pending')).pop();
+      this.setLabel(busy ? busy.li.querySelector('.xp-step__label').textContent : `Gate at ${fmt(this.q.p)} + ${look}`);
+    }
   }
 
-  renderAnswer(a) {
+  addText(text) {
+    if (!text) return;
+    this.card.hidden = false;
+    this.streamed += text;
+    this.text.append(h('span', { class: 'xp-delta' }, text));
+  }
+
+  finalise(a, elapsed) {
     const app = this.app;
     const tid = encodeURIComponent(this.title.id);
-    const guard = a.guard || {};
-    const guardEl = !guard.checked
-      ? h('span', { class: 'xp-badge', html: `${icon('shield')}<span>Guard not run</span>` })
-      : guard.rewritten
-        ? h('span', { class: 'xp-badge xp-badge--rewrite', title: 'The output guard caught something and replaced the answer',
-            html: `${icon('shield')}<span>Spoiler guard rewrote this</span>` })
-        : h('span', { class: 'xp-badge xp-badge--ok', title: 'Checked for real names, future facts and unrevealed names',
-            html: `${icon('shield')}<span>Spoiler guard passed</span>` });
-
-    const card = h('div', { class: 'xp-answer' });
-    card.append(h('p', { class: 'xp-answer__text', lang: app.lang === 'zh' ? 'zh' : 'en' }, a.text || ''));
-
-    if (a.highlight?.bbox) {
-      const b = a.highlight.bbox.map(Number);
-      const fig = h('figure', { class: 'xp-onscreen' },
-        h('div', { class: 'xp-onscreen__img' },
-          h('img', {
-            src: `/api/titles/${tid}/frames/${Math.floor(a.highlight.frame_t ?? this.q.p)}.jpg`, alt: '', loading: 'lazy',
-          }),
-          h('i', {
-            class: 'xp-onscreen__box',
-            style: `top:${b[0] / 10}%;left:${b[1] / 10}%;height:${(b[2] - b[0]) / 10}%;width:${(b[3] - b[1]) / 10}%`,
-          })),
-        h('figcaption', {}, a.highlight.label ? `On screen: ${a.highlight.label}` : 'On screen'));
-      card.append(fig);
-    }
+    this.card.hidden = false;
+    this.card.classList.remove('is-streaming');
+    if ((a.text || '') !== this.streamed) this.text.textContent = a.text || '';
 
     const ev = (a.evidence || []).filter((e) => e && e.start_s != null);
     if (ev.length) {
@@ -939,14 +1103,14 @@ class Turn {
           quote.textContent = e.text || '';
         },
       }, h('span', { class: 'xp-ev__t' }, fmt(e.start_s)), h('span', { class: 'xp-ev__type' }, TYPE_LABELS[e.type] || e.type)));
-      card.append(h('div', { class: 'xp-evidence' },
+      this.card.append(h('div', { class: 'xp-evidence' },
         h('span', { class: 'xp-evidence__h' }, 'Based on'),
         h('div', { class: 'xp-evidence__chips' }, chips), quote));
     }
 
     const frames = (a.frames || []).filter((f) => f && f.t != null);
     if (frames.length) {
-      card.append(h('div', { class: 'xp-frames' }, frames.map((f) => h('button', {
+      this.card.append(h('div', { class: 'xp-frames' }, frames.map((f) => h('button', {
         type: 'button', class: 'xp-frame', title: `Rewind to ${fmt(f.t)}`,
         'aria-label': `${f.caption || fmt(f.t)}. Rewind the player to ${fmt(f.t)}`,
         onclick: () => app.rewindTo(f.t),
@@ -955,27 +1119,94 @@ class Turn {
         h('span', { class: 'xp-frame__cap' }, h('span', { html: icon('rewind') }), h('span', {}, f.caption || fmt(f.t)))))));
     }
 
-    card.append(h('div', { class: 'xp-answer__foot' }, guardEl,
-      a.latency_ms != null ? h('span', { class: 'xp-badge', html: `${icon('clock')}<span>${(a.latency_ms / 1000).toFixed(1)} s</span>` }) : null));
-    this.slot.append(card);
+    const guard = a.guard || {};
+    const dropped = Number(guard.dropped) || 0;
+    const guardEl = !guard.checked
+      ? h('span', { class: 'xp-badge', html: `${icon('shield')}<span>Guard not run</span>` })
+      : guard.rewritten
+        ? h('span', {
+          class: 'xp-badge xp-badge--rewrite', title: 'The output guard caught something in the draft',
+          html: `${icon('shield')}<span>${dropped ? `Guard removed ${dropped} sentence${dropped > 1 ? 's' : ''}` : 'Guard replaced the draft'}</span>`,
+        })
+        : h('span', {
+          class: 'xp-badge xp-badge--ok', title: 'Checked for unrevealed names, later plot terms and real people’s names',
+          html: `${icon('shield')}<span>Passed the output guard</span>`,
+        });
+    const t = a.timing || {};
+    const total = t.total_ms ?? a.latency_ms ?? elapsed;
+    const timing = t.first_text_ms != null && t.first_text_ms < total - 150
+      ? `first words ${(t.first_text_ms / 1000).toFixed(1)} s · done ${(total / 1000).toFixed(1)} s`
+      : `${(total / 1000).toFixed(1)} s`;
+    this.card.append(h('div', { class: 'xp-answer__foot' }, guardEl,
+      total != null ? h('span', { class: 'xp-badge', html: `${icon('clock')}<span>${timing}</span>` }) : null));
   }
 
-  fail(title, detail, kind = 'error') {
-    if (this.failed || this.answered) return;
-    this.failed = true;
-    this.setThinking(null);
-    for (const s of this.steps.values()) s.li.classList.remove('is-pending');
+  notice(kind, title, detail, retry = true) {
     const { question, tap, p } = this.q;
-    this.slot.append(h('div', { class: `xp-notice xp-notice--${kind}`, role: kind === 'muted' ? null : 'alert' },
+    const box = h('div', { class: `xp-notice xp-notice--${kind}`, role: kind === 'muted' ? null : 'alert' },
       h('span', { html: icon(kind === 'slow' ? 'clock' : kind === 'muted' ? 'stop' : 'alert') }),
       h('div', {},
         h('strong', {}, title),
-        h('p', {}, detail),
-        h('button', { type: 'button', class: 'xp-btn', onclick: () => this.app.retry(question, tap, p) }, 'Ask again'))));
+        detail ? h('p', {}, detail) : null,
+        retry ? h('button', { type: 'button', class: 'xp-btn', onclick: () => this.app.retry(question, tap, p) }, 'Ask again') : null));
+    this.slot.append(box);
+    return box;
+  }
+
+  fail(title, detail, kind = 'error', retry = true) {
+    if (this.failed || this.answered) return null;
+    this.failed = true;
+    for (const s of this.steps.values()) s.li.classList.remove('is-pending');
+    this.syncTrace();
+    return this.notice(kind, title, detail, retry);
+  }
+
+  /** Text already shown stays; say that it is incomplete. */
+  cutShort(title, detail, kind = 'error') {
+    if (this.failed || this.answered) return;
+    this.failed = true;
+    this.card.classList.remove('is-streaming');
+    this.card.classList.add('is-cut');
+    for (const s of this.steps.values()) s.li.classList.remove('is-pending');
+    this.syncTrace();
+    this.notice(kind, title, detail);
+  }
+
+  stopped() {
+    if (this.streamed) this.cutShort('Stopped.', 'You stopped this answer partway through.', 'muted');
+    else this.fail('Stopped.', 'You stopped this answer.', 'muted');
+  }
+
+  dropped() {
+    if (this.streamed) this.cutShort('The answer was cut short.', 'The connection dropped. Check your network and ask again.');
+    else this.fail('The connection dropped.', 'Check your network and try again.');
+  }
+
+  /** Per-minute limit: a live countdown, then the retry button. */
+  countdown(until) {
+    const box = this.fail('Quick pause: the demo takes a few questions a minute.', ' ', 'slow', false);
+    if (!box) return null;
+    const p = box.querySelector('p');
+    const tick = () => {
+      const left = Math.ceil((until - Date.now()) / 1000);
+      if (left > 0 && box.isConnected) {
+        p.textContent = `You can ask again in ${fmt(left).replace(/^00:/, '0:')}.`;
+        setTimeout(tick, 1000 - (Date.now() % 1000) + 5);
+        return;
+      }
+      p.textContent = 'You can ask again now.';
+      const { question, tap, p: at } = this.q;
+      if (box.isConnected && !box.querySelector('button')) {
+        box.lastChild.append(h('button', { type: 'button', class: 'xp-btn', onclick: () => this.app.retry(question, tap, at) }, 'Ask again'));
+      }
+    };
+    tick();
+    return box;
   }
 
   finish() {
-    this.setThinking(null);
-    if (!this.answered && !this.failed) this.fail('No answer came back.', 'The stream ended early. Please try again.');
+    if (this.answered || this.failed) return;
+    if (this.streamed) this.cutShort('The answer was cut short.', 'The stream ended before the answer was complete.');
+    else this.fail('No answer came back.', 'The stream ended early. Please try again.');
   }
 }

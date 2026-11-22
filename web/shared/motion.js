@@ -1,5 +1,5 @@
-// Motion layer for every tab: entrances, tab and theme transitions, count-ups, the ask flow, film-card tilt and the
-// architecture diagram. It only watches the DOM the app already builds (Mutation/IntersectionObserver) and animates
+// Motion layer for every tab: entrances, tab and theme transitions, count-ups, the ask flow and the architecture
+// diagram. It only watches the DOM the app already builds (Mutation/IntersectionObserver) and animates
 // on top of it, so no app logic depends on it. Plain ES module, no dependencies.
 // Contract: everything is skipped under prefers-reduced-motion; animations use opacity, transform and the individual
 // translate/rotate/scale properties, mostly as partial keyframes ("from" only) so they settle on the page's own styles.
@@ -223,7 +223,7 @@ function setupThemeIcon() {
 
 // ---------- panel entrance + scroll reveal ----------
 
-const contentOf = (panel) => panel.querySelector(':scope > .xp-intro, :scope > .arch');
+const contentOf = (panel) => panel.querySelector(':scope > .xp-stage, :scope > .arch');
 const hostOf = (panel) => (panel.querySelector(':scope > .arch') || panel);
 
 const REVEAL_SEL = [
@@ -327,53 +327,6 @@ document.addEventListener('hwa:tabchange', (e) => {
 
 // ---------- live demo tab ----------
 
-function revealWords(p, delay) {
-  const text = p.textContent;
-  if (reduced || !text.trim() || text.length > 6000) return 0;
-  let segs;
-  if (typeof Intl.Segmenter === 'function') {
-    segs = [...new Intl.Segmenter(p.lang || 'en', { granularity: 'word' }).segment(text)].map((s) => s.segment);
-  } else {
-    segs = text.split(/(\s+)/).filter(Boolean);
-  }
-  // Glue punctuation onto the word before it.
-  const units = [];
-  for (const s of segs) {
-    const last = units[units.length - 1];
-    if (/\S/.test(s) && !/[\p{L}\p{N}]/u.test(s) && last && /\S$/.test(last)) units[units.length - 1] = last + s;
-    else units.push(s);
-  }
-  const words = units.filter((s) => /\S/.test(s)).length;
-  const step = Math.min(24, (narrow() ? 450 : 680) / Math.max(1, words));
-  const frag = document.createDocumentFragment();
-  let k = 0, lastSpan = null;
-  for (const s of units) {
-    if (!/\S/.test(s)) { frag.append(s); continue; }
-    const span = document.createElement('span');
-    span.className = 'hwa-w';
-    span.textContent = s;
-    span.style.animationDelay = `${Math.round(delay + k++ * step)}ms`;
-    frag.append(span);
-    lastSpan = span;
-  }
-  p.replaceChildren(frag);
-  let done = false;
-  const unwrap = () => { if (!done) { done = true; p.textContent = text; } };
-  lastSpan?.addEventListener('animationend', unwrap, { once: true });
-  setTimeout(unwrap, delay + k * step + 1200);
-  return k * step;
-}
-
-function animAnswer(card) {
-  from(card, { opacity: 0, translate: '0 14px', scale: 0.985 }, { duration: 560 });
-  const text = card.querySelector('.xp-answer__text');
-  const wordsMs = text ? revealWords(text, 140) : 0;
-  [...card.children].filter((c) => c !== text).forEach((c, i) =>
-    from(c, { opacity: 0, translate: '0 10px' }, { duration: 480, delay: 200 + wordsMs * 0.55 + i * 80 }));
-  const box = card.querySelector('.xp-onscreen__box');
-  if (box) from(box, { opacity: 0, scale: 1.25 }, { duration: 620, delay: 360 + wordsMs * 0.55, easing: tk().spring });
-}
-
 function animStep(li, delay = 0) {
   from(li, { opacity: 0, translate: '-12px 0' }, { duration: 420, delay });
 }
@@ -410,18 +363,11 @@ const added = (r, cls) => r.target.classList.contains(cls) && !(r.oldValue || ''
 const removed = (r, cls) => !r.target.classList.contains(cls) && (r.oldValue || '').split(/\s+/).includes(cls);
 
 function onXp(records) {
-  const cards = [];
   for (const r of records) {
     const t = r.target;
     if (r.type === 'childList') {
-      if (t.classList?.contains('xp-shield__stat')) {
-        t.querySelectorAll('b').forEach((b) => tweenNumbers(b, `shield:${b.className}`));
-      } else if (t.classList?.contains('xp-shield__chars')) {
-        tweenNumbers(t.querySelector('b'), 'shield:chars');
-      } else if (t.classList?.contains('xp-gate-rows')) {
-        gateRows(t);
-      } else if (t.matches?.('.xp-step--thinking .xp-step__label')) {
-        from(t, { opacity: 0 }, { duration: 260 });
+      if (t.classList?.contains('xp-gate__text')) {
+        t.querySelectorAll('b').forEach((b) => tweenNumbers(b, `gate:${b.className}`, { dur: 520 }));
       } else if (t.classList?.contains('xp-evidence__quote') && !t.hidden && r.addedNodes.length) {
         from(t, { opacity: 0, translate: '0 -4px' }, { duration: 300 });
       }
@@ -430,125 +376,45 @@ function onXp(records) {
         const c = n.classList;
         if (c.contains('xp-turn')) {
           from(n.querySelector('.xp-q'), { opacity: 0, scale: 0.92, translate: '0 10px' }, { duration: 520, easing: tk().spring });
-          n.querySelectorAll('.xp-step').forEach((li, i) => animStep(li, 160 + i * 60));
         } else if (c.contains('xp-step')) animStep(n);
-        else if (c.contains('xp-answer')) animAnswer(n);
         else if (c.contains('xp-divider')) from(n, { opacity: 0, scale: '0.6 1' }, { duration: 520 });
-        else if (c.contains('xp-empty')) from(n, { opacity: 0, translate: '0 8px' }, { duration: 520 });
-        else if (c.contains('xp-notice')) {
+        else if (c.contains('xp-film') && !c.contains('xp-film--skeleton')) {
+          from(n, { opacity: 0, translate: '0 6px' }, { duration: 420, delay: [...n.parentNode.children].indexOf(n) * 60 });
+        } else if (c.contains('xp-evidence') || c.contains('xp-frames') || c.contains('xp-answer__foot')) {
+          from(n, { opacity: 0, translate: '0 8px' }, { duration: 420 });
+        } else if (c.contains('xp-notice')) {
           from(n, { opacity: 0, translate: '0 8px' }, { duration: 380 });
-          if (c.contains('xp-notice--error') || (!c.contains('xp-notice--muted') && !c.contains('xp-notice--slow'))) {
+          if (!c.contains('xp-notice--muted') && !c.contains('xp-notice--slow')) {
             play(n, [{ translate: '0 0' }, { translate: '-5px 0' }, { translate: '5px 0' }, { translate: '-3px 0' }, { translate: '0 0' }],
               { duration: 420, delay: 340, fill: 'none' });
           }
-        } else if (n.querySelector?.(':scope > .xp-card:not(.xp-card--skeleton)')) cards.push(n);
+        }
       }
     } else if (r.attributeName === 'class') {
       if (removed(r, 'is-pending') && t.classList.contains('xp-step')) stepDone(t);
-      else if (added(r, 'is-pulse') && t.classList.contains('xp-shield') && once(t)) {
-        play(t.querySelector('.xp-shield__badge'), [{ scale: 1 }, { scale: 1.2, offset: 0.35 }, { scale: 1 }], { duration: 640, fill: 'none' });
+      else if (added(r, 'is-pulse') && t.classList.contains('xp-gate') && once(t)) {
+        play(t.querySelector('.xp-gate__badge'), [{ scale: 1 }, { scale: 1.2, offset: 0.35 }, { scale: 1 }], { duration: 640, fill: 'none' });
       } else if (added(r, 'is-in') && t.classList.contains('xp-ring') && once(t)) {
         from(t, { scale: 2.2, opacity: 0 }, { duration: 560, easing: tk().spring });
         ripple(t.parentElement, t.style.left, t.style.top, 120);
-        ripple(t.parentElement, t.style.left, t.style.top, 320);
       } else if (added(r, 'is-in') && t.classList.contains('xp-hl') && once(t)) {
         from(t, { opacity: 0, scale: 1.08 }, { duration: 560 });
         from(t.querySelector('.xp-hl__label'), { opacity: 0, translate: '0 6px' }, { duration: 420, delay: 240 });
       } else if (added(r, 'is-picking') && t.classList.contains('xp-player') && once(t)) {
-        from(t.querySelector('.xp-picklayer'), { opacity: 0 }, { duration: 300 });
         from(t.querySelector('.xp-cross'), { scale: 0.3, opacity: 0 }, { duration: 460, easing: tk().spring });
       } else if (t.classList.contains('xp-send') && (added(r, 'is-stop') || removed(r, 'is-stop'))) {
         from(t.querySelector('svg'), { rotate: '-90deg', scale: 0.4, opacity: 0 }, { duration: 420, easing: tk().spring });
       }
     } else if (r.attributeName === 'hidden' && !t.hidden && r.oldValue !== null) {
-      if (t.classList.contains('xp-pill')) {
-        from(t, { opacity: 0, scale: 0.9, translate: '0 -6px' }, { duration: 460, easing: tk().spring });
-      } else if (t.classList.contains('xp-step--thinking')) from(t, { opacity: 0 }, { duration: 300 });
-      else if (t.classList.contains('xp-evidence__quote')) from(t, { opacity: 0, translate: '0 -4px' }, { duration: 320 });
-    } else if (r.attributeName === 'open' && t.open && t.classList.contains('xp-gate-details')) {
-      t.querySelectorAll('.xp-gate-row__bar i').forEach((i, j) =>
-        from(i, { width: '0%' }, { duration: 700, delay: 60 + j * 50 }));
+      if (t.classList.contains('xp-answer')) from(t, { opacity: 0, translate: '0 10px', scale: 0.985 }, { duration: 480 });
+      else if (t.classList.contains('xp-hint') || t.classList.contains('xp-tapnote')) {
+        from(t, { opacity: 0, translate: '0 -4px' }, { duration: 360 });
+      } else if (t.classList.contains('xp-evidence__quote')) from(t, { opacity: 0, translate: '0 -4px' }, { duration: 320 });
+      else if (t.classList.contains('xp-gate__rows')) {
+        t.querySelectorAll('.xp-gate-row__bar i').forEach((i, j) => from(i, { width: '0%' }, { duration: 700, delay: 60 + j * 50 }));
+      }
     }
   }
-  if (cards.length) {
-    cards.forEach((li, i) => {
-      from(li, { opacity: 0, translate: '0 18px', scale: 0.97 }, { duration: 620, delay: i * 90 });
-      addGlare(li.querySelector('.xp-card'));
-    });
-  }
-}
-
-const gateWidths = new Map();
-function gateRows(box) {
-  const open = box.closest('details')?.open;
-  for (const row of box.querySelectorAll('.xp-gate-row')) {
-    const label = row.querySelector('.xp-gate-row__label')?.textContent || '';
-    tweenNumbers(row.querySelector('.xp-gate-row__num'), `gate:${label}`, { dur: 500 });
-    const bar = row.querySelector('.xp-gate-row__bar i');
-    if (!bar) continue;
-    const w = bar.style.width;
-    const prev = gateWidths.get(label);
-    gateWidths.set(label, w);
-    if (open && prev != null && prev !== w) from(bar, { width: prev }, { duration: 520 });
-  }
-}
-
-// Film-card tilt: rotate on the card, parallax translate on the poster image, glare follows the pointer.
-const tilts = new Map();
-let tiltFrame = 0;
-
-function addGlare(card) {
-  const poster = card?.querySelector('.xp-card__poster');
-  if (!poster || poster.querySelector('.hwa-glare')) return;
-  const g = document.createElement('i');
-  g.className = 'hwa-glare';
-  g.setAttribute('aria-hidden', 'true');
-  poster.append(g);
-}
-
-function tiltLoop() {
-  tiltFrame = 0;
-  for (const [card, s] of tilts) {
-    s.x += (s.tx - s.x) * 0.18;
-    s.y += (s.ty - s.y) * 0.18;
-    const ang = Math.min(6, Math.hypot(s.x, s.y) * 12); // the corner under the pointer presses in, up to 6 degrees
-    const img = card.querySelector('.xp-card__poster img');
-    if (!s.on && Math.abs(s.x) < 0.002 && Math.abs(s.y) < 0.002) {
-      card.style.rotate = '';
-      if (img) img.style.translate = '';
-      tilts.delete(card);
-      continue;
-    }
-    card.style.rotate = ang > 0.01 ? `${s.y.toFixed(4)} ${(-s.x).toFixed(4)} 0 ${ang.toFixed(2)}deg` : '';
-    if (img) img.style.translate = `${(-s.x * 12).toFixed(2)}px ${(-s.y * 8).toFixed(2)}px`;
-    card.style.setProperty('--hwa-gx', `${((s.x + 0.5) * 100).toFixed(1)}%`);
-    card.style.setProperty('--hwa-gy', `${((s.y + 0.5) * 100).toFixed(1)}%`);
-  }
-  if (tilts.size) tiltFrame = requestAnimationFrame(tiltLoop);
-}
-
-function setupTilt(panel) {
-  const kick = () => { if (!tiltFrame) tiltFrame = requestAnimationFrame(tiltLoop); };
-  panel.addEventListener('pointermove', (e) => {
-    if (reduced || e.pointerType === 'touch') return;
-    const card = e.target.closest?.('.xp-card');
-    if (!card || card.classList.contains('xp-card--skeleton')) return;
-    const r = card.getBoundingClientRect();
-    let s = tilts.get(card);
-    if (!s) tilts.set(card, (s = { x: 0, y: 0, tx: 0, ty: 0, on: true }));
-    s.tx = Math.min(0.5, Math.max(-0.5, (e.clientX - r.left) / r.width - 0.5));
-    s.ty = Math.min(0.5, Math.max(-0.5, (e.clientY - r.top) / r.height - 0.5));
-    s.on = true;
-    card.classList.add('hwa-tilting');
-    kick();
-  }, { passive: true });
-  panel.addEventListener('pointerout', (e) => {
-    const card = e.target.closest?.('.xp-card');
-    if (!card || card.contains(e.relatedTarget)) return;
-    card.classList.remove('hwa-tilting');
-    const s = tilts.get(card);
-    if (s) { s.tx = 0; s.ty = 0; s.on = false; kick(); }
-  });
 }
 
 // ---------- how-it-works tab ----------
@@ -701,7 +567,6 @@ function boot() {
   const opts = { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'hidden', 'open'], attributeOldValue: true };
   if (xp) {
     watchMount(xp);
-    setupTilt(xp);
     new MutationObserver(onXp).observe(xp, opts);
   }
   if (ar) {

@@ -2,7 +2,7 @@
 // Plain ES module, no dependencies. The shell calls mount(el) once, the first time the tab is shown.
 
 import {
-  REPO, SERVICES, PAPERS, LANES, NODES, GROUPS, EDGES, WIDE, NARROW, TOURS, RESULTS, REJECTED, GATE_TYPES,
+  REPO, BENCH_URL, SERVICES, PAPERS, LANES, NODES, GROUPS, EDGES, WIDE, NARROW, TOURS, RESULTS, REJECTED, GATE_TYPES,
   FALLBACK_TITLES,
 } from './data.js';
 
@@ -152,11 +152,12 @@ function intro() {
   ];
   return h('header', { class: 'arch-intro' },
     h('p', { class: 'arch-eyebrow', text: 'How it works' }),
-    h('h2', { class: 'arch-title', text: 'The model never sees what you haven’t seen.' }),
+    h('h2', { class: 'arch-title', text: 'The model is only given what you have already seen.' }),
     h('p', { class: 'arch-lead', text:
       'A general chatbot knows the whole film from reviews, wikis and its training data, so “who is the old man?” at minute 12 can '
       + 'spoil the reveal at minute 80. Here spoiler safety is not an instruction to the model. It is structural: the server hands '
-      + 'the agent only what is already on screen at your paused position P.' }),
+      + 'the agent only what the film has shown up to your paused position P, and an output guard checks every sentence it '
+      + 'writes. How often something still slips through is measured, not assumed.' }),
     h('ol', { class: 'arch-ideas' }, ideas.map(([t, d], i) =>
       h('li', { class: 'arch-idea' },
         h('span', { class: 'arch-idea__n', 'aria-hidden': 'true', text: String(i + 1) }),
@@ -675,7 +676,8 @@ function gateDemo(ctx) {
     h('div', { class: 'arch-section__head' },
       h('h3', { id: 'arch-gate-h', text: 'Try the gate' }),
       h('p', { text: 'Drag the playback position. Each item in the knowledge pack unlocks only once its reveal time, plus a '
-        + 'small safety margin, is behind you. Locked items are not hidden from the answer; they never reach the agent at all.' })),
+        + 'small safety margin, is behind you. Locked items are not filtered out of results afterwards; they are not in what the '
+        + 'server hands the agent.' })),
     h('div', { class: 'arch-gate__panel' },
       h('div', { class: 'arch-gate__controls' },
         picker,
@@ -815,7 +817,7 @@ function gateDemo(ctx) {
     }, t.title)));
   };
 
-  // Prefer live data; fall back to simulated counts when the API is not there (e.g. the standalone preview).
+  // Prefer live data; fall back to simulated counts when the API is not there.
   (async () => {
     try {
       const titles = await fetchJSON('/api/titles', undefined, 4000);
@@ -841,7 +843,7 @@ async function fetchJSON(url, signal, timeoutMs = 6000) {
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   signal?.addEventListener('abort', () => ac.abort(), { once: true });
   try {
-    const res = await fetch(url, { signal: ac.signal, headers: { Accept: 'application/json' } });
+    const res = await fetch(url, { signal: ac.signal, credentials: 'same-origin', headers: { Accept: 'application/json' } });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json();
   } catch (err) {
@@ -901,7 +903,7 @@ function structural() {
         h('p', { class: 'arch-eyebrow', text: 'Hello Watch Assistant' }),
         h('h4', { text: 'Gate at P, then rank inside the gate' }),
         flow([['Whole film'], ['Spoiler gate at P', 'ok'], ['Eligible set only', 'ok'], ['Rank by similarity'], ['Model']]),
-        h('p', { text: 'Ranking runs on a set that contains nothing after P. There is no future item in memory to leak, so a ranking bug can only make an answer worse — never a spoiler. 0 violations in 120 checked results.' }))),
+        h('p', { text: 'Ranking runs on a set that contains nothing after P, so a ranking bug makes an answer worse instead of pulling in a later scene. 0 gate violations in 120 checked retrieval results.' }))),
     h('h4', { class: 'arch-subhead', text: 'Rejected on purpose' }),
     h('ul', { class: 'arch-rejected' }, REJECTED.map((r) =>
       h('li', { class: 'arch-card' }, h('strong', { text: r.title }), h('p', { text: r.why })))));
@@ -913,7 +915,9 @@ function results() {
   return h('section', { class: 'arch-section', 'aria-labelledby': 'arch-results-h' },
     h('div', { class: 'arch-section__head' },
       h('h3', { id: 'arch-results-h', text: 'Measured on the demo films' }),
-      h('p', { text: 'Three open Blender films processed end to end. Spot checks on Sintel unless noted.' })),
+      h('p', {}, 'Three open Blender films processed end to end. Spot checks on Sintel unless noted. Answer accuracy, '
+        + 'spoiler leaks and latency on a fixed question set are in the ',
+      h('a', { href: BENCH_URL, target: '_blank', rel: 'noopener', text: 'benchmark scorecard' }), '.')),
     h('ul', { class: 'arch-results' }, RESULTS.map((r) =>
       h('li', { class: 'arch-result' },
         h('span', { class: 'arch-result__value' }, r.value, r.unit ? h('small', { text: ` ${r.unit}` }) : null),
