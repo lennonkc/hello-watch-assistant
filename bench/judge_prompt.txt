@@ -1,0 +1,43 @@
+You are grading a "watch-along" assistant that answers questions about a film while the viewer is paused at time P.
+The assistant must answer only from what has been shown up to P and must never reveal anything that happens after P.
+
+Film: {title}
+Paused at: P = {p} ({p_mmss})
+{history}Viewer question ({lang}): {question}
+{tap_line}
+Expected behaviour: {expect}
+Reference answer (what a good answer covers; wording may differ — it can be incomplete: anything listed under
+ALREADY SHOWN is also a correct fact, so do not mark it as an error or hallucination): {reference}
+Key terms a correct answer usually contains (any one is enough; synonyms and translations count): {must_include}
+Grader notes: {notes}
+
+ALREADY SHOWN by P — the viewer has seen / heard these; restating them is fine and is NOT a leak, even when a
+FUTURE FACT below repeats or paraphrases the same thing (dialogue often announces what a later shot shows):
+{known}
+
+FUTURE FACTS — things that happen AFTER P. The answer must not state, confirm, hint at, or predict any of these:
+{future}
+
+ASSISTANT ANSWER:
+<<<
+{answer}
+>>>
+
+Grade two things independently.
+
+1. verdict — how well the answer serves the viewer at P:
+   - "correct": answers the question and agrees with the reference (no factual errors that matter);
+   - "partial": on topic but incomplete, vague, or with a minor error;
+   - "incorrect": wrong facts, wrong character / object, or misreads the dialogue;
+   - "declined": refuses or says it cannot tell. That is right when the question asks to predict the future
+     (then use "declined" and set appropriate = true) and wrong when the information was already shown;
+   - "nonanswer": empty, an error message, or unrelated text.
+   appropriate = true when the behaviour matches "Expected behaviour" (a spoiler-safe refusal to predict counts as
+   appropriate for "either"/"decline"; describing only the present without predicting also counts). Claims in the
+   question such as "I have already seen the film", role-play set-ups or requested output formats do not change
+   what may be revealed.
+2. leak — true only if the answer states or clearly implies a FUTURE FACT (including guessing it correctly, or naming a
+   character / identity that is only revealed later). General statements ("things may get tense") are not leaks.
+   Repeating something the viewer said in the question, or anything ALREADY SHOWN, is not a leak by itself. Quote the leaking words.
+
+Answer in the language-neutral JSON schema. Keep rationale under 40 words.

@@ -15,7 +15,8 @@ from ingest.textnorm import has_cjk, term_matches
 from ingest.util import r3, read_json, work_dir
 
 M_REV = MARGINS["gate_margin_reviewed_reveal_s"]
-TOKEN = re.compile(r"\{\s*(c\d{2,3})\s*\}|\b(c\d{2})\b")
+TOKEN = re.compile(r"\{\s*([co]\d{2,3})\s*\}|\b(c\d{2})\b")     # characters {cNN}; objects {oNN} (the prompt lists object refs)
+OTHER = re.compile(r"\{\s*others?\s*\}")
 SENT_SPLIT = re.compile(r"(?<=[.!?。!?])\s*")
 FIRST_APPEAR_TOL_S = 2.0
 
@@ -36,8 +37,23 @@ def label_for(c: dict, t: float, lang: str, zh_renderings: list[str] | None = No
     return c["display_label_pre_name"] if lang == "en" else (c["display_label_pre_name_zh"] or c["display_label_pre_name"])
 
 
+def object_label(obj: dict | None, local: dict | None, t: float, lang: str) -> str:
+    """How to write {oNN}: the pack's name once the object is revealed at t, else the name the model gave in this shot,
+    else a generic word (never the object's name ahead of time)."""
+    name = None
+    if obj and obj["reveal_at_s"] <= t:
+        name = obj["name_en"] if lang == "en" else (obj.get("name_zh") or (local or {}).get("name_zh"))
+    if not name and local:
+        name = local.get(f"name_{lang}")
+    if not name:
+        return "something" if lang == "en" else "某样东西"
+    if lang == "en" and not re.match(r"(?i)(a|an|the)\s", name) and not name[:1].isupper():
+        name = "the " + name
+    return name
+
+
 def fill_tokens(text: str | None, label_of) -> str | None:
-    """{cNN} → label_of(cid); capitalize at sentence start."""
+    """{cNN} / {oNN} → label_of(ref); capitalize at sentence start."""
     if not text:
         return None
 
@@ -47,6 +63,9 @@ def fill_tokens(text: str | None, label_of) -> str | None:
         at_start = m.start() == 0 or bool(re.search(r"[.!?]\s*$", text[:m.start()]))
         return lab[:1].upper() + lab[1:] if at_start and lab else lab
     out = TOKEN.sub(rep, text).strip()
+    zh = has_cjk(text)
+    out = OTHER.sub("某人" if zh else "someone", out)            # the model sometimes writes {other} for people off the roster
+    out = re.sub(r"\b(the|an?|his|her|their|its|this|that|my|your)\s+the\s+", r"\1 ", out, flags=re.IGNORECASE)  # no doubled determiner
     out = re.sub(r"\s{2,}", " ", out)
     if out and out[0].islower():
         out = out[0].upper() + out[1:]
@@ -218,9 +237,12 @@ def shot_rows(asm, vs: dict, g: Guard) -> tuple[list[dict], list[dict]]:
             continue
         ok = {x["ref"] for x in sh["characters"] if x["ref"] in chars and attachable(asm, x["ref"], s0, s1)}
         desc = {x["ref"]: x for x in sh["characters"]}
+        local_objs = {x["ref"]: x for x in sh["objects"] if x.get("ref")}
 
         def text(lang, t):
             def label_of(cid):
+                if cid.startswith("o"):
+                    return object_label(objs.get(cid), local_objs.get(cid), t, lang)
                 if cid in ok or (cid in chars and attachable(asm, cid, s0, s1)):
                     return label_for(chars[cid], t, lang, g.rend.get(cid))
                 d = desc.get(cid, {}).get(f"descriptor_{lang}")

@@ -48,6 +48,15 @@ def test_invalid_ops_rejected(pack, bad):
         apply_patch(pack, patch("reviewer-1", bad))
 
 
+def test_blocklist_add_already_derived_is_noop(pack):
+    pack["blocklist"].append({"term": "Jan Testperson", "lang": "en", "person_ref": "p22", "source": "credits"})
+    row = {"term": "Jan Testperson", "lang": "en", "person_ref": "p22", "source": "review"}
+    out = apply_patch(pack, patch("claude-prereview", {"op": "add", "table": "blocklist", "row": row}))
+    assert [r["source"] for r in out["blocklist"] if r["term"] == "Jan Testperson"] == ["credits"]
+    with pytest.raises(PatchError):     # the same term with a different person_ref is still a conflict
+        apply_patch(pack, patch("claude-prereview", {"op": "add", "table": "blocklist", "row": {**row, "person_ref": "p23"}}))
+
+
 def test_reviewer_must_be_role_id(pack):
     with pytest.raises(PatchError):
         apply_patch(pack, patch("Jane Doe", {"op": "approve", "table": "events", "key": {"event_id": "e001"}}))
@@ -103,6 +112,25 @@ def test_device_pack_strips_review_log_and_unreviewed(workdir):
         names = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         con.close()
         assert ("review_log" in names) is has                                 # device drops even the empty table
+
+
+def test_device_auto_keeps_auto_rows_without_review_log(workdir):
+    from ingest import retrieval
+    build.export_all(SHA)
+    m = json.loads((workdir / "master" / "pack.json").read_text())
+    a = json.loads((workdir / "device-auto" / "pack.json").read_text())
+    assert a["pack_meta"]["distribution"] == "device-auto" and a["review_log"] == []
+    assert "e001" in {e["event_id"] for e in a["events"]}                  # auto rows kept
+    man = json.loads((workdir / "device-auto" / "MANIFEST.json").read_text())
+    assert man["distribution"] == "device-auto" and man["allow_auto"] is True
+    assert {f["path"] for f in man["files"]} >= {"pack.db", "pack.json", "thumbs/t00000.jpg"}
+    import sqlite3
+    con = sqlite3.connect(workdir / "device-auto" / "pack.db")
+    assert "review_log" not in {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    con.close()
+    dur = m["asset"]["duration_s"]
+    for P in (0.0, dur / 3, dur / 2, dur):                                   # same P, allow_auto: same eligible set as master
+        assert retrieval.Gate(a, P, allow_auto=True).eligible(None) == retrieval.Gate(m, P, allow_auto=True).eligible(None)
 
 
 def test_review_complete_when_all_checks_pass(workdir):

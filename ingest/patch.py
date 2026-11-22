@@ -115,6 +115,8 @@ def apply_patch(pack: dict, patch: dict) -> dict:
             dup = _find(pack, table, {c: row[c] for c in key_cols(table)})
             if dup and "review_state" not in cols and dup[0] == row:
                 continue    # link row already derived during assembly (e.g. a present relation); the same row in a patch is a no-op
+            if dup and table == "blocklist" and {**dup[0], "source": None} == {**row, "source": None}:
+                continue    # a real-person name added in review that the builder later derived itself (only source differs): also a no-op
             if dup:
                 raise PatchError(f"op {n}: {table} row {item_id(table, row)} already exists")
             pack[table].append(row)
