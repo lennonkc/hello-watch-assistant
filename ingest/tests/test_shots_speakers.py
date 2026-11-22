@@ -16,6 +16,19 @@ def _shots(*bounds):
     return [{"shot_id": f"sh{i:03d}", "start_s": a, "end_s": b} for i, (a, b) in enumerate(zip(bounds, bounds[1:]))]
 
 
+def test_fill_tokens_renders_objects_and_other():
+    obj = {"name_en": "candlestick telephone", "name_zh": "烛台电话", "reveal_at_s": 10.0}
+    local = {"name_en": "old phone", "name_zh": "旧电话"}
+
+    def label_of(lang, t):
+        return lambda ref: assemble_shots.object_label(obj, local, t, lang) if ref.startswith("o") else "Proog"
+    out = assemble_shots.fill_tokens("{c01} picks up the {o04} while {other} watches.", label_of("en", 12.0))
+    assert out == "Proog picks up the candlestick telephone while someone watches."
+    assert assemble_shots.fill_tokens("{o04} rings.", label_of("en", 5.0)) == "The old phone rings."   # not revealed yet: this shot's name
+    assert assemble_shots.fill_tokens("{c01} 拿起{o04}。", label_of("zh", 12.0)) == "Proog 拿起烛台电话。"
+    assert assemble_shots.object_label(None, None, 0.0, "en") == "something"
+
+
 def test_merge_short_into_previous_and_leading_into_next():
     m = V.merge_short(_shots(0.0, 0.4, 3.0, 3.5, 6.0, 6.2))
     assert [(x["start_s"], x["end_s"], x["shot_ids"]) for x in m] == [
