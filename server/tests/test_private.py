@@ -6,7 +6,6 @@ import hashlib
 import json
 import shutil
 import threading
-import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -27,7 +26,8 @@ class FakeBucket:
         self.root = root
         self.reads = collections.Counter()
         self.lock = threading.Lock()
-        self.delay = 0.0
+        self.gate = None                      # an Event: read() holds until it is set (no real sleeps in tests)
+        self.reading = threading.Event()
 
     def names(self, prefix):
         return sorted(n for n in (str(p.relative_to(self.root)) for p in self.root.rglob("*") if p.is_file())
@@ -41,7 +41,9 @@ class FakeBucket:
                 self.reads[prefix + r] += 1
 
     def read(self, name, timeout=None):
-        time.sleep(self.delay)
+        self.reading.set()
+        if self.gate is not None:
+            assert self.gate.wait(5)
         with self.lock:
             self.reads[name] += 1
         p = self.root / name
@@ -197,11 +199,16 @@ def test_thumbnails_on_demand_negative_cache_eviction_and_prefetch(tmp_path):
     for t in range(10):
         (src / "p" / "thumbs" / f"t{t:05d}.jpg").write_bytes(b"j%d" % t)
     b = FakeBucket(src)
-    rt = packs.RemoteThumbs(b, "p/thumbs", tmp_path / "local", max_files=3)
+    now = [1000.0]
+    rt = packs.RemoteThumbs(b, "p/thumbs", tmp_path / "local", max_files=3, clock=lambda: now[0])
     assert rt.ensure(1).read_bytes() == b"j1" and rt.ensure(1).exists()
     assert b.reads["p/thumbs/t00001.jpg"] == 1                       # second call served locally
     assert not rt.ensure(50).exists() and not rt.ensure(50).exists()
     assert b.reads["p/thumbs/t00050.jpg"] == 1                       # a miss is remembered
+    now[0] += 599
+    assert not rt.ensure(50).exists() and b.reads["p/thumbs/t00050.jpg"] == 1
+    now[0] += 2                                                      # past miss_ttl_s (600): asked again
+    assert not rt.ensure(50).exists() and b.reads["p/thumbs/t00050.jpg"] == 2
     for t in (2, 3, 4):
         rt.ensure(t)
     assert sorted(int(p.stem[1:]) for p in (tmp_path / "local").glob("t*.jpg")) == [2, 3, 4]   # 1 evicted
@@ -217,14 +224,22 @@ def test_concurrent_requests_share_one_download(tmp_path):
     (src / "thumbs").mkdir(parents=True)
     (src / "thumbs" / "t00007.jpg").write_bytes(b"seven")
     b = FakeBucket(src)
-    b.delay = 0.2
+    b.gate = threading.Event()                                       # the download holds until all six have asked
     rt = packs.RemoteThumbs(b, "thumbs", tmp_path / "local")
-    got = []
-    threads = [threading.Thread(target=lambda: got.append(rt.ensure(7).read_bytes())) for _ in range(6)]
+    got, asked = [], threading.Barrier(7)
+
+    def ask():
+        asked.wait(5)
+        got.append(rt.ensure(7).read_bytes())
+
+    threads = [threading.Thread(target=ask) for _ in range(6)]
     for th in threads:
         th.start()
+    asked.wait(5)
+    assert b.reading.wait(5)                                         # one download in flight
+    b.gate.set()
     for th in threads:
-        th.join()
+        th.join(10)
     assert got == [b"seven"] * 6 and b.reads["thumbs/t00007.jpg"] == 1
 
 
@@ -237,14 +252,15 @@ def test_fetch_errors_do_not_fail_and_retry_later(tmp_path):
             Broken.timeouts.append(timeout)
             raise OSError("network")
 
-    rt = packs.RemoteThumbs(Broken(), "x", tmp_path / "l", error_ttl_s=0.0)
+    now = [1000.0]
+    rt = packs.RemoteThumbs(Broken(), "x", tmp_path / "l", clock=lambda: now[0])
+    assert rt.error_ttl_s == 30.0
     assert not rt.ensure(3).exists() and Broken.calls == 2          # one retry
     assert set(Broken.timeouts) == {config.THUMB_FETCH_TIMEOUT_S} == {4.0}
-    assert not rt.ensure(3).exists() and Broken.calls == 4          # error TTL 0: asked again
-    rt2 = packs.RemoteThumbs(Broken(), "x", tmp_path / "l2", error_ttl_s=60.0)
-    rt2.ensure(5)
-    n = Broken.calls
-    assert not rt2.ensure(5).exists() and Broken.calls == n         # within the error TTL: not asked again
+    now[0] += 29
+    assert not rt.ensure(3).exists() and Broken.calls == 2          # within the error TTL: not asked again
+    now[0] += 2
+    assert not rt.ensure(3).exists() and Broken.calls == 4          # past it: asked again (twice)
 
 
 def test_one_slow_attempt_is_retried(tmp_path):
@@ -267,7 +283,7 @@ def client(world, monkeypatch):
     store = packs.Store().load()
     monkeypatch.setattr(packs, "STORE", store)
     monkeypatch.setattr(main, "STORE", store)
-    monkeypatch.setattr(main, "UNLOCKS", main.Attempts(config.UNLOCK_FAILURES_PER_MINUTE))
+    monkeypatch.setattr(main, "UNLOCKS", main.Attempts(config.UNLOCK_FAILURES_PER_MINUTE, clock=lambda: 1000.0))
     monkeypatch.setattr(main, "_signed_url", lambda obj, _e: f"https://signed.example/{obj}")
     monkeypatch.setattr(config, "ASSET_BUCKET", "bkt")
     monkeypatch.setattr(config, "VIDEO_DIR", None)
@@ -354,6 +370,21 @@ def test_invalid_cookies_count_as_failures_so_no_endpoint_is_an_oracle(client):
     assert client.get("/api/titles/pv1/gate?p=10", headers=COOKIE).status_code == 404    # over the limit: no oracle
     assert client.post("/api/unlock", json={"code": CODE}).status_code == 429
     assert client.get("/api/titles/mini/gate?p=10").status_code == 200                  # public films unaffected
+
+
+def test_the_unlock_window_slides_on_the_injected_clock():
+    from server import main
+    now = [1000.0]
+    a = main.Attempts(3, clock=lambda: now[0])
+    a.fail("1.2.3.4")
+    a.fail("1.2.3.4")
+    a.fail("1.2.3.4", key="c1")
+    a.fail("1.2.3.4", key="c1")                                        # the same wrong cookie again: counted once
+    assert a.blocked("1.2.3.4") == 60 and not a.blocked("5.6.7.8")
+    now[0] += 59.5
+    assert a.blocked("1.2.3.4") == 1                                   # seconds until the oldest failure leaves
+    now[0] += 1
+    assert not a.blocked("1.2.3.4")                                    # the window has slid past all three
 
 
 def test_check_pack_reports_what_the_service_would_miss(tmp_path):

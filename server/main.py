@@ -197,8 +197,9 @@ class Attempts:
     """Failed attempts per IP in a sliding one-minute window (thread-safe: the middleware runs for sync endpoints
     too). `fail(ip, key)` counts a keyed failure (an invalid cookie value) once per window."""
 
-    def __init__(self, per_minute: int) -> None:
+    def __init__(self, per_minute: int, clock=time.monotonic) -> None:
         self.per_minute = per_minute
+        self.clock = clock
         self.seen: collections.OrderedDict[str, collections.deque] = collections.OrderedDict()
         self.lock = threading.Lock()
 
@@ -213,13 +214,13 @@ class Attempts:
 
     def blocked(self, ip: str) -> int:
         """0 = allowed, else the seconds until the oldest failure leaves the window."""
-        now = time.monotonic()
+        now = self.clock()
         with self.lock:
             q = self._window(ip, now)
             return max(1, math.ceil(60 - (now - q[0][0]))) if len(q) >= self.per_minute else 0
 
     def fail(self, ip: str, key: str | None = None) -> None:
-        now = time.monotonic()
+        now = self.clock()
         with self.lock:
             q = self._window(ip, now)
             if key is None or all(k != key for _t, k in q):

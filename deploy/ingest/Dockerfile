@@ -30,7 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && python -c "import sqlite3, cv2, PIL, scenedetect, google.genai, google.cloud.storage; \
 print('python', __import__('sys').version.split()[0], 'sqlite', sqlite3.sqlite_version, 'cv2', cv2.__version__, 'PIL', PIL.__version__)" \
     && python -c "import mimetypes; assert mimetypes.guess_type('a.flac')[0] and mimetypes.guess_type('a.mp4')[0]" \
-    && ffmpeg -hide_banner -version | head -1
+    && ffmpeg -hide_banner -version > /tmp/ffmpeg-version && head -1 /tmp/ffmpeg-version && rm /tmp/ffmpeg-version
 
 WORKDIR /app
 COPY pyproject.toml ./

@@ -114,14 +114,15 @@ class RemoteThumbs:
 
     def __init__(self, bucket, prefix: str, local_dir: pathlib.Path, max_files: int | None = None,
                  miss_ttl_s: float = 600.0, error_ttl_s: float = 30.0, wait_s: float = 10.0,
-                 timeout_s: float | None = None) -> None:
+                 timeout_s: float | None = None, clock=time.monotonic) -> None:
         self.bucket, self.prefix, self.local_dir = bucket, prefix.strip("/"), pathlib.Path(local_dir)
+        self.clock = clock                                                          # the negative cache's time
         self.max_files = max(1, max_files if max_files is not None else config.THUMB_CACHE_MAX)
         self.miss_ttl_s, self.error_ttl_s, self.wait_s = miss_ttl_s, error_ttl_s, wait_s
         self.timeout_s = config.THUMB_FETCH_TIMEOUT_S if timeout_s is None else timeout_s
         self.lock = threading.Lock()
         self.kept: collections.OrderedDict[int, None] = collections.OrderedDict()   # least recently used first
-        self.misses: dict[int, float] = {}                                          # t → monotonic retry time
+        self.misses: dict[int, float] = {}                                          # t → retry time (on self.clock)
         self.inflight: dict[int, threading.Event] = {}
         self.fetched = 0
         self.local_dir.mkdir(parents=True, exist_ok=True)
@@ -142,7 +143,7 @@ class RemoteThumbs:
             if t in self.kept and p.exists():
                 self.kept.move_to_end(t)
                 return p
-            if self.misses.get(t, 0.0) > time.monotonic():
+            if self.misses.get(t, 0.0) > self.clock():
                 return p
             ev = self.inflight.get(t)
             owner = ev is None
@@ -175,7 +176,7 @@ class RemoteThumbs:
                 else:
                     if len(self.misses) > 50_000:
                         self.misses.clear()
-                    self.misses[t] = time.monotonic() + ttl
+                    self.misses[t] = self.clock() + ttl
         finally:
             with self.lock:
                 self.inflight.pop(t, None)
