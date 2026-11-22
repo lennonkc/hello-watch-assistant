@@ -148,7 +148,7 @@ export const NODES = [
     io: [['Question', 'server-built context', 'paused frame'], ['Answer, sentence by sentence']],
     code: ['server/agent.py', 'server/context.py', 'prompts/agent/agent_context.txt'] },
   { id: 't_story', lane: 'online', kind: 'tool', group: 'tools', title: 'story_so_far', sub: 'latest recap + what came after',
-    tech: ['adk', 'run'],
+    tech: ['run'],
     does: 'The latest eligible recap plus the eligible scenes and events after it. The server adds it to every question, because “what did I miss?” needs the story, not the dialogue lines a similarity ranking would surface first.',
     io: [['Eligible set'], ['Recap', 'events up to P']],
     papers: ['moviechat'], code: ['server/agent.py', 'server/knowledge.py'] },
@@ -159,12 +159,12 @@ export const NODES = [
     io: [['Question', 'eligible set'], ['Ranked evidence ≤ P']],
     code: ['ingest/retrieval.py', 'server/agent.py'] },
   { id: 't_dialogue', lane: 'online', kind: 'tool', group: 'tools', title: 'recent_dialogue', sub: 'lines + speakers before P',
-    tech: ['adk', 'run'],
+    tech: ['run'],
     does: 'Added to every question by the server: the lines spoken in the last 60 s before P (or the last few before that), with who said each line when known. A line still being spoken at P is excluded entirely; a speaker whose character is not eligible yet is reported as unknown.',
     io: [['Eligible set'], ['Lines + speakers']],
     papers: ['haven'], code: ['server/knowledge.py'] },
   { id: 't_screen', lane: 'online', kind: 'tool', group: 'tools', title: 'on_screen', sub: 'tap → entity in the current shot',
-    tech: ['adk', 'run'],
+    tech: ['run'],
     does: 'Added to every question by the server: who and what is in the frame at P. Only entities of the current shot (or the one before it, if the current shot only just started) whose box was drawn at or before floor(P) are used; a tap from session state is hit-tested against their [ymin, xmin, ymax, xmax] boxes. Labels are re-decided at P, and eligible facts and reference stills are added. The shot’s own caption is not used — it may describe later moments of the same shot.',
     io: [['Tap', 'current shot'], ['Entity + label at P', 'highlight box']],
     papers: ['shotbyshot', 'autoadzero'], code: ['server/knowledge.py'] },
@@ -199,7 +199,7 @@ export const NODES = [
 
 export const GROUPS = {
   vision: { label: 'Gemini 3.8 Flash', tech: 'gemini' },
-  tools: { label: 'Gate-aware tools', tech: 'run' },
+  tools: { label: 'Gate-aware lookups', tech: 'run' },
 };
 
 // Edges. `kind`: flow (animated), gate (the eligible-set path), infra (dashed, static).
@@ -276,6 +276,12 @@ export const TOURS = {
   ingest: { label: 'Follow a film through ingest',
     steps: ['src', 'prep', 'asr', 'structure', 'bank', 'shots', 'speakers', 'recaps', 'embed', 'checks', 'pack'] },
 };
+
+// ── FINAL BENCHMARK NUMBERS: fill in at release, from bench/README.md ──────────────────────────────────────────────
+// One entry per headline answer metric of the final run, for example
+//   { value: '…', unit: '%', label: 'answers judged correct (hand-written set, n …)' },
+// While empty, the page shows only the retrieval checks below and the link to the scorecard.
+export const ANSWER_RESULTS = [];
 
 export const RESULTS = [
   { value: '0', unit: '/ 120', label: 'gate violations in checked retrieval results' },

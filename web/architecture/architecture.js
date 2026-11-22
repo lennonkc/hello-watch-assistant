@@ -2,7 +2,7 @@
 // Plain ES module, no dependencies. The shell calls mount(el) once, the first time the tab is shown.
 
 import {
-  REPO, BENCH_URL, SERVICES, PAPERS, LANES, NODES, GROUPS, EDGES, WIDE, NARROW, TOURS, RESULTS, REJECTED, GATE_TYPES,
+  REPO, BENCH_URL, SERVICES, PAPERS, LANES, NODES, GROUPS, EDGES, WIDE, NARROW, TOURS, RESULTS, ANSWER_RESULTS, REJECTED, GATE_TYPES,
   FALLBACK_TITLES,
 } from './data.js';
 
@@ -918,10 +918,15 @@ function results() {
       h('p', {}, 'Three open Blender films processed end to end. Spot checks on Sintel unless noted. Answer accuracy, '
         + 'spoiler leaks and latency on a fixed question set are in the ',
       h('a', { href: BENCH_URL, target: '_blank', rel: 'noopener', text: 'benchmark scorecard' }), '.')),
-    h('ul', { class: 'arch-results' }, RESULTS.map((r) =>
-      h('li', { class: 'arch-result' },
-        h('span', { class: 'arch-result__value' }, r.value, r.unit ? h('small', { text: ` ${r.unit}` }) : null),
-        h('span', { class: 'arch-result__label', text: r.label })))));
+    ANSWER_RESULTS.length ? h('ul', { class: 'arch-results', 'aria-label': 'Answers, final benchmark run' },
+      ANSWER_RESULTS.map(result)) : null,
+    h('ul', { class: 'arch-results', 'aria-label': 'Ingest and retrieval checks' }, RESULTS.map(result)));
+}
+
+function result(r) {
+  return h('li', { class: 'arch-result' },
+    h('span', { class: 'arch-result__value' }, r.value, r.unit ? h('small', { text: ` ${r.unit}` }) : null),
+    h('span', { class: 'arch-result__label', text: r.label }));
 }
 
 // ── research ─────────────────────────────────────────────────────────
