@@ -274,3 +274,64 @@ def test_a_refusal_shows_no_sources(wired):
     wired.ctx.script = [{"text": "The film hasn't shown that yet."}]
     ev = wired.ask(61.2, "What happens to Alice later?")
     assert answer(ev)["evidence"] == [] and answer(ev)["frames"] == []
+
+
+# ── review items ─────────────────────────────────────────────────────
+
+def test_sanitize_changes_only_the_name(title):
+    m = Moment(title, 8.0)
+    assert m.sanitize("Then Bob ate at the café.") == "Then the boy ate at the café."     # accents kept
+    assert m.sanitize("Bob在臺北。") == "男孩在臺北。"                                        # Traditional kept
+    assert m.sanitize("BOB waves.") == "BOB waves."                     # Bob is case-sensitive (a common noun)
+    pack = title.pack
+    mary = {**pack["characters"][0], "character_id": "c09", "canonical_name": "Mary Bob", "name_zh": None,
+            "name_public": 1, "display_label_pre_name": "the woman", "display_label_pre_name_zh": "女人"}
+    pack["characters"].append(mary)
+    try:
+        m2 = Moment(title, 8.5)
+        assert m2.sanitize("Mary Bob waves at Bob.") == "Mary Bob waves at the boy."     # the longer visible name wins
+    finally:
+        pack["characters"].remove(mary)
+
+
+def test_retry_note_names_what_was_written():
+    hits = [{"kind": "canary:identity_clue", "term": r"\b(aged|older|grown up)\b", "match": "older"},
+            {"kind": "name_not_yet_visible", "term": "Bob"}]
+    note = main._retry_note(hits)
+    assert "older" in note and "Bob" in note and "aged" not in note
+
+
+def test_regex_canary_hit_carries_the_match(title):
+    pack = {**title.pack, "canaries": [{"term": r"\b(aged|older)\b", "lang": "en", "match": "regex", "case_sensitive": 0,
+                                        "active_until_s": 50.0, "kind": "identity_clue", "ref_type": "identity_link",
+                                        "ref_id": "k01"}]}
+    assert guard.violations(pack, "He looks older now.", 10.0)[0]["match"] == "older"
+
+
+def test_no_subtitle_track_is_said_plainly(wired):
+    pack = main.STORE.get("mini").pack
+    tracks = list(pack["subtitle_tracks"])
+    pack["subtitle_tracks"].clear()
+    try:
+        wired.ctx.script = [{"text": "There are no subtitles for this film."}]
+        wired.ask(45.0, "What did she just say?")
+        assert "no subtitle track" in request_text(wired.ctx.requests[0])
+    finally:
+        pack["subtitle_tracks"].extend(tracks)
+
+
+def test_questions_without_a_session_keep_nothing(wired):
+    wired.ctx.script = [{"text": "A meadow."}]
+    wired.ask(30.0, "Where are we?")                                         # no session_id
+    assert dict(main.HISTORY.map) == {}
+    assert not any(main.session_service.sessions.get(main.APP_NAME, {}).values())
+
+
+def test_answer_cut_by_the_deadline_says_so(wired, monkeypatch):
+    from server import config
+    monkeypatch.setattr(config, "ASK_DEADLINE_S", 0.5)
+    wired.ctx.script = [{"text": ["That is the wolf. It", " is grey."], "gap": 2}]
+    ev = wired.ask(61.2, tap=TAP_WOLF)
+    assert answer(ev)["text"] == "That is the wolf." and answer(ev)["cut_off"] is True
+    wired.ctx.script = [{"text": "That is the wolf."}]
+    assert answer(wired.ask(61.2, tap=TAP_WOLF))["cut_off"] is False

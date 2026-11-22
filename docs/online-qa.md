@@ -9,10 +9,10 @@
 | Table | Contents | Typical use | Gate (C1 §5.2) |
 |---|---|---|---|
 | `character_exemplars` | 1–3 in-film reference stills per character (`t_s` second + bbox), verified by drawing the box | "Who is this": show reference images to the model; on-frame highlighting | character eligible and `t_s ≤ floor(P)` |
-| `shot_captions` | Per-shot descriptions (shots < 1 s are merged into a neighbour) | Fine-grained evidence for "what just happened" | `reveal_at_s + 3 ≤ P` |
+| `shot_captions` | Per-shot descriptions (shots < 1 s are merged into a neighbour) | Fine-grained evidence for "what just happened" | `max(reveal_at_s, end_s) + 3 ≤ P` |
 | `shot_entities` | Characters / objects on screen in a shot: screen position, bbox (on keyframe `bbox_t_s`), action | Tap-to-disambiguate ("who's the one on the left") | follows the shot; **the current shot has its own rule, see §3** |
 | `cue_speakers` | Speaker for each subtitle line (diarization + visual attribution, with confidence) | "What did he just say / who said it" | follows the cue: `end_s + 1 ≤ P` |
-| `recaps` | "Story so far" recap at the end of each scene (en / zh), generated only from earlier information, names re-checked | "What did I miss" | `reveal_at_s + 3 ≤ P` |
+| `recaps` | "Story so far" recap at the end of each scene (en / zh), generated only from earlier information, names re-checked | "What did I miss" | `max(reveal_at_s, upto_s) + 3 ≤ P` |
 | `video_windows` | Sub-windows of ≤ 30 s cut along segments (≈ 5 s overlap) | Carrier for video embeddings; on a hit, clip and read closely | `end_s + 3 ≤ P` |
 | `embeddings` | gemini-embedding-2, 1536 dims: text items + video windows (film with audio track on GCS) | Semantic localisation | follows the owning item |
 
@@ -154,7 +154,10 @@ per-question build runs in a worker thread: on a synthetic 10,000-cue / 3,000-sh
 for the first question, which builds the indexes).
 
 **The earlier flow** (`WATCH_FLOW=tools`) stays available for benchmarking: five tools (`story_so_far`,
-`search_moments`, `recent_dialogue`, `on_screen`, `look_closer`) and a routing-table instruction. Its ADK session
+`search_moments`, `recent_dialogue`, `on_screen`, `look_closer`) and a routing-table instruction. To be precise about
+the comparison: it is the earlier routing on the new plumbing — it shares the budget callback, the deadlines, the
+guard (identity co-occurrence included), the step labels and the evidence check, so a difference between the flows
+measures the server-built context and the one-round tool cap, not those. Its ADK session
 carries the conversation and is replaced after a seek backwards or a guard rewrite. The whole answer is guarded at
 once and sent as a single `delta`.
 

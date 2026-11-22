@@ -207,9 +207,10 @@ class Gate:
     def relations_ok(self, it: Item) -> bool:
         """Linked characters all eligible at P and none isolated; linked cues all eligible at P."""
         start, end = it.span or (it.start_s, it.end_s)
-        for cid in self.item_chars.get((it.item_type, it.item_id), ()):
-            if not self.le(self.char_from(cid)) or self.char_isolated(cid, start, end):
-                return False
+        if any(not self.le(self.char_from(cid)) for cid in self.item_chars.get((it.item_type, it.item_id), ())):
+            return False
+        if self.isolated(it.item_type, it.item_id, start, end):
+            return False
         for cue_id in self.item_cues.get((it.item_type, it.item_id), ()):
             if cue_id not in self.cue_end or not self.le(self.cue_end[cue_id] + self.m["gate_margin_cue_s"]):
                 return False

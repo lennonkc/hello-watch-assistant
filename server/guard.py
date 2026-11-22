@@ -19,7 +19,8 @@ import re
 from ingest.checks import name_terms
 from ingest.derive import name_case_sensitive
 from ingest.retrieval import EPS, margins
-from ingest.textnorm import normalize, term_matches, word_pattern
+from ingest.textnorm import normalize, term_matches, term_search, word_pattern
+from server.knowledge import name_usable
 
 
 def _prefix_match(term: str, text: str, case_sensitive: bool) -> bool:
@@ -55,7 +56,7 @@ def _label_forms(label: str | None) -> list[str]:
 def identity_links(m, subjects=(), question: str = "") -> list[Link]:
     """The links still pending at the Moment `m` (`Gate.pending`). `subjects`: character ids the answer is about
     (tapped / on-screen focus); an a-side the question refers to counts too."""
-    chars, mr = m.chars, m.m["gate_margin_reviewed_reveal_s"]
+    chars = m.chars
     aliases: dict = {}
     for al in m.pack.get("character_aliases", []):
         if not al["generic"]:
@@ -71,7 +72,7 @@ def identity_links(m, subjects=(), question: str = "") -> list[Link]:
         if m.name_visible(ca):
             a_terms += [(n, bool(name_case_sensitive(n))) for n in (ca["canonical_name"], ca.get("name_zh")) if n]
         a_terms += [(al["alias"], bool(name_case_sensitive(al["alias"]))) for al in aliases.get(a, [])
-                    if al["alias_known_at_s"] + mr <= m.P + EPS]
+                    if m.visible(al["alias_known_at_s"])]
         b_terms = [(n, bool(name_case_sensitive(n))) for n in (cb["canonical_name"], cb.get("name_zh")) if n]
         b_terms += [(al["alias"], bool(name_case_sensitive(al["alias"]))) for al in aliases.get(b, [])]
         a_keys = {normalize(t) for t, _ in a_terms}
@@ -128,10 +129,13 @@ def violations(pack: dict, text: str, P: float, links=()) -> list[dict]:
             hits.append({"kind": "real_name", "term": b["term"]})
     for k in pack.get("canaries", []):
         if P + EPS < k["active_until_s"] and matches(k["term"], text, k["match"], bool(k["case_sensitive"])):
-            hits.append({"kind": f"canary:{k['kind']}", "term": k["term"]})
-    m_rev = margins(pack)["gate_margin_reviewed_reveal_s"]
+            hit = {"kind": f"canary:{k['kind']}", "term": k["term"]}
+            if k["match"] == "regex":                       # the words actually written, for the retry note
+                hit["match"] = term_search(k["term"], text, "regex", bool(k["case_sensitive"]))
+            hits.append(hit)
+    m = margins(pack)
     for _cid, term, known_at, cs in name_terms(pack):
-        if P + EPS < known_at + m_rev and term_matches(term, text, "word", cs):
+        if not name_usable(known_at, P, m) and term_matches(term, text, "word", cs):
             hits.append({"kind": "name_not_yet_visible", "term": term})
     hits += _cooccurrence(links, text)
     seen, out = set(), []

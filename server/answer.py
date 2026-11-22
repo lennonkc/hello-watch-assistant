@@ -55,7 +55,6 @@ class GuardedAnswer:
         self.check = check
         self.buf = ""
         self.text = ""
-        self.sent: list[str] = []
         self.dropped: list[list[dict]] = []          # guard hits of each dropped sentence
 
     def feed(self, chunk: str) -> list[str]:
@@ -72,7 +71,6 @@ class GuardedAnswer:
         """Append a fixed server text (the fallback) without a guard check."""
         d = ("" if not self.text or _tight(self.text[-1], text[0]) else " ") + text
         self.text += d
-        self.sent.append(d)
         return d
 
     def _accept(self, sentence: str) -> str | None:
@@ -85,5 +83,4 @@ class GuardedAnswer:
             self.dropped.append(hits)
             return None
         self.text += delta
-        self.sent.append(delta)
         return delta

@@ -15,7 +15,11 @@
 | `web/architecture/` | front end | Tab 2, "How it works": interactive flow diagram + Google Cloud technology map |
 
 The service serves `web/` as static files at `/`. No build step: plain HTML, CSS and ES modules, no frameworks, no
-external scripts (Google Fonts stylesheets are fine). Everything must work at phone width (≥ 360 px) and in light / dark.
+external scripts, fonts or stylesheets (system fonts only). Everything must work at phone width (≥ 360 px) and in light / dark.
+
+Page links: `/?title=<id>&t=<seconds>&q=<text>&lang=en|zh` opens that film paused at `t` with the question filled
+in; `&ask=1` also sends it. An unknown id opens the first film. `/#code=…` unlocks private preview titles (see
+`POST /api/unlock`).
 
 ## Design tokens (`web/shared/tokens.css`)
 
@@ -90,8 +94,9 @@ Request body:
 
 - `tap` is optional: normalised coordinates (0–1, origin top-left) of a click on the paused video frame.
 - `lang` is `en` or `zh` (answer language).
-- `session_id` keeps follow-up questions in one conversation. If the viewer seeks **backwards** past the previous
-  question, the server starts a fresh conversation (earlier answers may contain things not yet seen).
+- `session_id` keeps follow-up questions in one conversation. After a seek **backwards**, the turns asked later than
+  the new `p` are left out of what the model sees (they may contain things not yet seen) and come back once the viewer
+  passes that point again. Without a `session_id` nothing is kept.
 
 The response is `text/event-stream` (read it with `fetch` + a stream reader; `EventSource` cannot POST). Events:
 
@@ -118,6 +123,7 @@ Order: `gate`, then the trace (`tool` / `tool_result`, possibly `highlight`), th
  "frames": [{"t": 402, "caption": "Earlier: 06:42"}],
  "highlight": {"bbox": [210, 380, 760, 560], "label": "the young woman", "frame_t": 430},
  "guard": {"checked": true, "rewritten": false, "dropped": 0},
+ "cut_off": false,
  "latency_ms": 4210,
  "usage": {"input_tokens": 2950, "output_tokens": 84, "thought_tokens": 40, "model_calls": 1},
  "timing": {"first_text_ms": 1380, "total_ms": 2210},
@@ -132,6 +138,8 @@ Order: `gate`, then the trace (`tool` / `tool_result`, possibly `highlight`), th
 - `frames[].t` → `/api/titles/{id}/frames/{t}.jpg`; every frame is at or before `P`.
 - `guard.rewritten = true` means the output guard caught something: `dropped` sentences were never sent, or the
   answer was regenerated (one retry) or replaced by a fixed reply.
+- `cut_off: true`: the answer ran out of time (or the model failed) partway; the sentences sent are complete and
+  guarded, but the answer may be unfinished. The page says so.
 - `usage` counts every model call of the question (the nested `look_closer` call included); `output_tokens` includes
   `thought_tokens`. `timing.first_text_ms` is the time to the first `delta`.
 
