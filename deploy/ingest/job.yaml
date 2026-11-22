@@ -17,7 +17,7 @@ spec:
       template:
         spec:
           serviceAccountName: cedar-watch-ingest@${PROJECT}.iam.gserviceaccount.com
-          timeoutSeconds: 3600
+          timeoutSeconds: 21600                 # 6 h: feature-length films
           maxRetries: 1
           containers:
             - image: ${IMAGE}
