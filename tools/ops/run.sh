@@ -737,7 +737,7 @@ rollback_lines() {               # BEFORE (REV=PCT,… from svc_q split) PROMOTE
 }
 
 mode_promote() {
-  local url rev image want names before
+  local url rev image want names before tagged desc
   cloud_discover
   url=$(svc_q tag-url "$TAG")
   rev=$(svc_q tag-revision "$TAG")
@@ -749,6 +749,13 @@ mode_promote() {
   want=$(git rev-parse --short=12 HEAD 2>/dev/null) || die "promote needs a git checkout of the commit to release"
   case "$image" in
     *":$want") say "image: $image (= checked-out commit)" ;;
+    *@sha256:*)                    # Cloud Run records a revision's image by digest: compare it with the commit tag's
+      tagged="${image%@*}:$want"
+      desc=$(gcloud artifacts docker images describe "$tagged" --project "$PROJECT" 2>/dev/null) || desc=""
+      case "$desc" in
+        *"${image##*@}"*) say "image: $tagged = ${image##*@} (= checked-out commit)" ;;
+        *) die "image $image is not the checked-out commit $want (no image $tagged with that digest)" ;;
+      esac ;;
     *) die "image $image is not the checked-out commit $want" ;;
   esac
   names=$(revision_q "$rev" env-names)

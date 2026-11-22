@@ -48,8 +48,13 @@ if args[:3] == ["run", "services", "update-traffic"]:
         shutil.copyfile(d / "service-after.json", d / "service.json")
     print("Updating traffic... done" if rc == 0 else "ERROR: (gcloud.run.services.update-traffic) denied")
     sys.exit(rc)
-if args[:2] == ["run", "deploy"] or args[:4] == ["artifacts", "docker", "images", "describe"]:
-    sys.exit(0)                                   # the image of the commit "exists"; the deploy "succeeds"
+if args[:4] == ["artifacts", "docker", "images", "describe"]:
+    p = d / "image-describe.txt"                  # the image of the commit "exists"; its digest when a test sets one
+    if p.is_file():
+        print(p.read_text())
+    sys.exit(0)
+if args[:2] == ["run", "deploy"]:
+    sys.exit(0)                                   # the deploy "succeeds"
 if args[:1] == ["version"]:
     print("Google Cloud SDK (fake)"); sys.exit(0)
 sys.exit(3)
@@ -192,6 +197,34 @@ def test_a_failed_traffic_move_still_prints_the_rollback(ops):
 
 def test_promote_refuses_an_image_of_another_commit_without_moving_traffic(ops):
     _setup_promote(ops, [{"revisionName": "hello-watch-00009-old", "percent": 100}], image_commit="0123456789ab")
+    r = ops("promote")
+    assert r.returncode != 0 and "is not the checked-out commit" in r.stderr
+    assert not [c for c in _calls(ops) if "update-traffic" in c]
+
+
+def _by_digest(ops, revision_digest, tag_digest):
+    """The real service records a revision's image as name@sha256:…, not as the tag it was deployed with."""
+    _setup_promote(ops, [{"revisionName": "hello-watch-00009-old", "percent": 100}])
+    p = ops.fake / "rev-hello-watch-00011-new.json"
+    rev = json.loads(p.read_text())
+    rev["spec"]["containers"][0]["image"] = f"r/p/web@sha256:{revision_digest}"
+    p.write_text(json.dumps(rev))
+    if tag_digest:
+        (ops.fake / "image-describe.txt").write_text(f"image_summary:\n  digest: sha256:{tag_digest}\n")
+
+
+def test_promote_accepts_a_revision_image_recorded_by_digest(ops):
+    _by_digest(ops, "ab" * 32, "ab" * 32)
+    r = ops("promote")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"image: r/p/web:{ops.commit} = sha256:{'ab' * 32} (= checked-out commit)" in r.stdout
+    assert f"artifacts docker images describe r/p/web:{ops.commit} --project proj" in _calls(ops)
+    assert [c for c in _calls(ops) if "update-traffic" in c]
+
+
+@pytest.mark.parametrize("tag_digest", ["cd" * 32, ""])
+def test_promote_refuses_a_digest_that_is_not_the_commits_image(ops, tag_digest):
+    _by_digest(ops, "ab" * 32, tag_digest)
     r = ops("promote")
     assert r.returncode != 0 and "is not the checked-out commit" in r.stderr
     assert not [c for c in _calls(ops) if "update-traffic" in c]
