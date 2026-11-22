@@ -195,43 +195,31 @@ def llm_judge(c: dict, text: str, history: list | None = None) -> dict:
 
 # ── usage / cost ─────────────────────────────────────────────────────
 
-_TOK = {"input": ("prompt_token_count", "input_tokens", "total_input_tokens"),
-        "output": ("candidates_token_count", "output_tokens", "total_output_tokens"),
-        "thoughts": ("thoughts_token_count", "thought_tokens", "total_thought_tokens"),
-        "cached": ("cached_content_token_count", "cached_tokens", "total_cached_tokens")}
-
-
 def usage_summary(usage, model: str = DEFAULT_MODEL) -> dict | None:
-    """Token totals and estimated cost from an `answer.usage` object: a Gemini usage_metadata-style dict, a list of
-    them, or a dict with `calls: [...]`. A `cost_usd` field wins over the estimate; otherwise list prices from
-    `ingest/ledger.py` (thinking billed as output, no cache discount)."""
-    if not usage:
+    """Tokens, model calls and estimated cost of one answer from `answer.usage`.
+
+    The service sends `{"input_tokens", "output_tokens", "thought_tokens", "model_calls"}` summed over every model call
+    of the question, `output_tokens` already including the thinking tokens (docs/web-api.md). A Gemini
+    usage_metadata-style dict (`prompt_token_count`, `candidates_token_count` without thoughts) is accepted too.
+    Cost: list prices from `ingest/ledger.py`, output incl. thinking at the output price, no cache discount; a
+    `cost_usd` field wins."""
+    if not isinstance(usage, dict) or not usage:
         return None
-    if isinstance(usage, dict) and isinstance(usage.get("calls"), list):
-        calls, top = usage["calls"], usage
+
+    def num(k):
+        return int(usage[k]) if isinstance(usage.get(k), (int, float)) else 0
+    if "input_tokens" in usage or "output_tokens" in usage:
+        n_in, n_out, n_th = num("input_tokens"), num("output_tokens"), num("thought_tokens")
     else:
-        calls, top = (usage if isinstance(usage, list) else [usage]), {}
-    tot = {k: 0 for k in _TOK}
-    cost, priced = 0.0, True
-    for u in calls:
-        if not isinstance(u, dict):
-            continue
-        for k, names in _TOK.items():
-            tot[k] += int(next((u[n] for n in names if isinstance(u.get(n), (int, float))), 0))
-        if isinstance(u.get("cost_usd"), (int, float)):
-            cost += u["cost_usd"]
-            continue
-        from ingest.ledger import PRICES
-        price = PRICES.get(u.get("model") or top.get("model") or model)
-        if price is None:
-            priced = False
-            continue
-        n_in = next((u[n] for n in _TOK["input"] if isinstance(u.get(n), (int, float))), 0)
-        n_out = sum(next((u[n] for n in _TOK[k] if isinstance(u.get(n), (int, float))), 0) for k in ("output", "thoughts"))
-        cost += n_in / 1e6 * price[0] + n_out / 1e6 * price[1]
-    if isinstance(top.get("cost_usd"), (int, float)):
-        cost, priced = float(top["cost_usd"]), True
-    return {**tot, "cost_usd": round(cost, 6) if priced else None}
+        n_th = num("thoughts_token_count")
+        n_in, n_out = num("prompt_token_count"), num("candidates_token_count") + n_th
+    from ingest.ledger import PRICES
+    price = PRICES.get(usage.get("model") or model)
+    cost = (n_in * price[0] + n_out * price[1]) / 1e6 if price else None
+    if isinstance(usage.get("cost_usd"), (int, float)):
+        cost = float(usage["cost_usd"])
+    return {"input": n_in, "output": n_out, "thoughts": n_th, "model_calls": num("model_calls") or None,
+            "cost_usd": round(cost, 6) if cost is not None else None}
 
 
 # ── grading one run ──────────────────────────────────────────────────
@@ -275,6 +263,7 @@ def judge_run(run_dir: pathlib.Path, cases: dict, use_llm: bool, use_rules: bool
                "streamed": bool(r.get("streamed")), "tools": r.get("tools") or [],
                "server_tools": r.get("server_tools") or [], "model_tools": r.get("model_tools") or [],
                "guard_rewritten": r.get("guard_rewritten"), "usage": usage_summary(r.get("usage"), model),
+               "server_first_text_ms": (r.get("timing") or {}).get("first_text_ms"), "flow": r.get("flow"),
                "answer": r.get("answer"), "answer_sha": sha,
                "include_hits": hits(c.get("must_include_any"), answer_text) if c.get("must_include_any") else None}
         if use_rules:
@@ -317,6 +306,14 @@ def _lat(xs) -> dict:
             "mean": round(statistics.mean(xs)) if xs else None}
 
 
+def _count(xs) -> dict:
+    out: dict = {}
+    for x in xs:
+        if x is not None:
+            out[x] = out.get(x, 0) + 1
+    return out
+
+
 def _mean(xs, nd: int = 2):
     xs = [x for x in xs if x is not None]
     return round(statistics.mean(xs), nd) if xs else None
@@ -355,9 +352,14 @@ def summarize(rows: list[dict]) -> dict:
         "model_tools_per_answer": _mean(len(r["model_tools"]) for r in ok),
         "tool_usage": dict(sorted(tool_usage.items())),
         "usage_n": len(usage_rows),
-        "tokens_in_per_q": _mean((u["input"] for u in usage_rows), 0),
-        "tokens_out_per_q": _mean((u["output"] + u["thoughts"] for u in usage_rows), 0),
+        "tokens_in_p50": quantile([u["input"] for u in usage_rows], 0.5),
+        "tokens_in_p90": quantile([u["input"] for u in usage_rows], 0.9),
+        "tokens_out_p50": quantile([u["output"] for u in usage_rows], 0.5),
+        "tokens_out_p90": quantile([u["output"] for u in usage_rows], 0.9),
+        "model_calls_per_answer": _mean(u["model_calls"] for u in usage_rows),
         "cost_usd_per_q": _mean((u["cost_usd"] for u in usage_rows), 5),
+        "latency_server_first_text_ms": _lat(r.get("server_first_text_ms") for r in ok),
+        "flow_mix": ", ".join(f"{k} {v}" for k, v in sorted(_count(r.get("flow") for r in ok).items())) or None,
     }
 
 
@@ -383,10 +385,14 @@ METRICS = [("cases", "n"), ("errors", "errors"), ("accuracy % (correct = 1, part
            ("real-name leaks (cases)", "real_name_leaks"), ("guard rewrites %", "guard_rewrite_pct"),
            ("streamed answers %", "streamed_pct"), ("tool calls / answer", "tools_per_answer"),
            ("· server-run (ctx-)", "server_tools_per_answer"), ("· model-called", "model_tools_per_answer"),
-           ("input tokens / question", "tokens_in_per_q"), ("output + thinking tokens / question", "tokens_out_per_q"),
-           ("est. cost / question, USD", "cost_usd_per_q")]
-LATENCY = [("total", "latency_total_ms"), ("first text", "latency_first_text_ms"),
-           ("first tool", "latency_first_tool_ms"), ("server latency_ms", "latency_server_ms")]
+           ("answer flow (count)", "flow_mix"), ("model calls / answer", "model_calls_per_answer"),
+           ("input tokens / answer, p50", "tokens_in_p50"), ("input tokens / answer, p90", "tokens_in_p90"),
+           ("output tokens (incl. thinking) / answer, p50", "tokens_out_p50"),
+           ("output tokens (incl. thinking) / answer, p90", "tokens_out_p90"),
+           ("est. cost / answer, USD", "cost_usd_per_q")]
+LATENCY = [("total (client)", "latency_total_ms"), ("first text (client)", "latency_first_text_ms"),
+           ("first text (server timing.first_text_ms)", "latency_server_first_text_ms"),
+           ("first tool (client)", "latency_first_tool_ms"), ("server latency_ms", "latency_server_ms")]
 
 
 def report(runs: dict[str, list[dict]], out: pathlib.Path, meta: dict | None = None) -> str:
@@ -411,7 +417,8 @@ def report(runs: dict[str, list[dict]], out: pathlib.Path, meta: dict | None = N
     L = [f"# Benchmark scorecard: {' vs '.join(names)}", ""]
     for n in names:
         m = (meta or {}).get(n) or {}
-        L.append(f"- **{n}**: base `{m.get('base', '?')}`, commit `{m.get('commit') or '?'}`"
+        L.append(f"- **{n}**: base `{m.get('base', '?')}`, flow `{m.get('flow') or 'server default'}`, "
+                 f"commit `{m.get('commit') or '?'}`"
                  + (f", {m['label']}" if m.get("label") else "") + f", judge prompt `{PROMPT_SHA}`")
     if partial:
         L += ["", f"> Only the {len(shared)} cases present in every run are compared (left out: "
@@ -638,7 +645,7 @@ def main(argv=None) -> int:
                                                          args.model)})
         name = name if name not in runs else spec
         runs[name] = sorted(merged.values(), key=lambda r: r["id"])
-        meta[name] = {k: m.get(k) for k in ("base", "commit", "label", "started", "workers")}
+        meta[name] = {k: m.get(k) for k in ("base", "flow", "commit", "label", "started", "workers")}
     if args.out:
         out = pathlib.Path(args.out)
     elif len(args.runs) == 1:

@@ -349,7 +349,7 @@ mode_info() {
   else
     say "Gemini key file: not present"
   fi
-  say "REGION=$REGION SERVICE=$SERVICE TAG=$TAG"
+  say "REGION=$REGION SERVICE=$SERVICE TAG=$TAG PACKS_PREFIX=${PACKS_PREFIX:-(from the service)} BENCH_FLOW=${BENCH_FLOW:-(server default)}"
 
   hr "tools"
   say "bash: $BASH_VERSION"
@@ -452,6 +452,16 @@ mode_tests() {
   if [ "$rc" != 0 ] || [ "$lint" != 0 ]; then die "tests failed (pytest exit $rc, lint exit $lint)"; fi
 }
 
+# gs:// URL of PACKS_PREFIX (a path inside the service's own bucket; bucket names are never committed)
+packs_url() {
+  local prefix=${PACKS_PREFIX#/}
+  case "$prefix" in
+    gs://*|*..*|"") die "PACKS_PREFIX must be a path inside the bucket, e.g. demo-packs-next (got '$PACKS_PREFIX')" ;;
+  esac
+  if [ -z "${BUCKET:-}" ]; then die "PACKS_PREFIX needs the service's CEDAR_INGEST_BUCKET"; fi
+  printf 'gs://%s/%s\n' "$BUCKET" "${prefix%/}"
+}
+
 refresh_service() {
   SVC_JSON=$(gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" --format=json) \
     || die "cannot describe Cloud Run service $SERVICE in $REGION"
@@ -460,7 +470,7 @@ refresh_service() {
 # Build the image of this commit and deploy it as a NEW revision that takes no traffic, tagged $TAG. Production
 # traffic is never moved (--no-traffic pins any "latest" traffic to the current revision first).
 mode_deploy_staging() {
-  local image token envs url out rc
+  local image token envs url out rc pu
   cloud_discover
   if [ -z "${BUCKET:-}" ]; then die "the service has no CEDAR_INGEST_BUCKET env var"; fi
   git rev-parse HEAD >/dev/null 2>&1 || die "deploy-staging needs a git checkout (the image is built with git archive)"
@@ -481,11 +491,15 @@ mode_deploy_staging() {
   envs="WATCH_BENCH_TOKEN=$token"
   envs="$envs,WATCH_ASK_PER_MINUTE=${WATCH_ASK_PER_MINUTE:-6},WATCH_ASK_PER_DAY_PER_IP=${WATCH_ASK_PER_DAY_PER_IP:-80}"
   envs="$envs,WATCH_ASK_PER_DAY_TOTAL=${WATCH_ASK_PER_DAY_TOTAL:-1500}"
+  if [ -n "${PACKS_PREFIX:-}" ]; then
+    pu=$(packs_url) || exit 1
+    envs="$envs,WATCH_PACKS_GCS=$pu"
+  fi
   if [ -n "${STAGING_ENV:-}" ]; then
     envs="$envs,$STAGING_ENV"
   fi
   hr "deploy (no traffic, tag $TAG)"
-  say "extra env: ${STAGING_ENV:-(none)}; WATCH_BENCH_TOKEN: fresh (written to .cache/bench_token)"
+  say "packs: ${PACKS_PREFIX:-(unchanged)}; extra env: ${STAGING_ENV:-(none)}; WATCH_BENCH_TOKEN: fresh (in .cache/bench_token)"
   # the agent prompts ship in the image now: drop the prompt-secret variable on the new revision
   out=$(mktemp)
   if gcloud run deploy "$SERVICE" --project "$PROJECT" --region "$REGION" --image "$image" \
@@ -517,9 +531,15 @@ mode_bench() {
   local url sha shas run_id label compare
   cloud_discover
   ensure_venv
-  url=${BENCH_URL:-$(svc_q tag-url "$TAG")}
+  url=${BENCH_URL:-}
+  if [ -z "$url" ]; then
+    url=$(svc_q tag-url "$TAG")
+  fi
   if [ -z "$url" ]; then die "no URL: no revision is tagged $TAG (run deploy-staging) and BENCH_URL is unset"; fi
-  if [ -z "${PACKS_GCS:-}" ]; then die "the service has no WATCH_PACKS_GCS env var"; fi
+  if [ -n "${PACKS_PREFIX:-}" ]; then
+    PACKS_GCS=$(packs_url) || exit 1
+  fi
+  if [ -z "${PACKS_GCS:-}" ]; then die "the service has no WATCH_PACKS_GCS env var and PACKS_PREFIX is unset"; fi
 
   hr "master packs from $PACKS_GCS"
   shas=$("$VENV_PY" -c "$PY_SHAS") || die "cannot read the catalog"
@@ -531,7 +551,13 @@ mode_bench() {
   done
 
   export BENCH_RUNS_DIR="$ROOT/.cache/bench/runs"
-  run_id=${BENCH_RUN_ID:-$(date -u '+%m%d-%H%M')-$TAG}
+  run_id=${BENCH_RUN_ID:-}
+  if [ -z "$run_id" ]; then
+    run_id="$(date -u '+%m%d-%H%M')-$TAG"
+    if [ -n "${BENCH_FLOW:-}" ]; then
+      run_id="$run_id-$BENCH_FLOW"
+    fi
+  fi
   label="${BENCH_LABEL:-}"
   if [ -z "$label" ] && [ -f .cache/staging.txt ] && [ -z "${BENCH_URL:-}" ]; then
     label="staging: $(tr '\n' ' ' < .cache/staging.txt)"
@@ -543,6 +569,9 @@ mode_bench() {
   fi
   if [ -n "${BENCH_ONLY:-}" ]; then
     set -- "$@" --only "$BENCH_ONLY"
+  fi
+  if [ -n "${BENCH_FLOW:-}" ]; then
+    set -- "$@" --flow "$BENCH_FLOW"               # X-Watch-Flow header; honoured only with the bench token
   fi
   # progress every 25 cases and the first 10 errors; everything in the log
   if ! "$VENV_PY" bench/run_bench.py "$@" 2>&1 | tee "$LOGS/bench-$run_id-client.log" | awk '

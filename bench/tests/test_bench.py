@@ -123,16 +123,26 @@ def test_quantile_nearest_rank():
     assert J.quantile([7], 0.95) == 7 and J.quantile([], 0.5) is None
 
 
-def test_usage_summary_shapes_and_cost():
-    u = J.usage_summary({"prompt_token_count": 1_000_000, "candidates_token_count": 100_000,
-                         "thoughts_token_count": 100_000}, "gemini-3.8-flash")
-    assert u["input"] == 1_000_000 and u["output"] == 100_000 and u["thoughts"] == 100_000
-    assert u["cost_usd"] == pytest.approx(0.75 + 0.2 * 3.75)
-    two = J.usage_summary([{"input_tokens": 10, "output_tokens": 5}, {"input_tokens": 20, "output_tokens": 5}])
-    assert two["input"] == 30 and two["output"] == 10
-    assert J.usage_summary({"calls": [{"prompt_token_count": 5}], "cost_usd": 0.01})["cost_usd"] == 0.01
-    assert J.usage_summary({"prompt_token_count": 5, "model": "unknown-model"})["cost_usd"] is None
-    assert J.usage_summary(None) is None
+def test_usage_summary_contract_and_cost():
+    u = J.usage_summary({"input_tokens": 1_000_000, "output_tokens": 200_000, "thought_tokens": 100_000,
+                         "model_calls": 2}, "gemini-3.8-flash")
+    assert (u["input"], u["output"], u["thoughts"], u["model_calls"]) == (1_000_000, 200_000, 100_000, 2)
+    assert u["cost_usd"] == pytest.approx(0.75 + 0.2 * 3.75)                 # output already includes thinking
+    g = J.usage_summary({"prompt_token_count": 10, "candidates_token_count": 5, "thoughts_token_count": 3})
+    assert (g["input"], g["output"], g["model_calls"]) == (10, 8, None)         # Gemini style: thoughts added
+    assert J.usage_summary({"input_tokens": 5, "cost_usd": 0.01})["cost_usd"] == 0.01
+    assert J.usage_summary({"input_tokens": 5, "model": "unknown-model"})["cost_usd"] is None
+    assert J.usage_summary(None) is None and J.usage_summary([]) is None
+
+
+def test_summarize_tokens_flow_and_server_first_text():
+    rows = [row(i, total=1000 + i, usage=J.usage_summary({"input_tokens": 1000 * i, "output_tokens": 10 * i,
+                                                          "thought_tokens": 0, "model_calls": 1 + i % 2}),
+                server_first_text_ms=100 * i, flow="context" if i < 4 else "tools") for i in range(1, 6)]
+    s = J.summarize(rows)
+    assert (s["tokens_in_p50"], s["tokens_in_p90"], s["tokens_out_p50"]) == (3000, 5000, 30)
+    assert s["model_calls_per_answer"] == 1.6 and s["flow_mix"] == "context 3, tools 2"
+    assert s["latency_server_first_text_ms"]["p50"] == 300
 
 
 def test_report_side_by_side(tmp_path):
@@ -212,12 +222,23 @@ class FakeServer(http.server.BaseHTTPRequestHandler):
     calls: list = []
     fail_first_with_429 = False
 
+    healthy = True
+
     def log_message(self, *a):
         pass
 
+    def do_GET(self):
+        data = json.dumps({"ok": FakeServer.healthy, "titles": 3}).encode()
+        self.send_response(200 if FakeServer.healthy else 503)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-        FakeServer.calls.append({"body": body, "token": self.headers.get("X-Watch-Bench-Token")})
+        FakeServer.calls.append({"body": body, "token": self.headers.get("X-Watch-Bench-Token"),
+                                 "flow": self.headers.get("X-Watch-Flow")})
         if FakeServer.fail_first_with_429:
             FakeServer.fail_first_with_429 = False
             data = json.dumps({"message": "slow down"}).encode()
@@ -238,15 +259,16 @@ class FakeServer(http.server.BaseHTTPRequestHandler):
         if body["question"] != "no stream":
             ev("delta", {"text": "Hello "})
             ev("delta", {"text": "there."})
-        ev("answer", {"text": "Hello there.", "evidence": [{"text": "cue 1"}], "guard": {"rewritten": False},
-                      "latency_ms": 42, "usage": {"prompt_token_count": 100, "candidates_token_count": 10},
-                      "timing": {"model_ms": 30}})
+        ev("answer", {"text": "Hello there.", "evidence": [{"text": "cue 1"}],
+                      "guard": {"checked": True, "rewritten": False, "dropped": 0}, "latency_ms": 42,
+                      "usage": {"input_tokens": 100, "output_tokens": 10, "thought_tokens": 4, "model_calls": 1},
+                      "timing": {"first_text_ms": 30, "total_ms": 40}, "flow": "context"})
         ev("done", {})
 
 
 @pytest.fixture
 def fake():
-    FakeServer.calls = []
+    FakeServer.calls, FakeServer.healthy, FakeServer.fail_first_with_429 = [], True, False
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeServer)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_address[1]}"
@@ -260,7 +282,8 @@ def test_client_records_timings_tools_and_usage(fake):
     assert r["server_tools"] == ["context"] and r["model_tools"] == ["search_moments"]
     assert r["streamed"] and r["n_delta"] == 2 and r["streamed_text"] is None             # same as the final text
     assert r["t_first_tool_ms"] <= r["t_first_text_ms"] <= r["t_answer_ms"] <= r["t_total_ms"]
-    assert r["server_latency_ms"] == 42 and r["usage"]["prompt_token_count"] == 100 and r["timing"] == {"model_ms": 30}
+    assert r["server_latency_ms"] == 42 and r["usage"]["input_tokens"] == 100 and r["timing"]["first_text_ms"] == 30
+    assert r["flow"] == "context" and r["guard_dropped"] == 0
     assert r["guard_rewritten"] is False and r["gate"]["eligible_total"] == 3
     call = FakeServer.calls[-1]
     assert call["token"] == "t0ken" and call["body"]["tap"] == {"x": 0.4, "y": 0.6}
@@ -303,3 +326,34 @@ def test_run_bench_main_resumes(fake, tmp_path, monkeypatch):
     assert len(FakeServer.calls) == n + 1                                         # only the missing case ran
     meta = json.loads((tmp_path / "x" / "run.json").read_text())
     assert meta["base"] == fake and meta["token"] is False
+
+
+def test_flow_header_run_id_and_meta(fake, tmp_path, monkeypatch):
+    monkeypatch.setattr(R, "RUNS_DIR", tmp_path)
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(json.dumps({k: v for k, v in case(id="t1").items() if k != "_file"}) + "\n")
+    assert R.main(["--base", fake, "--cases", str(cases), "--flow", "tools", "--token", "tk"]) == 0
+    assert FakeServer.calls[-1]["flow"] == "tools" and FakeServer.calls[-1]["token"] == "tk"
+    (run,) = [p for p in tmp_path.iterdir() if p.is_dir()]
+    assert run.name.endswith("-tools") and json.loads((run / "run.json").read_text())["flow"] == "tools"
+
+
+def test_refuses_to_start_when_health_fails(fake, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(R, "RUNS_DIR", tmp_path)
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(json.dumps({k: v for k, v in case(id="t1").items() if k != "_file"}) + "\n")
+    FakeServer.healthy = False
+    assert R.main(["--base", fake, "--cases", str(cases), "--run-id", "h"]) == 2
+    assert "api/health failed" in capsys.readouterr().err and FakeServer.calls == []
+    assert R.main(["--base", "http://127.0.0.1:9", "--cases", str(cases), "--run-id", "h"]) == 2   # nothing listening
+
+
+def test_stops_when_token_still_gets_429(fake, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(R, "RUNS_DIR", tmp_path)
+    cases = tmp_path / "cases.jsonl"
+    rows = [{k: v for k, v in case(id=f"t{i}").items() if k != "_file"} for i in range(3)]
+    cases.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    FakeServer.fail_first_with_429 = True
+    assert R.main(["--base", fake, "--cases", str(cases), "--run-id", "x", "--token", "bad"]) == 2
+    assert "429 although a bench token was sent" in capsys.readouterr().err
+    assert len(FakeServer.calls) == 1 and C.read_jsonl(tmp_path / "x" / "results.jsonl") == []
