@@ -565,7 +565,8 @@ mode_deploy_staging() {
   say "packs: $PACKS_GCS; private titles: ${PRIVATE_TITLES_GCS:-(none)}; extra env: ${STAGING_ENV:-(none)}"
   say "env (complete, replaces the previous revision's): $names"
   out=$(mktemp)
-  trap 'rm -f "$out"' EXIT
+  # shellcheck disable=SC2064  # expand now: `out` is local, and the EXIT trap runs after this function returned
+  trap "rm -f '$out'" EXIT
   if gcloud run deploy "$SERVICE" --project "$PROJECT" --region "$REGION" --image "$image" \
       --no-traffic --tag "$TAG" --session-affinity \
       --min-instances "${MIN_INSTANCES:-1}" --max-instances "${MAX_INSTANCES:-2}" \
