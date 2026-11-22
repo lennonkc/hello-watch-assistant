@@ -15,6 +15,7 @@ import hmac
 import json
 import logging
 import math
+import os
 import re
 import time
 import uuid
@@ -61,7 +62,9 @@ session_service = InMemorySessionService()
 
 # ── catalog, media and gate ─────────────────────────────────────────
 
-# True while the request carries a valid access code (cookie `watch_access`): private preview titles exist for it.
+# True while the request carries a valid access code (cookie `watch_access`) or the bench token (header
+# `X-Watch-Bench-Token`, so the benchmark host can test a private preview title without knowing any access code):
+# private preview titles exist for it.
 UNLOCKED: contextvars.ContextVar[bool] = contextvars.ContextVar("watch_unlocked", default=False)
 PRIVATE_HEADERS = {"Cache-Control": "private, no-store"}
 
@@ -76,7 +79,8 @@ class AccessMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
-        token = UNLOCKED.set(STORE.unlocked(HTTPConnection(scope).cookies.get(config.ACCESS_COOKIE)))
+        conn = HTTPConnection(scope)
+        token = UNLOCKED.set(STORE.unlocked(conn.cookies.get(config.ACCESS_COOKIE)) or is_bench(conn))
         try:
             await self.app(scope, receive, send)
         finally:
@@ -96,7 +100,11 @@ def _title(title_id: str):
 @app.get("/healthz")
 @app.get("/api/health")                                # Cloud Run reserves /healthz on its front end
 def healthz():
-    return {"ok": True, "titles": sum(1 for t in STORE.titles.values() if not t.hidden)}
+    """Public films only: their count, and the pack each one serves (so a benchmark can grade against the same packs
+    and refuse to mix revisions); `revision` is Cloud Run's revision name."""
+    public = sorted((t for t in STORE.titles.values() if not t.hidden), key=lambda t: t.sha)
+    return {"ok": True, "titles": len(public), "revision": os.environ.get("K_REVISION"),
+            "packs": [{"sha": t.sha, "dist": t.dist, "version": t.pack["pack_meta"].get("pack_version")} for t in public]}
 
 
 @app.get("/api/titles")

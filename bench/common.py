@@ -7,6 +7,7 @@ relaxation the demo service runs with); time conditions are unchanged.
 """
 from __future__ import annotations
 
+import functools
 import json
 import math
 import os
@@ -19,15 +20,17 @@ REPO = HERE.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from ingest.textnorm import has_cjk, normalize  # noqa: E402
+from ingest.textnorm import LATIN_WORD, has_cjk, normalize  # noqa: E402
 
 CASES_DIR = HERE / "cases"
 RUNS_DIR = pathlib.Path(os.environ.get("BENCH_RUNS_DIR") or HERE / "runs")
 CATEGORIES = ("what_did_i_miss", "who_is_this", "what_is_that", "what_did_they_say", "explain_this_line", "free",
               "spoiler_probe", "injection", "followup")
 EXPECT = ("answer", "decline", "either")
-SETS = ("base", "new")
+SETS = ("base", "new", "generated")       # generated: bench/gen_cases.py, never mixed into a run with the others
 EPS = 1e-9
+# what the viewer receives with an answer (bench/judge.py `channels`); a marker may name the ones it applies to
+CHANNELS = ("answer", "evidence", "frame", "highlight", "tool_args", "tool_summary", "streamed", "history")
 # Strings a public-repo leak scanner flags; case text must never contain them (assembled here so that this file
 # itself does not trip the scanner).
 FORBIDDEN = tuple(s.replace("|", "") for s in ("ev|al/", "real|_titles", "gol|den/"))
@@ -102,6 +105,9 @@ def validate(c: dict) -> list[str]:
                     errs.append(f"{field}: bad regex {m['regex']!r}: {e}")
             elif not (isinstance(m, str) and m) and not (isinstance(m, dict) and m.get("term")):
                 errs.append(f"{field}: bad marker {m!r}")
+            if isinstance(m, dict) and m.get("channels") is not None and not (
+                    isinstance(m["channels"], list) and set(m["channels"]) <= set(CHANNELS)):
+                errs.append(f"{field}: channels must be a list of {', '.join(CHANNELS)}")
     if not (c.get("reference") or c.get("must_include_any") or c.get("notes") or c.get("category") == "spoiler_probe"
             or c.get("expect") == "decline"):
         errs.append("needs reference, must_include_any or grading notes")
@@ -117,14 +123,20 @@ _QUOTES = str.maketrans({"’": "'", "‘": "'", "ʼ": "'", "＇": "'", "“": '
 _COLLAPSE = re.compile(r"[-_\s]+")
 
 
+@functools.lru_cache(maxsize=4096)                # the same eligible text of a long film is folded for every marker
 def N(text: str, case_sensitive: bool = False) -> str:
     s = normalize((text or "").translate(_QUOTES), True)
     s = _COLLAPSE.sub(" ", s)
     return s if case_sensitive else s.lower()
 
 
+_WORD_CH = re.compile(f"[{LATIN_WORD}]")
+
+
 def _word(ch: str) -> bool:
-    return bool(ch) and ch.isalnum() and not has_cjk(ch)
+    """The pack's own boundary rule (`ingest.textnorm.LATIN_WORD`): only ASCII letters / digits / underscore and
+    Latin letters U+00C0–U+024F are word characters; CJK, other scripts, spaces and punctuation are boundaries."""
+    return bool(ch) and _WORD_CH.match(ch) is not None
 
 
 Span = tuple  # (folded text, start, end): where a term matched, for reports
@@ -132,9 +144,10 @@ Span = tuple  # (folded text, start, end): where a term matched, for reports
 
 def find_span(term: str, text: str, case_sensitive: bool = False, whole_word: bool = True,
               prefix: bool = False) -> Span | None:
-    """First match of `term` in `text` after folding both (None: no match). Latin terms match whole words; a CJK
-    character is never a word character, so a Latin term right next to Chinese text still matches. CJK terms match
-    as substrings."""
+    """First match of `term` in `text` after folding both (None: no match). Latin terms match whole words by the
+    pack's boundary rule: a CJK character or a letter of another script is never a word character, so a Latin term
+    right next to Chinese text still matches. CJK terms match as substrings. `_` is folded to a space first, so
+    "x_Bob" matches here although the service's own matcher does not (the bench is the stricter one there)."""
     t, x = N(term, case_sensitive), N(text, case_sensitive)
     if not t:
         return None
@@ -216,16 +229,27 @@ def packs_dir() -> pathlib.Path | None:
 _PACKS: dict = {}
 
 
+PACK_DISTS = ("master", "device-auto", "device")      # the first one present is used (private titles: device-auto)
+
+
+def pack_path(sha: str, root: pathlib.Path | None = None) -> pathlib.Path | None:
+    root = root or packs_dir()
+    if root is None:
+        return None
+    return next((p for d in PACK_DISTS if (p := pathlib.Path(root) / sha / d / "pack.db").exists()), None)
+
+
 def pack_for(sha: str, root: pathlib.Path | None = None) -> "PackView":
-    """Master pack `<root>/<sha>/master/pack.db` (root: `--packs`, else BENCH_PACKS_DIR / WATCH_PACKS_DIR)."""
+    """The pack `<root>/<sha>/<dist>/pack.db`, master first (root: `--packs`, else BENCH_PACKS_DIR / WATCH_PACKS_DIR).
+    Raises SystemExit when there is none."""
     root = root or packs_dir()
     if root is None:
         raise SystemExit("no packs: pass --packs DIR or set BENCH_PACKS_DIR (layout <asset_sha>/master/pack.db)")
     key = (str(root), sha)
     if key not in _PACKS:
-        db = pathlib.Path(root) / sha / "master" / "pack.db"
-        if not db.exists():
-            raise SystemExit(f"pack missing: {db}")
+        db = pack_path(sha, root)
+        if db is None:
+            raise SystemExit(f"pack missing: {pathlib.Path(root) / sha}/{{{','.join(PACK_DISTS)}}}/pack.db")
         from ingest import packdb
         _PACKS[key] = PackView(packdb.read_db(db))
     return _PACKS[key]
@@ -304,6 +328,11 @@ class PackView:
                 and k.get("kind") == "name" and k.get("match") != "regex"]
         return list(dict.fromkeys(t for t in out if t))
 
+    def public_names(self) -> list[str]:
+        """Names that are `name_public` (spec §6: on the title page / synopsis): allowed at any P."""
+        return list(dict.fromkeys(t for c in self.chars.values() if c.get("name_public")
+                                  for t in (c.get("canonical_name"), c.get("name_zh")) if t))
+
     def hidden_terms(self, P: float) -> list[tuple[str, bool, str, str]]:
         """[(term, case_sensitive, character_id, kind)]: names not yet visible at P and aliases not yet known."""
         out = []
@@ -334,6 +363,40 @@ class PackView:
     def gate(self, P: float):
         from ingest import retrieval
         return retrieval.Gate(self.data, P, allow_auto=True)
+
+    def seen_items(self, P: float) -> list[tuple[str, str]]:
+        """[(label, text)] of what the viewer could have seen or heard by P, one entry per item and language: items
+        eligible at P (cues only of English / Chinese tracks), character looks already shown, title info. Used to
+        tell "a canary word that also describes something already shown" (that item is named) from a leak."""
+        lang = {t["track"]: (t.get("lang") or "").lower() for t in self.data.get("subtitle_tracks", [])}
+        track = {c["cue_id"]: c["track"] for c in self.data.get("cues", [])}
+        out = []
+        for it in self.gate(P).eligible():
+            if it.item_type == "cue" and not lang.get(track.get(it.item_id), "").startswith(("en", "zh")):
+                continue
+            label = f"{it.item_type}@{mmss(it.start_s)}"
+            out += [(label, t) for t in (it.text, self.zh.get((it.item_type, it.item_id))) if t]
+        for lk in self.data.get("character_looks", []):
+            if self.reviewed_ok(lk.get("review_state")) and lk.get("reveal_at_s") is not None \
+                    and lk["reveal_at_s"] + self.m_rev <= P + EPS and lk.get("from_s", 0) <= P + EPS:
+                out += [(f"look@{mmss(lk['from_s'] or 0)}", lk[f]) for f in ("description_en", "description_zh")
+                        if lk.get(f)]
+        if self.asset.get("story_start_s") is None or self.asset["story_start_s"] <= P + EPS:
+            out += [("title_info", t[f]) for t in self.title_info for f in ("text_en", "text_zh") if t.get(f)]
+        return out
+
+    def eligible_text(self, P: float) -> str:
+        """Every text eligible at P (allow_auto), English and Chinese, + character looks already shown + visible names
+        of characters already on screen + title info."""
+        items = self.gate(P).eligible()
+        texts = [it.text for it in items if it.text] + [self.zh[k] for it in items
+                                                        if (k := (it.item_type, it.item_id)) in self.zh]
+        looks = [lk.get(f) or "" for lk in self.data.get("character_looks", [])
+                 if self.reviewed_ok(lk.get("review_state")) and lk.get("reveal_at_s") is not None
+                 and lk["reveal_at_s"] + self.m_rev <= P + EPS for f in ("description_en", "description_zh")]
+        names = [self.visible_name(cid, P, lang) for cid in self.chars if self.appeared(cid, P) for lang in ("en", "zh")]
+        titles = [t.get(f) or "" for t in self.title_info for f in ("text_en", "text_zh")]
+        return "\n".join(texts + looks + names + titles)
 
 
 def mmss(t: float) -> str:

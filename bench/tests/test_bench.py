@@ -47,6 +47,10 @@ def test_marker_matching_folds_text_and_respects_word_boundaries():
     assert C.marker_hits({"regex": r"^\s*yes\b", "ignore_case": True}, "Yes, it is.")
     assert C.canary_hits({"term": "mark*", "match": "word"}, "she was marked")
     assert not C.canary_hits({"term": "mark*", "match": "word"}, "Denmark")
+    # the pack's boundary rule (ingest.textnorm.LATIN_WORD): CJK and other scripts are boundaries, Latin letters not
+    assert C.marker_hits("Scales", "史科尔斯Scales的")
+    assert C.marker_hits("Bob", "Bobа")                                            # Cyrillic а after it
+    assert not C.marker_hits("Bob", "Bobø") and not C.marker_hits("Bob", "Bob2")
 
 
 # ── rule gate ────────────────────────────────────────────────────────
@@ -73,9 +77,18 @@ def test_canaries_real_names_and_case_terms(packs):
 
 
 def test_canary_that_also_describes_eligible_text_is_only_a_suspect(packs, monkeypatch):
-    monkeypatch.setattr(J, "eligible_text", lambda c: "Alice turns out the lights.")
+    monkeypatch.setattr(J, "seen_items", lambda c, P: [("event@00:10", "Alice turns out the lights.")])
     r = J.rule_check(case(P=20.0), "It turns out fine.")
-    assert "canary:turns out (already eligible)" in r["suspects"] and r["rule_leaks"] == []
+    assert "canary:turns out (already eligible: event@00:10)" in r["suspects"] and r["rule_leaks"] == []
+
+
+def test_already_eligible_means_one_item_the_viewer_saw(packs):
+    """Not bare presence in a joined text: a phrase canary split over two items, or a word that only occurs in the
+    list of names, does not make it "already eligible"."""
+    pv = C.pack_for(SHA, packs)
+    items = pv.seen_items(70.0)
+    assert ("event@00:10", "Alice greets Bob.") in items and all("\n" not in t for _l, t in items)
+    assert not any(C.canary_hits({"term": "turns out", "match": "phrase"}, t) for _l, t in pv.seen_items(20.0))
 
 
 @pytest.fixture
@@ -97,8 +110,8 @@ def test_zh_canary_in_eligible_chinese_text_is_not_a_leak(zh_packs):
     c = case(P=20.0, lang="zh", question="这是谁?")
     evidence = ["爱丽丝向鲍勃打招呼,原来他们早就认识。"]
     r = J.rule_check(c, "这是爱丽丝（Alice）。", evidence)
-    assert r["rule_leaks"] == [] and r["suspects"] == ["canary:原来 (already eligible) @evidence"]
-    assert r["rule_hits"] == [{"rule": "canary:原来 (already eligible) @evidence", "where": "evidence",
+    assert r["rule_leaks"] == [] and r["suspects"] == ["canary:原来 (already eligible: event@00:10) @evidence"]
+    assert r["rule_hits"] == [{"rule": "canary:原来 (already eligible: event@00:10) @evidence", "where": "evidence",
                                "match": "爱丽丝向鲍勃打招呼,[原来]他们早就认识。"}]
 
 
@@ -146,15 +159,18 @@ def test_summarize_accuracy_leaks_and_latency():
     assert s["accuracy_pct"] == round(100 * (1 + 0.5 + 0 + 1) / 4, 1)            # probe excluded; partial = 0.5
     assert s["correct_pct"] == 50.0
     assert s["leak_pct"] == 40.0 and s["rule_leak_pct"] == 20.0 and s["llm_leak_pct"] == 20.0
-    assert s["latency_total_ms"]["p50"] == 300 and s["latency_total_ms"]["p95"] == 500
+    assert s["latency_total_ms"]["p50"] == 300 and s["latency_total_ms"]["p95"] is None     # n < 20: not shown
+    assert s["latency_total_ms"]["p90"] == 460 and s["latency_total_ms"]["n"] == 5
     assert s["tools_per_answer"] == 0.4 and s["server_tools_per_answer"] == 0.2 and s["model_tools_per_answer"] == 0.2
     assert s["tool_usage"] == {"a": 1, "b": 1}
 
 
-def test_quantile_nearest_rank():
+def test_quantile_interpolates():
     xs = list(range(1, 101))
-    assert (J.quantile(xs, 0.5), J.quantile(xs, 0.9), J.quantile(xs, 0.95)) == (50, 90, 95)
+    assert (J.quantile(xs, 0.5), J.quantile(xs, 0.9), J.quantile(xs, 0.95)) == (50.5, 90.1, 95.0)
+    assert J.quantile([1, 2, 3, 4], 0.5) == 2.5                                  # not the lower middle
     assert J.quantile([7], 0.95) == 7 and J.quantile([], 0.5) is None
+    assert J._lat(range(19))["p95"] is None and J._lat(range(20))["p95"] is not None
 
 
 def test_usage_summary_contract_and_cost():
@@ -174,7 +190,7 @@ def test_summarize_tokens_flow_and_server_first_text():
                                                           "thought_tokens": 0, "model_calls": 1 + i % 2}),
                 server_first_text_ms=100 * i, flow="context" if i < 4 else "tools") for i in range(1, 6)]
     s = J.summarize(rows)
-    assert (s["tokens_in_p50"], s["tokens_in_p90"], s["tokens_out_p50"]) == (3000, 5000, 30)
+    assert (s["tokens_in_p50"], s["tokens_in_p90"], s["tokens_out_p50"]) == (3000, 4600, 30)
     assert s["model_calls_per_answer"] == 1.6 and s["flow_mix"] == "context 3, tools 2"
     assert s["latency_server_first_text_ms"]["p50"] == 300
 
@@ -257,12 +273,13 @@ class FakeServer(http.server.BaseHTTPRequestHandler):
     fail_first_with_429 = False
 
     healthy = True
+    revision = "rev-1"
 
     def log_message(self, *a):
         pass
 
     def do_GET(self):
-        data = json.dumps({"ok": FakeServer.healthy, "titles": 3}).encode()
+        data = json.dumps({"ok": FakeServer.healthy, "titles": 3, "revision": FakeServer.revision}).encode()
         self.send_response(200 if FakeServer.healthy else 503)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
@@ -308,7 +325,9 @@ class FakeServer(http.server.BaseHTTPRequestHandler):
         ev("answer", {"text": "Hello there.", "evidence": [{"text": "cue 1"}],
                       "guard": {"checked": True, "rewritten": False, "dropped": 0}, "latency_ms": 42,
                       "usage": {"input_tokens": 100, "output_tokens": 10, "thought_tokens": 4, "model_calls": 1},
-                      "timing": {"first_text_ms": 30, "total_ms": 40}, "flow": "context"})
+                      "timing": {"first_text_ms": 30, "total_ms": 40},
+                      "flow": (self.headers.get("X-Watch-Flow") if self.headers.get("X-Watch-Bench-Token") else None)
+                      or "context"})
         ev("done", {})
 
 
@@ -398,6 +417,29 @@ def test_flow_header_run_id_and_meta(fake, tmp_path, monkeypatch):
     assert run.name.endswith("-tools") and json.loads((run / "run.json").read_text())["flow"] == "tools"
 
 
+def test_a_run_fails_when_the_server_ignores_the_requested_flow(fake, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(R, "RUNS_DIR", tmp_path)
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(json.dumps({k: v for k, v in case(id="t1").items() if k != "_file"}) + "\n")
+    assert R.main(["--base", fake, "--cases", str(cases), "--flow", "tools", "--run-id", "f"]) == 2   # no token
+    assert "answered by flow 'context'" in capsys.readouterr().err
+    assert C.read_jsonl(tmp_path / "f" / "results.jsonl") == []
+
+
+def test_resume_refuses_another_revision_or_flow(fake, tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(R, "RUNS_DIR", tmp_path)
+    cases = tmp_path / "cases.jsonl"
+    rows = [{k: v for k, v in case(id=f"t{i}").items() if k != "_file"} for i in range(2)]
+    cases.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert R.main(["--base", fake, "--cases", str(cases), "--run-id", "x", "--limit", "1"]) == 0
+    monkeypatch.setattr(FakeServer, "revision", "rev-2")
+    assert R.main(["--base", fake, "--cases", str(cases), "--run-id", "x"]) == 2
+    assert "revision ('rev-1' → 'rev-2')" in capsys.readouterr().err
+    monkeypatch.setattr(FakeServer, "revision", "rev-1")
+    assert R.main(["--base", fake, "--cases", str(cases), "--run-id", "x", "--flow", "tools", "--token", "t"]) == 2
+    assert json.loads((tmp_path / "x" / "run.json").read_text())["revision"] == "rev-1"
+
+
 def test_refuses_to_start_when_health_fails(fake, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(R, "RUNS_DIR", tmp_path)
     cases = tmp_path / "cases.jsonl"
@@ -417,3 +459,107 @@ def test_stops_when_token_still_gets_429(fake, tmp_path, monkeypatch, capsys):
     assert R.main(["--base", fake, "--cases", str(cases), "--run-id", "x", "--token", "bad"]) == 2
     assert "429 although a bench token was sent" in capsys.readouterr().err
     assert len(FakeServer.calls) == 1 and C.read_jsonl(tmp_path / "x" / "results.jsonl") == []
+
+
+# ── honesty pins: what is graded, what is only leak-checked ─────────
+
+def test_accuracy_denominator_and_scores_are_pinned():
+    # a service error is graded as a non-answer and stays in every denominator
+    s = J.summarize([row(1, "correct"), row(2, "nonanswer", status="error",
+                                            llm={"verdict": "nonanswer", "appropriate": False, "leak": False})])
+    assert s["accuracy_pct"] == 50.0 and s["accuracy_n"] == 2 and s["appropriate_pct"] == 50.0 and s["errors"] == 1
+    assert J.summarize([row(1, "declined")])["accuracy_pct"] == 0.0                 # declining is not a correct answer
+    assert J.VERDICT_SCORE == {"correct": 1.0, "partial": 0.5, "incorrect": 0.0, "declined": 0.0, "nonanswer": 0.0}
+    # a judge failure is not dropped silently: it is counted on its own line
+    s = J.summarize([row(1, "correct"), row(2, llm={"judge_error": "empty", "verdict": None})])
+    assert s["accuracy_n"] == 1 and s["ungraded"] == 1 and s["judge_errors"] == 1
+
+
+def _result(answer, **kw):
+    r = {"id": "t1", "status": "ok", "answer": answer, "evidence_text": [], "t_total_ms": 900, "tools": [],
+         "server_tools": [], "model_tools": []}
+    r.update(kw)
+    return r
+
+
+def test_judge_run_grades_the_answer_alone_and_checks_every_channel(packs, tmp_path, monkeypatch):
+    run = tmp_path / "run1"
+    run.mkdir()
+    seen = {}
+    monkeypatch.setattr(J, "llm_judge", lambda c, text, history=None, shown="": seen.update(text=text, shown=shown)
+                        or {"verdict": "declined", "appropriate": True, "leak": False, "prompt_sha": J.PROMPT_SHA,
+                            "judge_model": "m"})
+    monkeypatch.setattr(J, "judge_model", lambda: "m")
+    raw = {"answer": {"evidence": [{"text": "Alice greets Bob.", "start_s": 10.0, "end_s": 30.0}],
+                      "frames": [{"t": 25, "caption": "Earlier: 00:25, it will howl"}],
+                      "highlight": {"label": "the wolf", "frame_t": 21}},
+           "events": [{"event": "tool", "data": {"id": "fc-1", "name": "search", "args": {"q": "Bob the wolf"}}},
+                      {"event": "tool_result", "data": {"id": "fc-1", "summary": "it turns out fine"}}]}
+    C.write_jsonl(run / "results.jsonl", [_result("I can't tell who that is yet.", evidence_text=["Alice greets Bob."],
+                                                   streamed_text="Bob…", raw=raw,
+                                                   history=[{"answer": "That is Bob.", "P": 5.0}])])
+    c = case(id="t1", P=20.0, must_include_any=["Alice"], history=[{"question": "Who?", "P": 5.0}])
+    (j,) = J.judge_run(run, {"t1": c}, use_llm=True, use_rules=True, workers=1)
+    assert seen["text"] == "I can't tell who that is yet." and j["include_hits"] == []     # evidence is not the answer
+    assert "[evidence] Alice greets Bob." in seen["shown"] and "[history1, earlier turn at P = 5.0]" in seen["shown"]
+    assert {"canary:howl @frame", "canary:turns out @tool_summary", "hidden_name:Bob @history1",
+            "time:evidence end_s 00:30 > P", "time:frame 00:25 > P", "time:highlight 00:21 > P"} <= set(j["rule_leaks"])
+    assert j["channels"] == ["evidence", "frame", "highlight", "history1", "streamed", "tool_args", "tool_summary"]
+
+
+def test_evidence_and_streamed_text_reach_the_rule_gate(packs, tmp_path):
+    run = tmp_path / "run2"
+    run.mkdir()
+    C.write_jsonl(run / "results.jsonl", [_result("A boy.", evidence_text=["it will howl"], streamed_text="turns out")])
+    (j,) = J.judge_run(run, {"t1": case(id="t1", P=20.0)}, use_llm=False, use_rules=True, workers=1)
+    assert j["rule_leaks"] == ["canary:howl @evidence", "canary:turns out @streamed"]
+
+
+def test_echoed_canary_is_a_suspect_not_dropped_and_public_names_are_allowed(packs):
+    r = J.rule_check(case(P=20.0, question="Does it howl?"), "Yes, it will howl.")
+    assert r["rule_leaks"] == [] and r["suspects"] == ["canary:howl (echo)"]
+    r = J.rule_check(case(P=20.0, flag_if_any=["Alice", "meadow"]), "Alice in the meadow.")
+    assert r["suspects"] == ["flag:meadow"]                                          # Alice is name_public
+    assert any("public names" in f and "Alice" in f for f in J.future_facts(case(P=20.0)))
+
+
+def test_marker_channels_limit_where_a_term_counts(packs):
+    m = {"term": "wolf", "channels": ["answer"]}
+    assert J.rule_check(case(P=20.0, must_not_include=[m]), "A boy.", ["a wolf"])["rule_leaks"] == []
+    assert J.rule_check(case(P=20.0, must_not_include=[m]), "A wolf.")["rule_leaks"] == ["must_not_include:wolf"]
+    assert any("channels" in e for e in C.validate(case(must_not_include=[{"term": "x", "channels": ["nope"]}])))
+
+
+def test_future_facts_carry_every_later_recap_and_canary(packs, monkeypatch):
+    fut = J.future_facts(case(P=5.0), limit=1)
+    assert any("turns out" in f and "howl" in f for f in fut if f.startswith("[words that point"))
+
+
+def test_grade_cache_key_has_case_pack_and_judge_model(packs, tmp_path, monkeypatch):
+    run = tmp_path / "run3"
+    run.mkdir()
+    C.write_jsonl(run / "results.jsonl", [_result("A boy.")])
+    calls = []
+    monkeypatch.setattr(J, "llm_judge", lambda c, *a, **k: calls.append(c["reference"]) or
+                        {"verdict": "correct", "appropriate": True, "leak": False, "prompt_sha": J.PROMPT_SHA,
+                         "judge_model": J.judge_model()})
+    monkeypatch.setattr(J, "judge_model", lambda: "m1")
+    J.judge_run(run, {"t1": case(id="t1")}, True, True, 1)
+    J.judge_run(run, {"t1": case(id="t1")}, True, True, 1)
+    assert len(calls) == 1                                                           # cached
+    J.judge_run(run, {"t1": case(id="t1", reference="Bob.")}, True, True, 1)         # case content changed
+    monkeypatch.setattr(J, "judge_model", lambda: "m2")
+    J.judge_run(run, {"t1": case(id="t1", reference="Bob.")}, True, True, 1)         # judge model changed
+    assert len(calls) == 3
+    j = C.read_jsonl(run / "judged.jsonl")[0]
+    assert j["cache"]["pack"].startswith(SHA[:12] + ":")
+
+
+def test_fallbacks_are_their_own_line_and_listed(tmp_path):
+    assert J.fallback_kind({"status": "ok", "answer": next(iter(J.fallback_texts()))}) in ("spoiler", "timeout")
+    assert J.fallback_kind({"status": "ok", "answer": "x", "guard_fallback": "timeout"}) == "timeout"
+    rows = [row(1, fallback="spoiler", guard_rewritten=True), row(2), row(3, guard_rewritten=True)]
+    assert J.summarize(rows)["fallback_pct"] == 33.3
+    J.report({"A": rows}, tmp_path)
+    summary = (tmp_path / "summary.md").read_text()
+    assert "`r1` (fallback: spoiler), `r3`" in summary and "fallback answers %" in summary and "(n 3)" in summary

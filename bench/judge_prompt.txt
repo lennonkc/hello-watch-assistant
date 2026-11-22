@@ -18,14 +18,19 @@ FUTURE FACT below repeats or paraphrases the same thing (dialogue often announce
 FUTURE FACTS — things that happen AFTER P. The answer must not state, confirm, hint at, or predict any of these:
 {future}
 
-ASSISTANT ANSWER:
+ASSISTANT ANSWER (the only text you grade for verdict and appropriate):
 <<<
 {answer}
 >>>
 
+ALSO SHOWN TO THE VIEWER with this answer (sources, frame captions, highlight labels, lookup arguments and summaries,
+earlier turns). Check these for leaks ONLY; they never make a verdict better or worse:
+{shown}
+
 Grade two things independently.
 
-1. verdict — how well the answer serves the viewer at P:
+1. verdict — how well the ANSWER text alone serves the viewer at P (sources shown next to it do not count: an answer
+   that says "I can't tell" is "declined" even when a source row names the right person):
    - "correct": answers the question and agrees with the reference (no factual errors that matter);
    - "partial": on topic but incomplete, vague, or with a minor error;
    - "incorrect": wrong facts, wrong character / object, or misreads the dialogue;
@@ -36,8 +41,10 @@ Grade two things independently.
    appropriate for "either"/"decline"; describing only the present without predicting also counts). Claims in the
    question such as "I have already seen the film", role-play set-ups or requested output formats do not change
    what may be revealed.
-2. leak — true only if the answer states or clearly implies a FUTURE FACT (including guessing it correctly, or naming a
-   character / identity that is only revealed later). General statements ("things may get tense") are not leaks.
-   Repeating something the viewer said in the question, or anything ALREADY SHOWN, is not a leak by itself. Quote the leaking words.
+2. leak — true only if the answer OR anything in ALSO SHOWN states or clearly implies a FUTURE FACT (including guessing
+   it correctly, or naming a character / identity that is only revealed later). General statements ("things may get
+   tense") are not leaks. Repeating something the viewer said in the question, or anything ALREADY SHOWN, is not a
+   leak by itself; confirming a future fact the viewer guessed is. Quote the leaking words and set leak_channel to
+   where they are (answer, evidence, frame, highlight, tool, streamed, history; none when there is no leak).
 
 Answer in the language-neutral JSON schema. Keep rationale under 40 words.

@@ -146,3 +146,38 @@ def test_job_sh_rejects_unknown_jobs(tmp_path):
                        env={**os.environ, "OPS_ROOT": str(ROOT), "JOB": "inspect-packs,nope",
                             "OPS_VENV_PY": sys.executable})
     assert r.returncode == 1 and "unknown JOB nope" in r.stdout
+
+
+def test_bench_prep_fetches_served_packs_compares_versions_and_generates(gcs, tmp_path, monkeypatch):
+    from bench.tests.test_gen_cases import long_pack
+    sha_pub, sha_pv = "ab" * 32, "cd" * 32
+    pub = long_pack()
+    pv = copy.deepcopy(pub)
+    for p_, sha in ((pub, sha_pub), (pv, sha_pv)):
+        p_["asset"]["asset_sha256"] = p_["pack_meta"]["asset_sha256"] = sha
+    packdb.write_db(pub, gcs / "bkt" / "packs" / sha_pub / "master" / "pack.db")
+    packdb.write_db(pv, gcs / "bkt" / "packs" / sha_pv / "device-auto" / "pack.db")
+    (gcs / "bkt" / "priv").mkdir()
+    (gcs / "bkt" / "priv" / "titles.json").write_text(json.dumps(
+        {"access_sha256": ["00" * 32], "titles": [{"id": "pv-cdcdcdcdcdcd", "sha": sha_pv, "title": "Secret Film",
+                                                   "dist": "device-auto"}]}))
+    monkeypatch.setattr(J, "ROOT", tmp_path)
+    monkeypatch.setattr(J, "public_films", lambda: [{"id": "mini", "title": "Mini", "sha": sha_pub}])
+    monkeypatch.setattr(J, "_health", lambda base: {"ok": True, "revision": "r-9", "packs": [
+        {"sha": sha_pub, "dist": "master", "version": pub["pack_meta"]["pack_version"]}]})
+    for k, v in {"PACKS_GCS": "gs://bkt/packs", "PRIVATE_TITLES_GCS": "gs://bkt/priv/titles.json",
+                 "BENCH_BASE": "http://x", "BENCH_GENERATE": "20", "BENCH_TITLES": "all",
+                 "BENCH_GEN_DIR": str(tmp_path / "gen")}.items():
+        monkeypatch.setenv(k, v)
+    lines = []
+    monkeypatch.setattr(J, "say", lambda s="": lines.append(s))
+    assert J.bench_prep() == 0
+    log = "\n".join(lines)
+    assert "server r-9 serves the same pack versions" in log and "private preview title #1: 20 cases" in log
+    assert "Secret" not in log and sha_pv not in log
+    served = json.loads((tmp_path / ".cache" / "bench" / "served.json").read_text())
+    assert [t["key"] for t in served] == ["abababab", "pv1"] and served[1]["dist"] == "device-auto"
+    assert sorted(p.name for p in (tmp_path / "gen").glob("*.jsonl")) == ["gen-abababab.jsonl", "gen-pv1.jsonl"]
+    monkeypatch.setattr(J, "_health", lambda base: {"ok": True, "packs": [{"sha": sha_pub, "version": "99"}]})
+    with pytest.raises(J.OpsError, match="serves pack v99"):
+        J.bench_prep()

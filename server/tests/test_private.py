@@ -197,7 +197,9 @@ COOKIE = {"Cookie": f"watch_access={CODE}"}
 def test_hidden_everywhere_without_the_cookie(client):
     assert [t["id"] for t in client.get("/api/titles").json()] == ["mini"]
     assert client.get("/api/titles").json()[0]["playback"] == "standard"
-    assert client.get("/api/health").json() == {"ok": True, "titles": 1}
+    h = client.get("/api/health").json()
+    assert h["ok"] is True and h["titles"] == 1 and [x["sha"] for x in h["packs"]] == [SHA]
+    assert PSHA not in str(h) and "pv1" not in str(h)                     # nothing about private preview titles
     for url in ("/api/titles/pv1/frames/3.jpg", "/api/titles/pv1/video", "/api/titles/pv1/gate?p=10"):
         r = client.get(url, follow_redirects=False)
         assert r.status_code == 404 and r.json() == {"detail": "unknown title"}, url
@@ -224,6 +226,19 @@ def test_unlocked_titles_frames_and_video(client, world):
     assert client.get("/api/titles/mini/frames/3.jpg").headers["cache-control"] == "public, max-age=86400"
     g = client.get("/api/titles/pv1/gate?p=53", headers=COOKIE).json()
     assert g["eligible"]["scene"] == 1                               # the device-auto pack gates like master
+
+
+def test_the_bench_token_unlocks_without_an_access_code(client, monkeypatch):
+    """The benchmark host tests a private preview title with its bench token only; a wrong or unset token does not."""
+    from server import main
+    monkeypatch.setattr(config, "BENCH_TOKEN", "t0ken")
+    ok = {main.BENCH_HEADER: "t0ken"}
+    assert client.get("/api/titles/pv1/gate?p=53", headers=ok).status_code == 200
+    assert "pv1" in [t["id"] for t in client.get("/api/titles", headers=ok).json()]
+    assert client.get("/api/titles/pv1/gate?p=53", headers={main.BENCH_HEADER: "wrong"}).status_code == 404
+    monkeypatch.setattr(config, "BENCH_TOKEN", "")
+    assert client.get("/api/titles/pv1/gate?p=53", headers={main.BENCH_HEADER: ""}).status_code == 404
+    assert client.get("/api/health", headers=ok).json()["titles"] == 1          # still only public films counted
 
 
 def test_unlock_sets_the_cookie_and_limits_attempts(client):
