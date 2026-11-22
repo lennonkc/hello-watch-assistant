@@ -238,29 +238,41 @@ def test_tools_flow_guard_retry(wired, monkeypatch):
 # ── the sweep: nothing ineligible anywhere, at any P ─────────────────
 
 LEAKY = ("That is Bob. Bobby waves. It will howl. The wolf turns out to be Bob. Jane Realperson voices her. "
-         "原来狼就是鲍勃。那是Bob。它会howl的。由Jane Realperson配音。The wolf, and Bob.")
+         "原来狼就是鲍勃。那是Bob。它会howl的。由Jane Realperson配音。The wolf, and Bob. That wolf is Bob. "
+         "The grey wolf is the boy. A grey wolf has appeared. It is Bob. 狼就是男孩。")
+LEAKY_ARGS = {"query": "the wolf is Bob, Bobby, the boy"}
 
 
 @pytest.mark.parametrize("lang", ["en", "zh"])
 def test_sweep_context_evidence_and_deltas(wired, lang):
     title_pack = Moment(main.STORE.get("mini"), 0).pack
+    seen = {"frames": 0, "labels": 0, "args": 0, "evidence": 0}
     for i in range(0, 34):
         P = i * 3.0
-        wired.ctx.script = [{"text": LEAKY}, {"text": LEAKY}]
+        tap = TAP_WOLF if i % 2 else {"x": 0.75, "y": 0.5}
+        wired.ctx.script = [{"call": ("search_moments", LEAKY_ARGS)}, {"text": LEAKY}, {"text": LEAKY}]
         n = len(wired.ctx.requests)
-        ev = wired.ask(P, "What is going on?", tap=TAP_WOLF, lang=lang)
+        ev = wired.ask(P, "What is going on?", tap=tap, lang=lang)
         ctx_text = request_text(wired.ctx.requests[n]) if len(wired.ctx.requests) > n else ""
         a = answer(ev)
+        labels = [h["label"] for h in data(ev, "highlight") + ([a["highlight"]] if a["highlight"] else [])]
         shown = [sent_text(ev), a["text"], json.dumps(a["evidence"], ensure_ascii=False),
-                 json.dumps(data(ev, "tool_result"), ensure_ascii=False), ctx_text]
+                 json.dumps(data(ev, "tool_result"), ensure_ascii=False), ctx_text,
+                 " ".join(json.dumps(d["args"], ensure_ascii=False) for d in data(ev, "tool")),
+                 " | ".join(f["caption"] for f in a["frames"]), " | ".join(labels)]
         for text in shown:
             assert oracle_leaks(title_pack, text, P) == [], (P, text[:300])
+        seen["frames"] += bool(a["frames"])
+        seen["labels"] += bool(labels)
+        seen["args"] += any(d["args"] for d in data(ev, "tool"))
+        seen["evidence"] += bool(a["evidence"])
         # no text of an ineligible row reaches the model
         g = Gate(title_pack, P, allow_auto=True)
         ok = {it.text for it in g.eligible() if it.text}
         for it in g.candidates():
             if it.text and it.text not in ok and len(it.text) > 12:
                 assert it.text not in ctx_text, (P, it.item_type, it.item_id)
+    assert all(seen.values()), seen                     # the sweep did look at frames, labels, arguments, sources
 
 
 # ── bounded query embedding ──────────────────────────────────────────

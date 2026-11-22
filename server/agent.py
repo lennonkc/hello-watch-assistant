@@ -49,11 +49,9 @@ ANSWER_NOW = ("Answer now, in the viewer's language, from the context and the to
 
 @dataclasses.dataclass
 class Turn:
-    """Per-question side channel: UI extras (evidence, frames, highlight; never shown to the model), the context and
-    history `inject_context` sends, and the budget / usage counters."""
+    """Per-question side channel: UI extras (source candidates, reference stills, highlight; never shown to the model),
+    the context and history `inject_context` sends, and the budget / usage counters."""
     summaries: dict = dataclasses.field(default_factory=dict)
-    evidence: list = dataclasses.field(default_factory=list)
-    frames: list = dataclasses.field(default_factory=list)
     highlight: dict | None = None
     search_mode: str | None = None              # "vector" / "fts" for the last search_moments call
     context: object | None = None               # server.context.Context (context flow)
@@ -71,18 +69,6 @@ class Turn:
     args_filter: object | None = None           # model-written tool arguments → what the step trace may show
     support: list = dataclasses.field(default_factory=list)    # evidence.Candidate: sources the answer may rest on
     ref_frames: list = dataclasses.field(default_factory=list) # (t, caption): the tapped entity's reference stills
-
-    def add_frame(self, t: int | None, caption: str) -> None:
-        if t is not None and all(f["t"] != t for f in self.frames) and len(self.frames) < 6:
-            self.frames.append({"t": t, "caption": caption})
-
-    def add_evidence(self, typ: str, start_s: float, end_s: float, text: str | None) -> None:
-        """One row per (type, time, text): the same line found twice is shown once, two different facts stamped at
-        the same P are both kept."""
-        row = {"type": TYPE_LABEL.get(typ, typ), "start_s": round(start_s, 2), "end_s": round(end_s, 2), "text": text}
-        key = (row["type"], row["start_s"], text)
-        if len(self.evidence) < 8 and all((e["type"], e["start_s"], e["text"]) != key for e in self.evidence):
-            self.evidence.append(row)
 
     def add_usage(self, usage) -> None:
         if usage is None:
@@ -120,48 +106,42 @@ def _summarise(tool_context: ToolContext, text: str) -> None:
 
 
 # ── bookkeeping shared by the tools and the server-built context ─────
+# Lookups and tools only offer source candidates (`Turn.support`); which ones are shown, with which frames, is decided
+# after the answer (`server.evidence`).
 
-def note_story(turn: Turn, m: Moment, out: dict, frames: bool = True) -> str:
-    """`frames=False` (context flow): sources and their frames are chosen after the answer (`server.evidence`)."""
+def note_story(turn: Turn, m: Moment, out: dict) -> str:
     items = out.get("since_recap") or out.get("so_far") or []
     if "recap" in out:
         upto = secs(out["recap"]["up_to"])
-        turn.add_evidence("recap", upto, upto, out["recap"]["text"])
         turn.support += [Candidate("recap", "recap", upto, upto, s.strip()) for s in split_sentences(out["recap"]["text"])]
     for it in items:
         at = secs(it["at"])
-        turn.support.append(Candidate("story", TYPE_LABEL.get(it["type"], it["type"]), at, at, it["text"], frame_at=at))
-    if frames:
-        for it in items[-3:]:
-            turn.add_frame(m.evidence_frame(secs(it["at"]), secs(it["at"])), f"Earlier: {it['at']}")
+        turn.support.append(Candidate("story", TYPE_LABEL.get(it["type"], it["type"]), at, at, it["text"], frame_at=at,
+                                      text_zh=m.text_zh(it.get("ref"))))
     return (f"Recap up to {out['recap']['up_to']} + " if "recap" in out else "") + f"{len(items)} later moments"
 
 
 def note_dialogue(turn: Turn, lines: list[dict]) -> str:
-    for ln in lines[-3:]:
-        turn.add_evidence("cue", ln["t"], ln["t"], f"{ln['speaker']}: {ln['text']}")
     turn.support += [Candidate("line", "line", ln["t"], ln["t"], f"{ln['speaker']}: {ln['text']}") for ln in lines]
     return f"{len(lines)} lines" + (f" since {lines[0]['at']}" if lines else "")
 
 
 def note_on_screen(turn: Turn, m: Moment, out: dict) -> str:
+    """No highlight from a shot before a cut: its boxes show something else."""
     ents = out.get("entities", [])
     focus = [ents[out["tapped"]]] if "tapped" in out else ents
-    if "tapped" in out:
+    if "tapped" in out and not out.get("previous_shot"):
         e = ents[out["tapped"]]
         turn.highlight = {"bbox": e["bbox"], "label": e["label"], "frame_t": e["frame_t"]}
     for e in focus:
-        for fact in e.get("facts", [])[-2:]:
-            turn.add_evidence("character_fact", m.P, m.P, f"{e['label']}: {fact}")
-        turn.support += [Candidate("fact", "character", m.P, m.P, f"{e['label']}: {fact}") for fact in e.get("facts", [])]
-    for e in focus:
-        for t in e.get("reference_frames", []):
-            turn.add_frame(t, f"{e['label']} at {ts(t)}")
+        zh = e.get("facts_zh") or [None] * len(e.get("facts", []))
+        turn.support += [Candidate("fact", "character", m.P, m.P, f"{e['label']}: {fact}",
+                                   text_zh=f"{e['label']}：{z}" if z else None)
+                         for fact, z in zip(e.get("facts", []), zh)]
     if "tapped" in out:
         e = ents[out["tapped"]]
         turn.ref_frames = [(t, f"{e['label']} at {ts(t)}") for t in e.get("reference_frames", [])]
-    if "tapped" in out:
-        return f"Tapped: {ents[out['tapped']]['label']}"
+        return f"Tapped: {e['label']}"
     return f"{len(ents)} on screen" if ents else "Nothing identified on screen"
 
 
@@ -176,10 +156,13 @@ async def story_so_far(tool_context: ToolContext) -> dict:
     m, turn = moment_of(tool_context.state), _turn()
 
     def run():
-        out = m.story_so_far()
+        out = m.story_so_far(refs=True)
         return out, note_story(turn, m, out)
     out, summary = await asyncio.to_thread(run)
     _summarise(tool_context, summary)
+    for k in ("since_recap", "so_far"):
+        if k in out:
+            out[k] = [{f: v for f, v in it.items() if f != "ref"} for it in out[k]]
     return out
 
 
@@ -194,14 +177,9 @@ async def search_moments(query: str, tool_context: ToolContext) -> dict:
     results = []
     for h in hits:
         results.append({"at": ts(h.start_s), "type": TYPE_LABEL.get(h.item_type, h.item_type), "text": h.text})
-        if h.item_type != "cue":
-            turn.add_evidence(h.item_type, h.start_s, h.end_s, h.text)
         turn.support.append(Candidate("search", TYPE_LABEL.get(h.item_type, h.item_type), h.start_s, h.end_s, h.text,
-                                      frame_at=h.start_s if h.item_type in ("scene", "event", "shot_caption") else None))
-    picks = [h for h in hits if h.item_type in ("scene", "event", "shot_caption")][:2]
-    frames = await asyncio.to_thread(lambda: [m.evidence_frame(h.start_s, h.end_s) for h in picks])
-    for h, f in zip(picks, frames):
-        turn.add_frame(f, f"Earlier: {ts(h.start_s)}")
+                                      frame_at=h.start_s if h.item_type in ("scene", "event", "shot_caption") else None,
+                                      text_zh=m.text_zh((h.item_type, h.item_id))))
     _summarise(tool_context, f"{len(results)} matches, all before {ts(m.P)}")
     return {"query": query, "results": results}
 
@@ -269,7 +247,6 @@ async def look_closer(question: str, tool_context: ToolContext) -> dict:
         _summarise(tool_context, "Could not look closer in time")
         return {"observation": "", "note": f"looking closer failed ({type(e).__name__}); answer from what you have"}
     turn.add_usage(r.usage_metadata)
-    turn.add_frame(m.fp if frame is not None else None, f"Paused frame {ts(m.P)}")
     _summarise(tool_context, f"Looked at the {span}")
     return {"observation": m.sanitize((r.text or "").strip()), "looked_at": span}
 
@@ -392,10 +369,19 @@ def build_context_agent(model=None) -> LlmAgent:
         generate_content_config=_generate_config(media_resolution=types.MediaResolution.MEDIA_RESOLUTION_MEDIUM))
 
 
-def args_preview(args: dict | None) -> dict:
-    """Tool-call arguments for the UI trace (short strings only)."""
-    return {k: (v if not isinstance(v, str) else v[:120]) for k, v in (args or {}).items()
-            if k != "tool_context" and isinstance(v, (str, int, float, bool))}
+def tool_args(args: dict | None) -> dict:
+    """The scalar arguments of a model-written tool call, whole (the guard sees them before they are shortened)."""
+    return {k: v for k, v in (args or {}).items() if k != "tool_context" and isinstance(v, (str, int, float, bool))}
+
+
+def args_preview(args: dict) -> dict:
+    """Tool-call arguments for the UI trace: strings over 120 characters cut at a word boundary."""
+    def cut(v: str) -> str:
+        if len(v) <= 120:
+            return v
+        head = v[:120]
+        return (head.rsplit(" ", 1)[0] if " " in head else head) + "…"
+    return {k: cut(v) if isinstance(v, str) else v for k, v in args.items()}
 
 
 def dumps(o) -> str:

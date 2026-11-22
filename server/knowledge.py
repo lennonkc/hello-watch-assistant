@@ -86,6 +86,10 @@ def _index(pack: dict) -> dict:
         "objects": {o["object_id"]: o for o in pack.get("objects", [])},
         "recaps": {r["recap_id"]: r for r in pack.get("recaps", [])},
         "aliases": aliases,
+        "zh": {**{("event", e["event_id"]): e.get("text_zh") for e in pack.get("events", [])},
+               **{("scene", x["scene_id"]): x.get("summary_zh") for x in pack.get("scenes", [])},
+               **{("character_fact", f["fact_id"]): f.get("text_zh") for f in pack.get("character_facts", [])},
+               **{("shot_caption", x["shot_caption_id"]): x.get("caption_zh") for x in pack.get("shot_captions", [])}},
     }
 
 
@@ -150,6 +154,21 @@ class Moment:
         if self.name_visible(c):
             return (c["name_zh"] or c["canonical_name"]) if zh else c["canonical_name"]
         return c["display_label_pre_name_zh"] if zh else c["display_label_pre_name"]
+
+    def text_zh(self, ref: tuple[str, str] | None) -> str | None:
+        """The Chinese text of an event / scene / fact / shot caption, names not visible yet replaced (or None)."""
+        return self.sanitize(self.ix["zh"].get(tuple(ref))) if ref and self.ix["zh"].get(tuple(ref)) else None
+
+    def zh_names(self) -> list[tuple[str, str]]:
+        """(Chinese, English) ways of naming each eligible character at P — the labels, and the names once visible —
+        so a Chinese answer can be matched against English sources."""
+        out = []
+        for cid, c in self.chars.items():
+            if self.char_ok(cid):
+                out.append((c["display_label_pre_name_zh"], c["display_label_pre_name"]))
+                if self.name_visible(c):
+                    out.append((c.get("name_zh"), c["canonical_name"]))
+        return [(z, e) for z, e in out if z and e]
 
     def known_characters(self) -> list[dict]:
         out = []
@@ -219,7 +238,9 @@ class Moment:
 
     # ── long-range memory: latest recap + what happened after it ────
 
-    def story_so_far(self, limit: int = 24) -> dict:
+    def story_so_far(self, limit: int = 24, refs: bool = False) -> dict:
+        """The latest recap and the events / scenes after it. `refs=True` adds `ref` = (type, id) to each item for
+        server-side use (`text_zh`); never send that to the model."""
         recaps = [it for it in self.eligible if it.item_type == "recap"]
         latest = max(recaps, key=lambda it: (it.start_s, it.item_id), default=None)
         since = latest.start_s if latest else -1.0
@@ -232,7 +253,8 @@ class Moment:
             out["recap"] = {"up_to": ts(latest.start_s), "text": self.sanitize(
                 row["text_zh"] if self.lang == "zh" and row.get("text_zh") else row["text_en"])}
         out["since_recap" if latest else "so_far"] = [
-            {"at": ts(it.start_s), "type": it.item_type, "text": self.sanitize(it.text)} for it in after[-limit:]]
+            {"at": ts(it.start_s), "type": it.item_type, "text": self.sanitize(it.text),
+             **({"ref": (it.item_type, it.item_id)} if refs else {})} for it in after[-limit:]]
         return out
 
     # ── semantic search, gate first ─────────────────────────────────
@@ -287,9 +309,10 @@ class Moment:
 
     # ── current shot: who / what is on screen (spec §5.2 current-shot rule) ──
 
-    def _facts(self, cid: str) -> list[str]:
+    def _facts(self, cid: str) -> list[tuple[str, str]]:
+        """(fact id, text) of the character's eligible facts."""
         owner = self.ix["fact_owner"]
-        return [self.sanitize(it.text) for it in self.eligible
+        return [(it.item_id, self.sanitize(it.text)) for it in self.eligible
                 if it.item_type == "character_fact" and owner.get(it.item_id) == cid]
 
     def _look(self, cid: str) -> str | None:
@@ -343,8 +366,11 @@ class Moment:
                 cid = e.get("character_id")
                 if self.char_ok(cid) and not self.gate.char_isolated(cid, e["bbox_t_s"], e["bbox_t_s"]):
                     c, ref = self.chars[cid], ("character", cid)
+                    facts = self._facts(cid)[-6:]
                     ent.update(kind="character", label=self.label(cid), name_known=self.name_visible(c),
-                               look=self._look(cid), facts=self._facts(cid)[-6:], reference_frames=self.exemplars(cid))
+                               look=self._look(cid), facts=[f for _i, f in facts], reference_frames=self.exemplars(cid))
+                    if refs:
+                        ent["facts_zh"] = [self.text_zh(("character_fact", i)) for i, _f in facts]
                 else:
                     ent.update(kind="character", label="a character who has only just appeared (nothing known yet)")
             else:
@@ -370,6 +396,10 @@ class Moment:
                 out["tap_note"] = "The tap is not on any known entity."
         if used_shot is not None:
             out["shot_started"] = ts(used_shot["start_s"])
+            if used_shot is not candidates[0]:
+                out["previous_shot"] = True
+                out["note"] = ("Nothing is identified yet in the current shot (a cut just happened): these entities "
+                               "are from the shot before it and may no longer be in view.")
         if refs:
             out["current_shot"] = used_shot is not None and used_shot is candidates[0]
         return out
@@ -407,12 +437,6 @@ class Moment:
         start = max(self.asset["story_start_s"], self.P - seconds)
         end = self.fp - 1
         return (start, float(end)) if end - start >= 2 else None
-
-    def evidence_frame(self, start_s: float, end_s: float) -> int | None:
-        t = min(int((start_s + end_s) / 2), self.fp)
-        prefs = [c for c in (t, int(start_s), self.fp) if 0 <= c <= self.fp]
-        have = set(self.title.prefetch(prefs))                   # one concurrent fetch for on-demand titles
-        return next((c for c in prefs if c in have), None)
 
     def gate_counts(self) -> dict:
         total = retrieval.per_pack(self.pack, "gate_totals", lambda _p: dict(collections.Counter(

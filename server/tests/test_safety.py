@@ -63,16 +63,22 @@ def test_cooccurrence_per_sentence(title):
     assert guard.identity_links(after) == []
 
 
+def links_for(m, tap=None, question=""):
+    tapped, screen = C.focus(m.on_screen(tap, refs=True))
+    return guard.identity_links(m, tapped, question, screen)
+
+
 def test_cooccurrence_when_the_answer_is_about_the_a_side(title):
     m = Moment(title, 61.2)                                     # the wolf's box (keyframe 60 s) is usable; still pending
-    tapped = guard.identity_links(m, C.focus(m, m.on_screen(TAP_WOLF, refs=True)))
-    asked = guard.identity_links(m, question="Is the wolf Bob?")
-    on_screen = guard.identity_links(m, C.focus(m, m.on_screen(None, refs=True)))
-    assert tapped[0].focus and asked[0].focus
-    assert on_screen[0].focus                     # the wolf is on screen and Bob (the b-side) is not
-    both = {"entities": [{"ref": ("character", "c03")}, {"ref": ("character", "c02")}]}
-    assert C.focus(m, both) == frozenset()        # both sides on screen: only the per-sentence rule
-    for links in (tapped, asked):
+    tapped = links_for(m, TAP_WOLF, "Who is that?")
+    asked = links_for(m, None, "Who is the wolf?")
+    pointed = links_for(m, None, "Who is this?")            # the wolf is on screen, Bob is not, the question points
+    assert tapped[0].focus and asked[0].focus and pointed[0].focus
+    missed = links_for(m, None, "What did I miss?")         # on screen but not asked about: per passage only
+    assert not missed[0].focus and missed[0].present
+    both = guard.identity_links(m, (), "Who is this?", frozenset({"c03", "c02"}))
+    assert not both[0].focus                                # both sides on screen: only the per-passage rule
+    for links in (tapped, asked, pointed):
         assert kinds_of(guard.violations(m.pack, "That is the wolf. Bob is at home.", 61.2, links)) == [
             "identity_cooccurrence"]
         assert kinds_of(guard.violations(m.pack, "The film hasn't said whether it is Bob.", 61.2, links)) == [
@@ -107,20 +113,20 @@ def test_preamble_alone_is_never_the_answer(wired, caplog):
     with caplog.at_level(logging.INFO, logger="watch"):
         ev = wired.ask(30.0, "What happened?", session_id="pre")
     a = answer(ev)
-    assert a["text"] == main.FALLBACK["en"] and a["guard"]["rewritten"]
-    assert "Let me check" not in a["text"]
+    assert a["text"] == main.TIMEOUT_FALLBACK["en"] and a["guard"]["rewritten"]     # nothing was held back: neutral
+    assert "Let me check" not in json.dumps(ev)                                       # held, never sent
     line = json.loads(next(r.getMessage() for r in caplog.records if r.getMessage().startswith("ask "))[4:])
-    assert line["preamble_only"] and line["leaked_preamble"] == 1
+    assert line["held_preamble"] == 1 and line["leaked_preamble"] == 0
     wired.ctx.script = [{"text": "Ok."}]
     wired.ask(31.0, "And now?", session_id="pre")
     assert "Let me check" not in request_text(wired.ctx.requests[-1])          # not in the history either
 
 
 def test_preamble_is_left_out_of_the_final_text(wired):
-    wired.ctx.script = [{"pre": "Let me check that. One moment please.", "call": ("search_moments", {"query": "x"})},
+    wired.ctx.script = [{"pre": "Here is what I know. Let me check the rest.", "call": ("search_moments", {"query": "x"})},
                         {"text": "Alice met the boy in a meadow."}]
     ev = wired.ask(70.0, "What happened?")
-    assert sent(ev).startswith("Let me check that.")                         # it was already on screen …
+    assert sent(ev).startswith("Here is what I know.")                       # it was already on screen …
     assert answer(ev)["text"] == "Alice met the boy in a meadow."            # … the answer event replaces it
 
 
@@ -154,14 +160,21 @@ def test_look_closer_sends_at_most_eight_stills(wired, monkeypatch):
 
 # ── 1.6 the client address ───────────────────────────────────────────
 
-def test_client_ip_is_the_hop_google_appends():
+def test_client_ip_is_the_hop_google_appends(monkeypatch):
+    from starlette.datastructures import Headers
+
+    from server import config
+
     class R:
-        def __init__(self, fwd):
-            self.headers = {"x-forwarded-for": fwd} if fwd else {}
+        def __init__(self, *fwd):
+            self.headers = Headers(raw=[(b"x-forwarded-for", f.encode()) for f in fwd])
             self.client = type("C", (), {"host": "10.0.0.1"})()
     assert main.client_ip(R("6.6.6.6, 203.0.113.9")) == "203.0.113.9"         # the first hop is client-written
     assert main.client_ip(R("203.0.113.9")) == "203.0.113.9"
-    assert main.client_ip(R(None)) == "10.0.0.1"
+    assert main.client_ip(R("6.6.6.6", "203.0.113.9")) == "203.0.113.9"      # two header lines are one list
+    assert main.client_ip(R()) == "10.0.0.1"
+    monkeypatch.setattr(config, "TRUSTED_PROXY_HOPS", 2)                      # a load balancer in front
+    assert main.client_ip(R("6.6.6.6, 203.0.113.9, 10.9.9.9")) == "203.0.113.9"
 
 
 # ── 2.1 long films ───────────────────────────────────────────────────
@@ -237,7 +250,6 @@ def test_sources_are_what_the_answer_rests_on_and_pass_the_guard(title):
     many = [E.Candidate("line", "line", i, i, f"Alice sees the wolf by the meadow trees {i}.") for i in range(9)]
     assert len(E.select(many, answer_text, check)) == E.CAP
     assert E.select(cands, "The film hasn't shown that yet.", check) == []
-    assert E.frames(m, [], "The film hasn't shown that yet.", check) == []
     # an answer naming the b-side: no source may refer to the a-side
     about_b = "Bob climbed a tree in the meadow."
     check_b = lambda s: guard.source_violations(m.pack, s, 61.2, guard.identity_links(m), about_b)   # noqa: E731
@@ -335,3 +347,232 @@ def test_answer_cut_by_the_deadline_says_so(wired, monkeypatch):
     assert answer(ev)["text"] == "That is the wolf." and answer(ev)["cut_off"] is True
     wired.ctx.script = [{"text": "That is the wolf."}]
     assert answer(wired.ask(61.2, tap=TAP_WOLF))["cut_off"] is False
+
+
+# ── second pass: references, passages, both directions ──────────────
+
+TAP_ALICE = {"x": 0.75, "y": 0.5}        # inside Alice's box [100, 600, 900, 900], next to the wolf
+
+
+def test_a_side_with_any_determiner_adjective_or_pronoun(title):
+    m = Moment(title, 59.0)
+    links = guard.identity_links(m)
+    for leak in ("That wolf is Bob.", "The grey wolf is Bob.", "Bob is a wolf now.",
+                 "A grey wolf has appeared. It is Bob.", "A grey wolf has appeared. Some say it is Bob.",
+                 "一只灰狼出现了。它就是鲍勃。"):
+        assert kinds_of(guard.violations(m.pack, leak, 59.0, links)) == ["identity_cooccurrence"], leak
+    for fine in ("That is the wolf. Bob is at home.", "Alice met Bob in the meadow. Bob climbed a tree.",
+                 "A grey wolf has appeared. Alice waves at Bob."):
+        assert guard.violations(m.pack, fine, 59.0, links) == [], fine
+    assert links_for(Moment(title, 61.2), None, "Who is that wolf?")[0].focus
+    assert links_for(Moment(title, 61.2), None, "那只狼是谁？")[0].focus
+
+
+def test_a_tap_on_someone_else_keeps_the_on_screen_a_side(wired):
+    m = Moment(main.STORE.get("mini"), 61.2)
+    links = links_for(m, TAP_ALICE, "Who is this?")
+    assert links[0].present and not links[0].focus
+    leak = "That is Alice. The grey wolf next to her watches quietly. It is really Bob."
+    assert kinds_of(guard.violations(m.pack, leak, 61.2, links)) == ["identity_cooccurrence"]
+    wired.ctx.script = [{"text": leak}]
+    ev = wired.ask(61.2, "Who is this?", tap=TAP_ALICE)
+    assert "Bob" not in json.dumps(ev) and answer(ev)["text"].startswith("That is Alice.")
+
+
+def test_b_side_label_and_the_reverse_direction(title):
+    m = Moment(title, 59.0)
+    links = guard.identity_links(m)
+    for leak in ("The wolf is the boy.", "狼就是男孩。"):                 # before (or besides) b's name: its label
+        assert kinds_of(guard.violations(m.pack, leak, 59.0, links)) == ["identity_cooccurrence"], leak
+    m20 = Moment(title, 20.0)                                         # the wolf has not appeared; still pending
+    about_bob = guard.identity_links(m20, frozenset({"c02"}), "Who is this?", frozenset({"c02"}))
+    assert about_bob[0].focus_b and not about_bob[0].focus
+    for leak in ("That is Bob. He will become the wolf.", "That is Bob. Later the wolf comes."):
+        assert kinds_of(guard.violations(m.pack, leak, 20.0, about_bob)) == ["identity_cooccurrence"], leak
+    assert guard.violations(m.pack, "That is Bob, climbing a tree.", 20.0, about_bob) == []
+    assert links_for(m20, None, "What is Bob doing?")[0].focus_b
+
+
+def test_on_screen_a_side_does_not_bar_b_from_other_answers(wired):
+    m = Moment(main.STORE.get("mini"), 61.2)
+    missed = links_for(m, None, "What did I miss?")
+    assert not missed[0].focus
+    wired.ctx.script = [{"text": "Alice waved at Bob in the meadow. Bob climbed a tree there."}]
+    ev = wired.ask(61.2, "What did I miss?")
+    a = answer(ev)
+    assert a["text"] == "Alice waved at Bob in the meadow. Bob climbed a tree there." and not a["guard"]["dropped"]
+    # … but a question pointing at the screen is about the wolf
+    wired.ctx.script = [{"text": "That is the wolf. The film hasn't said whether it is Bob."}]
+    ev = wired.ask(61.2, "Who is this?")
+    assert answer(ev)["text"] == "That is the wolf." and "Bob" not in json.dumps(ev)
+
+
+def test_rejected_link_never_constrains(title):
+    link = title.pack["identity_links"][0]
+    link["review_state"] = "rejected"
+    try:
+        m = Moment(title, 59.0)
+        assert m.gate.pending == [] and guard.identity_links(m) == []
+        assert guard.violations(m.pack, "The wolf watches Bob.", 59.0, guard.identity_links(m)) == []
+    finally:
+        link["review_state"] = "reviewed"
+
+
+def test_sources_use_the_same_references(title):
+    from server import evidence as E
+    m = Moment(title, 59.0)
+    links = guard.identity_links(m)
+    said = "That grey wolf came out of the meadow and climbed a tree."
+    check = lambda s: guard.source_violations(m.pack, s, 59.0, links, said)       # noqa: E731
+    cands = [E.Candidate("story", "event", 20, 20, "Bob climbs a tree in the meadow."),
+             E.Candidate("story", "event", 6, 6, "Alice waves at Bob in the meadow."),
+             E.Candidate("story", "event", 30, 30, "A tree stands in the meadow.")]
+    assert [c.text for c in E.select(cands, said, check)] == ["A tree stands in the meadow."]
+
+
+# ── refusals, Chinese answers ────────────────────────────────────────
+
+REFUSALS = ("We don't know yet why she left.", "The film hasn't said why.", "That hasn't been revealed yet.",
+            "It isn't clear who he is.", "It's not clear yet.", "I can't say without spoiling the film.",
+            "Nobody has said his name so far.", "His name is still unknown.", "We'll have to wait and see.",
+            "The film doesn't tell us where he went.", "That remains to be seen.",
+            "我们还不知道她为什么离开。", "影片还没有交代。", "目前还不清楚他是谁。", "这一点尚未揭晓。", "暂时无法确定。")
+
+
+def test_refusals_are_decided_per_sentence():
+    from server import evidence as E
+    for r in REFUSALS:
+        assert E.is_refusal(r), r
+    assert not E.is_refusal("Alice met Bob in a meadow.") and not E.is_refusal("爱丽丝在草地上遇到了鲍勃。")
+    mixed = "Alice met Bob in a meadow and Bob climbed a tree. The film hasn't said why."
+    cands = [E.Candidate("story", "event", 20, 20, "Bob climbs a tree in the meadow."),
+             E.Candidate("story", "event", 25, 25, "Why did he leave the house?")]
+    assert [c.text for c in E.select(cands, mixed, lambda _s: [])] == ["Bob climbs a tree in the meadow."]
+    assert E.select(cands, "We don't know yet why Bob climbs a tree in the meadow.", lambda _s: []) == []
+
+
+def test_tools_flow_fallback_and_refusal_show_no_sources(wired, monkeypatch):
+    from server import config
+    monkeypatch.setattr(config, "FLOW", "tools")
+    leak = "Alice waves at Bob."                                   # Bob's name is visible from 11 s
+    wired.tools.script = [{"call": ("story_so_far", {})}, {"text": leak}, {"call": ("story_so_far", {})}, {"text": leak}]
+    a = answer(wired.ask(8.0, "What happened?"))
+    assert a["text"] == main.FALLBACK["en"] and a["evidence"] == [] and a["frames"] == []
+    wired.tools.script = [{"call": ("story_so_far", {})}, {"text": "We don't know yet why Alice met the boy in a meadow."}]
+    a = answer(wired.ask(70.0, "Why did she meet him?"))
+    assert a["evidence"] == [] and a["frames"] == []
+    wired.tools.script = [{"call": ("story_so_far", {})}, {"text": "Alice met the boy in a meadow."}]
+    a = answer(wired.ask(70.0, "What happened?"))
+    assert [e["text"] for e in a["evidence"]] == ["Alice met the boy in a meadow."] and a["frames"]
+
+
+def test_chinese_answer_finds_english_and_chinese_sources(wired, title):
+    from server import evidence as E
+    m = Moment(title, 30.0, "zh")
+    cands = [E.Candidate("story", "event", 10, 10, "Alice greets Bob."),
+             E.Candidate("story", "event", 6, 6, "Alice waves at the girl.", text_zh="爱丽丝在草地上挥手。")]
+    kept = E.select(cands, "爱丽丝和鲍勃打了招呼。", lambda _s: [], lang="zh", names=m.zh_names())
+    assert [c.text for c in kept] == ["Alice greets Bob."]                       # through the names
+    kept = E.select(cands, "爱丽丝在草地上挥手。", lambda _s: [], lang="zh", names=m.zh_names())
+    assert [c.row("zh")["text"] for c in kept] == ["爱丽丝在草地上挥手。"]           # through its own Chinese text
+    wired.ctx.script = [{"text": "爱丽丝和鲍勃打了招呼。"}]
+    a = answer(wired.ask(30.0, "发生了什么？", lang="zh"))
+    assert "Alice greets Bob." in [e["text"] for e in a["evidence"]]
+
+
+# ── cut answers, the hold rule, the sources budget ───────────────────
+
+def test_cut_answer_is_flagged_and_not_stored(wired, monkeypatch):
+    from server import config
+    monkeypatch.setattr(config, "ASK_DEADLINE_S", 0.5)
+    wired.ctx.script = [{"text": ["That is the wolf. It", " is grey."], "gap": 2}]
+    a = answer(wired.ask(61.2, tap=TAP_WOLF, session_id="cut"))
+    assert a["cut_off"] is True and not any(main.HISTORY.map.get(k) for k in main.HISTORY.map)
+
+
+def test_stall_before_a_tool_call_does_not_send_the_preamble(wired, monkeypatch):
+    from server import config
+    monkeypatch.setattr(config, "ASK_DEADLINE_S", 1.5)
+    wired.ctx.script = [{"text": ["Let me look at the last scene.", ""], "gap": 4}]
+    ev = wired.ask(61.2, "What just happened?")
+    assert "Let me" not in sent(ev) and answer(ev)["text"] == main.TIMEOUT_FALLBACK["en"]
+    wired.ctx.script = [{"text": ["That is the wolf in the forest.", ""], "gap": 4}]       # a real sentence stands
+    assert answer(wired.ask(61.2, "What just happened?"))["text"] == "That is the wolf in the forest."
+
+
+def test_a_preamble_first_sentence_waits_for_the_end_of_the_step(wired):
+    wired.ctx.script = [{"text": ["Let me explain. ", "Alice met the boy in a meadow."]}]
+    ev = wired.ask(70.0, "What happened?")
+    assert answer(ev)["text"] == "Let me explain. Alice met the boy in a meadow."   # no tool call: it is the answer
+
+
+def test_slow_or_failing_sources_never_cost_the_answer(wired, monkeypatch):
+    from server import config
+    from server import evidence as E
+    monkeypatch.setattr(config, "SOURCES_TIMEOUT_S", 0.3)
+    title = main.STORE.get("mini")
+    real = type(title).prefetch
+
+    def slow(self, ts_):
+        time.sleep(1.5)
+        return real(self, ts_)
+    monkeypatch.setattr(type(title), "prefetch", slow)
+    wired.ctx.script = [{"text": "Alice met the boy in a meadow."}]
+    ev = wired.ask(70.0, "What happened?")
+    a = answer(ev)
+    assert a["timing"]["total_ms"] - a["timing"]["first_text_ms"] < 900      # the 1.5 s fetch is not waited for
+    assert a["text"] == "Alice met the boy in a meadow." and a["frames"] == [] and a["evidence"]
+
+    def boom(*_a, **_k):
+        raise RuntimeError("no")
+    monkeypatch.setattr(E, "select", boom)
+    wired.ctx.script = [{"text": "Alice met the boy in a meadow."}]
+    ev = wired.ask(70.0, "What happened?", session_id="s")
+    assert [e for e, _d in ev][-2:] == ["answer", "done"] and not data(ev, "error")
+    assert answer(ev)["evidence"] == [] and main.HISTORY.map
+
+
+# ── nits ─────────────────────────────────────────────────────────────
+
+def test_regex_canary_boundaries_work_inside_chinese(title):
+    pack = {**title.pack, "canaries": [{"term": r"\b(aged|older)\b", "lang": "en", "match": "regex", "case_sensitive": 0,
+                                        "active_until_s": 50.0, "kind": "identity_clue", "ref_type": "identity_link",
+                                        "ref_id": "k01"}]}
+    assert guard.violations(pack, "他变older了。", 10.0)[0]["match"] == "older"
+    assert guard.violations(pack, "A folder and a bolder move.", 10.0) == []
+
+
+def test_after_a_cut_no_highlight_and_not_on_screen(wired):
+    pack = main.STORE.get("mini").pack
+    shot = {"shot_caption_id": "sc002", "start_s": 61.0, "end_s": 70.0, "reveal_at_s": 70.0, "source": "t",
+            "caption_en": "Trees.", "caption_zh": None, "review_state": "auto"}
+    pack["shot_captions"][1]["end_s"] = 61.0
+    pack["shot_captions"].append(shot)
+    try:
+        wired.ctx.script = [{"text": "That is the wolf."}]
+        ev = wired.ask(61.4, "Who is that?", tap=TAP_WOLF)
+        assert answer(ev)["highlight"] is None and not data(ev, "highlight")
+        ctx = request_text(wired.ctx.requests[0])
+        assert "JUST BEFORE THE CUT" in ctx and "ON SCREEN (entities identified in the current shot" not in ctx
+    finally:
+        pack["shot_captions"].remove(shot)
+        pack["shot_captions"][1]["end_s"] = 100.0
+
+
+def test_endless_tool_calls_get_the_neutral_reply(wired):
+    wired.ctx.script = [{"call": ("search_moments", {"query": f"q{i}"})} for i in range(12)]
+    assert answer(wired.ask(30.0, "What happened?"))["text"] == main.TIMEOUT_FALLBACK["en"]
+
+
+def test_tool_args_are_guarded_whole_then_cut(wired):
+    q = "x" * 117 + " Bobby climbs"
+    wired.ctx.script = [{"call": ("search_moments", {"query": q})}, {"text": "He climbed."}]
+    ev = wired.ask(8.0, "What did he do?")
+    assert data(ev, "tool")[-1]["args"] == {"query": "x" * 117 + "…"}
+
+
+def test_oracle_sees_references_not_just_labels(title):
+    for leak in ("That wolf is Bob.", "The grey wolf is Bob.", "A grey wolf has appeared. It is Bob.",
+                 "The wolf is the boy.", "狼就是男孩。"):
+        assert oracle_leaks(title.pack, leak, 59.0), leak
+    assert oracle_leaks(title.pack, "That is the wolf. Bob is at home.", 59.0) == []

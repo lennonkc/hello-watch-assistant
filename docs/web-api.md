@@ -132,14 +132,18 @@ Order: `gate`, then the trace (`tool` / `tool_result`, possibly `highlight`), th
 
 - `highlight.bbox` is `[ymin, xmin, ymax, xmax]` normalised to 0–1000 on frame `frame_t` (≤ `P`, from the shot's
   keyframe). In `answer` it is `null` unless the answer text mentions the tapped entity, so the box never contradicts
-  the text; the early `highlight` event is sent only when the box is fresh (within 1 s of `floor(P)`).
-- `evidence`: only what the answer rests on (at most four rows, a recap as the matching sentence), each checked by the
-  output guard; empty for a refusal or a fallback.
-- `frames[].t` → `/api/titles/{id}/frames/{t}.jpg`; every frame is at or before `P`.
+  the text, and `null` right after a cut (the boxes still come from the shot before); the early `highlight` event is
+  sent only when the box is fresh (within 1 s of `floor(P)`, in the current shot).
+- `evidence` (both flows): only what the answer rests on — rows sharing content words with the sentences of the answer
+  that assert something, at most four, a recap as the matching sentence — each checked by the output guard; empty for
+  a pure refusal or a fallback. For `lang: "zh"` a row is shown in Chinese when the pack has that row in Chinese.
+- `frames[].t` → `/api/titles/{id}/frames/{t}.jpg`; every frame is at or before `P`. Sources have their own short
+  budget after the answer (0.8 s): if they are slow or fail, `evidence` / `frames` come back empty and the answer
+  is unaffected.
 - `guard.rewritten = true` means the output guard caught something: `dropped` sentences were never sent, or the
   answer was regenerated (one retry) or replaced by a fixed reply.
 - `cut_off: true`: the answer ran out of time (or the model failed) partway; the sentences sent are complete and
-  guarded, but the answer may be unfinished. The page says so.
+  guarded, but the answer may be unfinished. The page says so, and the turn is not kept in the conversation.
 - `usage` counts every model call of the question (the nested `look_closer` call included); `output_tokens` includes
   `thought_tokens`. `timing.first_text_ms` is the time to the first `delta`.
 
@@ -151,5 +155,8 @@ Order: `gate`, then the trace (`tool` / `tool_result`, possibly `highlight`), th
 
 Questions are rate limited per client IP (HTTP 429, `Retry-After` header) with the body
 `{"message": "…", "limit": "per_minute" | "daily", "scope": "ip" | "total", "retry_after_s": 42}`; the UI should show a
-friendly note worded for the limit that was hit. Benchmark runs against a deployed revision skip the limiter by sending
+friendly note worded for the limit that was hit. The client IP is the `X-Forwarded-For` entry appended by the first
+trusted proxy: the last one with Google's front end alone (`WATCH_TRUSTED_PROXY_HOPS=1`); set it to 2 with one load
+balancer in front. Entries the client wrote itself are never used.
+Benchmark runs against a deployed revision skip the limiter by sending
 `X-Watch-Bench-Token: <WATCH_BENCH_TOKEN>`; such requests may also choose the flow with `X-Watch-Flow: context|tools`.

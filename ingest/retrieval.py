@@ -139,9 +139,12 @@ class Gate:
         for cid, start, end in ix["appear"]:
             if self.le(start):
                 self.appear.setdefault(cid, []).append((start, max(start, min(end, self.P))))
-        # a link is pending until it is reviewed, revealed (+ margin) and both of its characters are eligible
+        # a link is pending until it is reviewed, revealed (+ margin) and both of its characters are eligible; a link
+        # a reviewer rejected (a ≠ b after all) never constrains anything
         self.pending = []
         for lk in links:
+            if lk["review_state"] == "rejected":
+                continue
             if not (self.reviewed(lk["review_state"]) and self.le(lk["reveal_at_s"] + self.m["gate_margin_reviewed_reveal_s"])
                     and self.le(self.char_from(lk["a_character_id"])) and self.le(self.char_from(lk["b_character_id"]))):
                 fa = (self.chars.get(lk["a_character_id"]) or {}).get("first_appears_s")
