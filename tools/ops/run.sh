@@ -490,6 +490,27 @@ packs_url() {
   bucket_url PACKS_PREFIX "${PACKS_PREFIX:-}"
 }
 
+# The private titles file of a new revision, the same rule as the packs: PRIVATE_PREFIX unset → what production serves
+# (WATCH_PRIVATE_TITLES of the revision with the traffic; none if it has none), `none` → no private titles, a path →
+# <path>/titles.json in the service's bucket. Sets PRIVATE_TITLES_GCS and PRIVATE_TITLES_HOW (which case applied).
+resolve_private_titles() {
+  case "${PRIVATE_PREFIX:-}" in
+    "")
+      PRIVATE_TITLES_GCS=$(live_env WATCH_PRIVATE_TITLES)
+      if [ -n "$PRIVATE_TITLES_GCS" ]; then
+        PRIVATE_TITLES_HOW="inherited from production (PRIVATE_PREFIX unset)"
+      else
+        PRIVATE_TITLES_HOW="PRIVATE_PREFIX unset and production has none"
+      fi ;;
+    none)
+      PRIVATE_TITLES_GCS=""
+      PRIVATE_TITLES_HOW="PRIVATE_PREFIX=none" ;;
+    *)
+      PRIVATE_TITLES_GCS="$(bucket_url PRIVATE_PREFIX "$PRIVATE_PREFIX")/titles.json" || exit 1
+      PRIVATE_TITLES_HOW="from PRIVATE_PREFIX" ;;
+  esac
+}
+
 refresh_service() {
   SVC_JSON=$(gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" --format=json) \
     || die "cannot describe Cloud Run service $SERVICE in $REGION"
@@ -526,8 +547,8 @@ check_health() {
 # Build the image of this commit and deploy it as a NEW revision that takes no traffic, tagged $TAG. Production
 # traffic is never moved (--no-traffic pins any "latest" traffic to the current revision first). The environment is
 # built in full every time (deploy/web/env.sh, --set-env-vars): packs PACKS_PREFIX (default: what production serves),
-# private titles PRIVATE_PREFIX (default: none), limits, STAGING_ENV, and a fresh bench token unless RELEASE=1 (the
-# revision meant for promote carries no token).
+# private titles PRIVATE_PREFIX (default: what production serves; `none`: none), limits, STAGING_ENV, and a fresh bench
+# token unless RELEASE=1 (the revision meant for promote carries no token).
 mode_deploy_staging() {
   local image token envs url out rc names
   cloud_discover
@@ -539,10 +560,7 @@ mode_deploy_staging() {
     PACKS_GCS=$(live_env WATCH_PACKS_GCS)
     if [ -z "$PACKS_GCS" ]; then die "PACKS_PREFIX unset and the production revision has no WATCH_PACKS_GCS"; fi
   fi
-  PRIVATE_TITLES_GCS=""
-  if [ -n "${PRIVATE_PREFIX:-}" ]; then
-    PRIVATE_TITLES_GCS="$(bucket_url PRIVATE_PREFIX "$PRIVATE_PREFIX")/titles.json" || exit 1
-  fi
+  resolve_private_titles
   token=""
   if [ "${RELEASE:-0}" != 1 ]; then
     token=$("$JSON_PY" -c "$PY_TOKEN")
@@ -562,7 +580,7 @@ mode_deploy_staging() {
   say "image: $image"
 
   hr "deploy (no traffic, tag $TAG$(if [ "${RELEASE:-0}" = 1 ]; then printf ', RELEASE: no bench token'; fi))"
-  say "packs: $PACKS_GCS; private titles: ${PRIVATE_TITLES_GCS:-(none)}; extra env: ${STAGING_ENV:-(none)}"
+  say "packs: $PACKS_GCS; private titles: ${PRIVATE_TITLES_GCS:-(none)} ($PRIVATE_TITLES_HOW); extra env: ${STAGING_ENV:-(none)}"
   say "env (complete, replaces the previous revision's): $names"
   out=$(mktemp)
   # shellcheck disable=SC2064  # expand now: `out` is local, and the EXIT trap runs after this function returned
@@ -631,10 +649,11 @@ mode_bench() {
   if [ -n "${BENCH_GENERATE:-}" ]; then
     gen_dir="$ROOT/.cache/bench/generated/$run_id"
   fi
-  pvt=$(svc_q env WATCH_PRIVATE_TITLES)
-  if [ -n "${PRIVATE_PREFIX:-}" ]; then
-    pvt="$(bucket_url PRIVATE_PREFIX "$PRIVATE_PREFIX")/titles.json" || exit 1
-  fi
+  case "${PRIVATE_PREFIX:-}" in                 # unset: what the deployed service has; none: no private titles
+    "") pvt=$(svc_q env WATCH_PRIVATE_TITLES) ;;
+    none) pvt="" ;;
+    *) pvt="$(bucket_url PRIVATE_PREFIX "$PRIVATE_PREFIX")/titles.json" || exit 1 ;;
+  esac
 
   # the packs this URL serves, the pack lint of the hand-written cases, generated cases (bounded output)
   hr "packs, case lint$(if [ -n "$gen_dir" ]; then printf ', generated cases'; fi)"

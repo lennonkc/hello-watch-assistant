@@ -48,6 +48,8 @@ if args[:3] == ["run", "services", "update-traffic"]:
         shutil.copyfile(d / "service-after.json", d / "service.json")
     print("Updating traffic... done" if rc == 0 else "ERROR: (gcloud.run.services.update-traffic) denied")
     sys.exit(rc)
+if args[:2] == ["run", "deploy"] or args[:4] == ["artifacts", "docker", "images", "describe"]:
+    sys.exit(0)                                   # the image of the commit "exists"; the deploy "succeeds"
 if args[:1] == ["version"]:
     print("Google Cloud SDK (fake)"); sys.exit(0)
 sys.exit(3)
@@ -67,7 +69,7 @@ def _exe(p: pathlib.Path, text: str) -> None:
 def ops(tmp_path):
     """A scratch checkout with run.sh, env.sh, the catalog and the requirements files, and the fakes."""
     repo, fake, home = tmp_path / "repo", tmp_path / "fake", tmp_path / "home"
-    for rel in ("tools/ops/run.sh", "deploy/web/env.sh", "catalog/catalog.json",
+    for rel in ("tools/ops/run.sh", "deploy/web/env.sh", "deploy/web/build.sh", "catalog/catalog.json",
                 "requirements-ingest.txt", "requirements-web.txt"):
         (repo / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / rel, repo / rel)
@@ -193,6 +195,37 @@ def test_promote_refuses_an_image_of_another_commit_without_moving_traffic(ops):
     r = ops("promote")
     assert r.returncode != 0 and "is not the checked-out commit" in r.stderr
     assert not [c for c in _calls(ops) if "update-traffic" in c]
+
+
+# ── deploy-staging: the private titles file follows the packs rule ─────────
+
+PRODUCTION_PRIVATE = "gs://bkt/preview/titles.json"
+
+
+@pytest.mark.parametrize("prefix, production_has, want, how", [
+    (None, True, PRODUCTION_PRIVATE, "inherited from production (PRIVATE_PREFIX unset)"),
+    (None, False, None, "PRIVATE_PREFIX unset and production has none"),
+    ("none", True, None, "PRIVATE_PREFIX=none"),
+    ("preview-next/", True, "gs://bkt/preview-next/titles.json", "from PRIVATE_PREFIX"),
+])
+def test_deploy_staging_keeps_production_private_titles_unless_told(ops, prefix, production_has, want, how):
+    traffic = [{"revisionName": "hello-watch-00009-old", "percent": 100},
+               {"revisionName": "hello-watch-00010-stg", "percent": 0, "tag": "next", "url": "https://next---svc"}]
+    (ops.fake / "service.json").write_text(json.dumps(_service(traffic, latest="hello-watch-00010-stg")))
+    env = [{"name": "WATCH_PACKS_GCS", "value": "gs://bkt/demo-packs"}]
+    if production_has:
+        env.append({"name": "WATCH_PRIVATE_TITLES", "value": PRODUCTION_PRIVATE})
+    (ops.fake / "rev-hello-watch-00009-old.json").write_text(json.dumps({"spec": {"containers": [{"env": env}]}}))
+    n = len(json.loads((ROOT / "catalog" / "catalog.json").read_text())["items"])
+    (ops.fake / "health.json").write_text(json.dumps({"ok": True, "titles": n, "revision": "hello-watch-00010-stg"}))
+    r = ops("deploy-staging", **({"PRIVATE_PREFIX": prefix} if prefix is not None else {}))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"private titles: {want or '(none)'} ({how})" in r.stdout
+    deploy = [c.split() for c in _calls(ops) if c.startswith("run deploy ")]
+    assert len(deploy) == 1
+    envs = dict(kv.split("=", 1) for kv in deploy[0][deploy[0].index("--set-env-vars") + 1].split(","))
+    assert envs.get("WATCH_PRIVATE_TITLES") == want
+    assert envs["WATCH_PACKS_GCS"] == "gs://bkt/demo-packs"                 # the packs rule, unchanged
 
 
 def test_exit_traps_do_not_read_function_locals():

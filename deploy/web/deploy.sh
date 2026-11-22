@@ -3,7 +3,7 @@
 #   PROJECT=<project> BUCKET=<bucket> [REGION=us-west1] [PACKS_PREFIX=…] [PRIVATE_PREFIX=…] [EXTRA_ENV=…] deploy/web/deploy.sh
 # The environment is computed in full by deploy/web/env.sh (the same as tools/ops/run.sh deploy-staging, without a
 # bench token): packs PACKS_PREFIX, else what the production revision serves now, else demo-packs (first deploy);
-# private titles PRIVATE_PREFIX/titles.json when given.
+# private titles PRIVATE_PREFIX/titles.json, else what the production revision serves now (PRIVATE_PREFIX=none: none).
 # For a revision without traffic (staging, benchmarks) use `tools/ops/run.sh deploy-staging` instead.
 #
 # What it sets up (idempotent):
@@ -38,12 +38,14 @@ else
   PACKS_GCS=$(live_env WATCH_PACKS_GCS)
   PACKS_GCS=${PACKS_GCS:-gs://$BUCKET/demo-packs}
 fi
-PRIVATE_TITLES_GCS=""
-if [ -n "${PRIVATE_PREFIX:-}" ]; then
-  PRIVATE_TITLES_GCS="gs://$BUCKET/${PRIVATE_PREFIX%/}/titles.json"
-fi
+case "${PRIVATE_PREFIX:-}" in
+  "") PRIVATE_TITLES_GCS=$(live_env WATCH_PRIVATE_TITLES)
+      PRIVATE_HOW="inherited from production"; [ -n "$PRIVATE_TITLES_GCS" ] || PRIVATE_HOW="production has none" ;;
+  none) PRIVATE_TITLES_GCS=""; PRIVATE_HOW="PRIVATE_PREFIX=none" ;;
+  *) PRIVATE_TITLES_GCS="gs://$BUCKET/${PRIVATE_PREFIX%/}/titles.json"; PRIVATE_HOW="from PRIVATE_PREFIX" ;;
+esac
 ENV_LINES=$(PACKS_GCS=$PACKS_GCS PRIVATE_TITLES_GCS=$PRIVATE_TITLES_GCS BENCH_TOKEN_VALUE= service_env)
-echo "env: $(env_names "$ENV_LINES") (packs $PACKS_GCS)" >&2
+echo "env: $(env_names "$ENV_LINES") (packs $PACKS_GCS; private titles ${PRIVATE_TITLES_GCS:-none}: $PRIVATE_HOW)" >&2
 
 # 1. service account and its permissions
 gcloud iam service-accounts describe "$SA" --project "$PROJECT" >/dev/null 2>&1 \
