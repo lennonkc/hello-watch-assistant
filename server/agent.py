@@ -57,6 +57,7 @@ class Turn:
     context: object | None = None               # server.context.Context (context flow)
     history: list = dataclasses.field(default_factory=list)   # earlier turns as types.Content (context flow)
     started: float = dataclasses.field(default_factory=time.monotonic)
+    deadline: float = math.inf                  # monotonic time the whole question must be answered by
     max_tool_rounds: int = 2
     soft_deadline_s: float = 9.0
     run_calls: int = 0                          # model calls in the current run (the budget counts these)
@@ -211,7 +212,13 @@ async def look_closer(question: str, tool_context: ToolContext) -> dict:
     """Look at the current frame and the last ~30 seconds of picture before the pause to answer a visual question
     (what is that object, what is happening, what does someone look like). Slower than the other tools: use it when
     they do not answer the question."""
-    m = moment_of(tool_context.state)
+    m, turn = moment_of(tool_context.state), _turn()
+    # the whole tool (stills + the nested call) fits in what is left of the question minus the answer step after it
+    budget = min(config.LOOK_TIMEOUT_S, turn.deadline - time.monotonic() - config.ANSWER_RESERVE_S)
+    if budget < 1.0:
+        _summarise(tool_context, "No time left to look closer")
+        return {"observation": "", "note": "no time left to look closer; answer from what you have"}
+    end = time.monotonic() + budget
     chars = ", ".join(c["label"] for c in m.known_characters()) or "none yet"
     lang = LANG_NAME.get(m.lang, "English")
     text = prompts.render("look_closer", position=ts(m.P), characters=chars, question=question, lang=lang)
@@ -222,8 +229,15 @@ async def look_closer(question: str, tool_context: ToolContext) -> dict:
     # apart), all ≤ floor(P), read concurrently
     step = max(3, math.ceil((win[1] - win[0]) / max(1, config.LOOK_STILLS - 1))) if win else 3
     wanted = [m.fp] + ([] if video or not win else list(range(int(win[1]), int(win[0]) - 1, -step))[::-1])
-    jpegs = await asyncio.to_thread(read_thumbs, m.title, wanted)
+    try:                                        # on-demand stills from a slow bucket: look at less, not later
+        jpegs = await asyncio.wait_for(asyncio.to_thread(read_thumbs, m.title, wanted), budget / 2)
+    except TimeoutError:
+        ctx_frame = getattr(turn.context, "frame", None)
+        jpegs = [ctx_frame] + [None] * (len(wanted) - 1)
     frame, stills = jpegs[0], [(t, b) for t, b in zip(wanted[1:], jpegs[1:]) if b is not None]
+    if frame is None and not stills and not video:
+        _summarise(tool_context, "Could not read the frames in time")
+        return {"observation": "", "note": "the frames could not be read in time; answer from what you have"}
     if video:
         # whole-film clip from Cloud Storage (has audio, but adds tens of seconds of latency)
         parts.append(types.Part(
@@ -239,10 +253,9 @@ async def look_closer(question: str, tool_context: ToolContext) -> dict:
     if frame is not None:
         parts += [types.Part.from_text(text=f"[{ts(m.P)}] current frame"),
                   types.Part.from_bytes(data=frame, mime_type="image/jpeg")]
-    turn = _turn()
     turn.model_calls += 1
     try:
-        r = await asyncio.wait_for(vision_generate(parts), config.LOOK_TIMEOUT_S)
+        r = await asyncio.wait_for(vision_generate(parts), max(0.1, end - time.monotonic()))
     except Exception as e:                                     # noqa: BLE001 — timeout / model error: answer without it
         _summarise(tool_context, "Could not look closer in time")
         return {"observation": "", "note": f"looking closer failed ({type(e).__name__}); answer from what you have"}

@@ -56,6 +56,7 @@ class GuardedAnswer:
         self.buf = ""
         self.text = ""
         self.dropped: list[list[dict]] = []          # guard hits of each dropped sentence
+        self.dropped_text: list[str] = []            # the dropped sentences themselves (server log only)
 
     def feed(self, chunk: str) -> list[str]:
         self.buf += chunk
@@ -81,6 +82,7 @@ class GuardedAnswer:
         hits = self.check(self.text + delta)
         if hits:
             self.dropped.append(hits)
+            self.dropped_text.append(s)
             return None
         self.text += delta
         return delta

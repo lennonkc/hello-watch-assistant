@@ -113,7 +113,7 @@ The response is `text/event-stream` (read it with `fetch` + a stream reader; `Ev
 | `highlight` | `{"bbox": [210, 380, 760, 560], "label": "the young woman", "frame_t": 430}` | The tap matched an entity whose box was measured within 1 s of the paused frame; draw it right away |
 | `delta` | `{"text": " She is looking for her dragon."}` | Next piece of the answer: one sentence that already passed the output guard, with its leading space if any. Append as is |
 | `answer` | see below | Final, guarded answer. Normally `text` equals the concatenation of all `delta` texts; when it differs (text written before a tool call, a fallback) it replaces what was streamed |
-| `error` | `{"message": "…"}` | Something failed before any answer text; show it politely |
+| `error` | `{"message": "…", "request_id": "3f9c0a1b"}` | Something failed before any answer text; show it politely |
 | `done` | `{}` | Stream finished |
 
 Order: `gate`, then the trace (`tool` / `tool_result`, possibly `highlight`), then `delta`s interleaved with further
@@ -132,7 +132,7 @@ Order: `gate`, then the trace (`tool` / `tool_result`, possibly `highlight`), th
  "latency_ms": 4210,
  "usage": {"input_tokens": 2950, "output_tokens": 84, "thought_tokens": 40, "model_calls": 1},
  "timing": {"first_text_ms": 1380, "total_ms": 2210},
- "flow": "context"}
+ "flow": "context", "request_id": "3f9c0a1b"}
 ```
 
 - `highlight.bbox` is `[ymin, xmin, ymax, xmax]` normalised to 0–1000 on frame `frame_t` (≤ `P`, from the shot's
@@ -149,6 +149,7 @@ Order: `gate`, then the trace (`tool` / `tool_result`, possibly `highlight`), th
   answer was regenerated (one retry) or replaced by a fixed reply.
 - `cut_off: true`: the answer ran out of time (or the model failed) partway; the sentences sent are complete and
   guarded, but the answer may be unfinished. The page says so, and the turn is not kept in the conversation.
+- `request_id`: 8 hex characters naming this answer in the server log (every log line of the request carries it).
 - `usage` counts every model call of the question (the nested `look_closer` call included); `output_tokens` includes
   `thought_tokens`. `timing.first_text_ms` is the time to the first `delta`.
 

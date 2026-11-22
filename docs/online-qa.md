@@ -161,27 +161,40 @@ did go out in a call that then called a tool (`leaked_preamble`: a first sentenc
 is guarded, but never counts as the answer: the final `answer` event leaves it out (the browser replaces what was
 streamed), it is not stored in the conversation memory, and if nothing else was written the question gets a fallback
 (`preamble_only` in the log line). An answer cut short (`cut_off`) is not stored either. If nothing survives the guard,
-the question is asked once more, not streamed, with a note listing the terms to avoid; if that fails too, a fixed reply
-is sent — the "can't answer without giving something away" wording only when the guard held something back, the
-neutral "took too long" one otherwise (deadline, tool rounds used up, nothing written). No unguarded text leaves the
-server.
+the question is asked once more, not streamed and without tools, with a note listing the terms to avoid, inside its own
+budget; if that fails too, a fixed reply is sent — the "can't answer without giving something away" wording only when
+the guard held something back, the neutral "took too long" one otherwise (deadline, tool rounds used up, nothing
+written). There is no retry when less than 1.5 s is left, and none for a *spoiler probe* whose draft tripped the guard
+(`declined` in the log line): a second draft of a decline would only arrive later, so the short decline goes out at
+once. No unguarded text leaves the server.
+
+**Spoiler probes** (`context.spoiler_probe`): questions about the ending, what happens next or later, who dies or
+survives, who someone really is, a twist (English and Chinese patterns). The context of such a question carries a note
+that the whole reply is one short sentence saying it hasn't been shown yet (optionally one about what is on screen),
+with nothing connected to the future in it; prompt rule 4 says the same for every question. The log line marks them
+(`probe`), so the rewrite rate of probes can be followed separately.
 
 **Budgets and deadlines** (`server/config.py`, all overridable):
 
 | What | Default | On expiry |
 |---|---|---|
 | Query embedding (`search_moments`) | 1.5 s, one attempt, no retry loop | full-text ranking; embeddings paused for 60 s |
-| `look_closer` nested call | 6 s, the paused frame + at most 8 stills (read concurrently) | the tool returns a note; the model answers without it |
+| `look_closer` (stills + nested call) | 6 s, the paused frame + at most 8 stills (read concurrently, at most half the budget), and never more than what is left of the question minus 3 s for the answer step (`WATCH_ANSWER_RESERVE_S`); with less than 1 s it does not start | the tool returns a note; the model answers without it (slow stills: only the paused frame is looked at) |
+| Paused frame for the context | 1.5 s (`WATCH_FRAME_WAIT_S`; on-demand titles fetch it from the bucket) | the context goes without the image |
 | Model-called tool rounds per question | 1 (3 in the `tools` flow) | function calls are switched off (`FunctionCallingConfig` `NONE`) and the model is told to answer now |
 | Soft deadline | 6 s | same as above |
 | Silence from the agent run | 8 s | the run is stopped |
 | Whole question | 10 s, retry included | the run is stopped; complete sentences stand (a last one that ends with sentence punctuation counts, unless it looks like a preamble), else a "took too long" reply |
+| Guard retry | 4 s (`WATCH_RETRY_TIMEOUT_S`) inside what is left; skipped below 1.5 s (`WATCH_RETRY_MIN_S`) or for a spoiler probe | the fixed reply |
 | Sources after the answer | 0.8 s (`WATCH_SOURCES_TIMEOUT_S`) | the answer is sent without frames, or without sources |
 
-**Observability.** The `answer` event carries `usage` (input / output / thought tokens, model calls) and `timing`
-(time to first text, total). Each question also writes one JSON log line (`ask {…}`) with the flow, P, tools called,
-search mode, usage, timing, sentences dropped and their guard kinds, held preambles, retry, fallback and whether the
-highlight was kept. The log line never contains the question text or the bench token.
+**Observability.** The `answer` event carries `usage` (input / output / thought tokens, model calls), `timing`
+(time to first text, total) and a `request_id` (8 hex characters; also in `error`). Each question also writes one JSON
+log line (`ask {…}`, with the same id as `rid`) with the flow, P, whether it reads as a spoiler probe, tools called,
+search mode, usage, timing, sentences dropped and their guard kinds, held preambles, retry or decline, fallback and
+whether the highlight was kept; every other line written while answering it (guard drops with the dropped draft
+sentence, timeouts, skipped frames or sources) ends in `[rid=…]`. The log never contains the question text or the
+bench token.
 
 **Long films.** Timestamps are `mm:ss`, and `h:mm:ss` from one hour on. Everything about a pack that does not depend on
 P (the gate's candidate list and lookups, dialogue tracks, shots, speakers) is built once per pack and reused, and the
