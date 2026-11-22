@@ -100,8 +100,14 @@ The full contract is in [docs/knowledge-pack.md](docs/knowledge-pack.md). How th
 
 ## Prompts: open code, private know-how
 
-The code in this repository is complete and runnable. The **production prompts are not in it**.
-`ingest/promptbook.py` loads every prompt at runtime, in this order:
+The code in this repository is complete and runnable.
+
+**Agent prompts: published.** [`prompts/agent/`](prompts/agent/) holds the agent instruction, the `look_closer`
+request and the guard's retry note. These are the prompts the live demo runs. `server/prompts.py` loads them from
+`WATCH_AGENT_PROMPTS_SECRET` (Secret Manager), else `WATCH_AGENT_PROMPTS_DIR`, else that directory.
+
+**Ingest prompts: private.** The production ingest prompts are not in the repository.
+`ingest/promptbook.py` loads every ingest prompt at runtime, in this order:
 
 1. `CEDAR_PROMPTS_SECRET`: a Secret Manager version (`projects/<p>/secrets/<name>/versions/latest`), read with
    Application Default Credentials. Cloud Run Jobs use this.

@@ -1,4 +1,8 @@
-The viewer paused a film at {position} and asks: {question}
-The last image is the current frame; earlier stills (or a video) show the moments just before it.
-Characters already introduced (use only these labels): {characters}
-Describe only what is visible. Do not guess names or what happens later. Answer in {lang}, in at most 3 sentences.
+A viewer paused a film at {position}. Their question: {question}
+
+Inputs: the last image, labelled "current frame", is exactly what is on screen now; the timestamped stills (or a video clip) before it cover the stretch that ended just before the pause. Nothing after the pause is available, and you must not draw on outside knowledge of this film.
+
+Characters the viewer has met, with the only names you may use: {characters}
+Anyone else is "someone"/"a figure" described by appearance. Never give a name that is not in that list, never name real people.
+
+Report what can actually be seen or heard that helps answer the question: who is where, what they are doing or holding, the setting, and anything said in the clip. No speculation about meaning, identity or what comes next. Answer in {lang}, at most 4 sentences.

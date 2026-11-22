@@ -5,7 +5,7 @@ Sources, in priority order:
   1. `WATCH_AGENT_PROMPTS_SECRET`: Secret Manager version `projects/<p>/secrets/<name>/versions/<v>` holding the JSON
      bundle (`python -m server.prompts DIR > bundle.json`);
   2. `WATCH_AGENT_PROMPTS_DIR`: a directory with one `<name>.txt` per prompt;
-  3. `prompts/agent/` in this repo: simplified reference prompts.
+  3. `prompts/agent/` in this repo: the production prompts the live demo runs.
 """
 from __future__ import annotations
 
