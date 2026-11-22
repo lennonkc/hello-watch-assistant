@@ -551,7 +551,7 @@ strong { font-weight: 700; }
 <section class="slide tight" data-n="8">
   <div class="head">
     <p class="eyebrow">The agent</p>
-    <h2 class="h1">Server-built context, one Gemini call, and no way to move P.</h2>
+    <h2 class="h1">One Gemini call, and no way to move P.</h2>
   </div>
   <div class="grid" style="grid-template-columns: 1.2fr 1fr; gap: 40px; flex: 1">
     <div class="tools">
@@ -614,7 +614,7 @@ strong { font-weight: 700; }
     <div class="stat"><span class="v">10<small> / 10</small></span><p>speaker attributions correct in spot checks</p></div>
     <div class="stat"><span class="v">12<small> / 12</small></span><p>character identities correct in shot entities</p></div>
     <div class="stat"><span class="v">~85<small> %</small></span><p>shot captions fully correct in spot checks</p></div>
-    <!-- results: round 3; the final run's numbers go here --><div class="stat"><span class="v">2.2<small> s</small></span><p>server time to a full answer, p50 (p90 3.9 s), 1.15 model calls per answer (benchmark round 3)</p></div>
+    <div class="stat"><span class="v">2.1<small> s</small></span><p>server time to a full answer, p50 (p90 3.2 s), 1.01 model calls per answer (final benchmark run, 240 generated cases)</p></div>
     <div class="stat"><span class="v">≈ $8</span><p>total Gemini cost to ingest all three films, re-runs included</p></div>
   </div>
   <p class="note">Spot checks on Sintel unless noted. Retrieval: 20 questions × 2 pause positions, scored by top-3 time overlap. Films: Sintel, Tears of Steel, Elephants Dream (Blender Foundation, CC BY).</p>

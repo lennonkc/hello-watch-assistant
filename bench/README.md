@@ -27,27 +27,46 @@ does not accept it).
 
 ## Results
 
-<!-- results:start round 3; replace this block with the final run's numbers (same layout) -->
-**Round 3, 2026-11-22: one staged Cloud Run revision, both answer flows asked on the same revision (the commit
-before the tools flow was removed).** Films: the three public short films (11–15 min) and a private preview title
-(169 min). Grading: an LLM judge (Gemini) on the answer text, plus a rule gate over everything the viewer received
-(definitions below, under Grading).
+<!-- results:start final run (round 5) -->
+**Final run (round 5), 2026-11-22: the shipped code on one staged Cloud Run revision.** Films: the three public short
+films (11–15 min) and a private preview title (169 min). Grading: an LLM judge (Gemini) on the answer text, plus a
+rule gate over everything the viewer received (definitions below, under Grading). The earlier tool-calling flow was
+measured in round 3, on the last commit that still had it, with the same cases and packs.
 
 Hand-written cases (97, three public films):
 
-| | Shipped flow: server-built context, one model call (a tool round only when needed) | Earlier tool-calling flow (measured on the commit before its removal) |
+| | Shipped flow: server-built context, one model call (a tool round only when needed) | Earlier tool-calling flow (round 3, the commit before its removal) |
 |---|---|---|
-| accuracy (LLM judge) | 91.9 % (n 62) | 89.5 % |
-| cases with a rule-gate leak | 0 of 97 | 1 of 97 |
-| fallback answers (a fixed non-answer), share of answers | 1.0 % | 8.2 % |
-| server latency p50 / p90 | 2.2 s / 3.9 s | 4.1 s / 8.2 s |
-| model calls per answer | 1.15 | 2.42 |
-| estimated cost per answer (list prices) | $0.00195 | $0.00251 |
+| accuracy (LLM judge) | 91.9 % (n 62) | 89.5 % (n 62) |
+| cases flagged by the rule gate | 1 of 97 (see below) | 1 of 97 |
+| cases flagged by the judge only | 0 of 97 | 0 of 97 |
+| fallback answers (a fixed non-answer), share of answers | 1.1 % (n 95) | 8.2 % (n 97) |
+| server latency p50 / p90 | 2.2 s / 4.3 s (n 95) | 4.1 s / 8.2 s (n 97) |
+| server time to the first words, p50 | 1.9 s (n 95) | 4.1 s (n 97) |
+| model calls per answer | 1.09 | 2.42 |
+| estimated cost per answer (list prices) | $0.00193 | $0.00251 |
 
-_To fill from the final run: n for every row that has none here._
+Two of the 97 cases got no answer because the benchmark host's connection timed out; they count as non-answers and
+are left out of the latency rows (n 95).
 
-Generated cases (240 over the four films, `gen_cases.py`, shipped flow): accuracy 96.0 % (n 136); 0 cases with a
-rule-gate leak; 1 case flagged by the judge only.
+The one rule-gate flag of the shipped flow is a wrong identification, not a look ahead: asked who a dragon hatchling
+is, the answer gave the name of the dragon the viewer already knows. The judge marked it incorrect; it states nothing
+that the film had not shown.
+
+Generated cases (240 over the four films, `gen_cases.py`, shipped flow): accuracy 95.6 % (n 136); 0 of 240 flagged by
+the rule gate; 2 of 240 flagged by the judge only (0.8 %); fallback answers 1.2 % (n 240); server latency p50 / p90
+2.1 s / 3.2 s (n 240); 1.01 model calls per answer.
+
+Known weak spots in this run:
+
+- Both judge-only flags concern an identity: a character named a moment before the film confirms who they are (one
+  case sits less than a second before the reveal), and a recap that names the person a character is about to meet.
+- About 1 % of answers are the fixed "that took too long" text: the first model call produced nothing within its 8 s
+  budget. There is no second, parallel call yet.
+- After the guard drops a sentence, the rest can read badly: one Chinese dialogue answer was reduced to a closing
+  bracket.
+- Chinese answers show a source line less often than English ones (75 % against 93 % on the generated set).
+- "Who is this?" without a tap is the weakest question type on the generated set (86.8 %, n 19).
 <!-- results:end -->
 
 What these numbers do not cover:

@@ -130,9 +130,9 @@ Each prompt's placeholders are validated on load, so a broken secret fails fast 
 
 ## Results on the demo films
 
-<!-- results:start round 3; replace these three lines with the final run's numbers -->
-- **Benchmark** (round 3, one staged revision; an LLM judge plus a rule gate): 97 hand-written cases on the three public films give 91.9 % accuracy (n 62) and 0 cases with a rule-gate leak. 240 generated cases over four films, the public three plus a private preview title (169 min), give 96.0 % (n 136) and 0 rule-gate leaks.
-- Server latency p50 / p90 is 2.2 s / 3.9 s, with 1.15 model calls and about $0.002 per answer. The earlier tool-calling flow, measured on the same revision before it was removed: 89.5 %, 1 leak, 4.1 s / 8.2 s, 2.42 calls.
+<!-- results:start final run (round 5) -->
+- **Benchmark** (final run on the shipped code, one staged revision; an LLM judge plus a rule gate): 97 hand-written cases on the three public films give 91.9 % accuracy (n 62); the rule gate flagged 1 case, a wrong identification that states no future fact. 240 generated cases over four films, the public three plus a private preview title (169 min), give 95.6 % (n 136) with 0 rule-gate leaks and 2 cases flagged by the judge only.
+- Server latency p50 / p90 is 2.2 s / 4.3 s on the hand-written set (n 95) and 2.1 s / 3.2 s on the generated set (n 240), with 1.09 model calls and about $0.002 per answer. The earlier tool-calling flow, measured in round 3 before it was removed: 89.5 % (n 62), 1 rule-gate leak, 4.1 s / 8.2 s, 2.42 calls.
 - Sample sizes, definitions and what the benchmark does not cover: [bench/README.md](bench/README.md#results).
 <!-- results:end -->
 

@@ -15,7 +15,7 @@ export const SERVICES = [
   { id: 'platform', name: 'Gemini Enterprise Agent Platform', family: 'gemini', group: 'Agents',
     role: 'Serves Gemini with project IAM; reads video straight from gs://.' },
   { id: 'adk', name: 'Agent Development Kit (ADK)', family: 'gemini', group: 'Agents',
-    role: 'The online LlmAgent and its gate-aware tools.' },
+    role: 'The online agent: one model call per question, with two gate-bounded tools.' },
   { id: 'run', name: 'Cloud Run service', family: 'run', group: 'Compute',
     role: 'Hosts the web app, the spoiler gate, the agent and the output guards.' },
   { id: 'jobs', name: 'Cloud Run Jobs', family: 'run', group: 'Compute',
@@ -281,7 +281,14 @@ export const TOURS = {
 // One entry per headline answer metric of the final run, for example
 //   { value: '…', unit: '%', label: 'answers judged correct (hand-written set, n …)' },
 // While empty, the page shows only the retrieval checks below and the link to the scorecard.
-export const ANSWER_RESULTS = [];
+export const ANSWER_RESULTS = [
+  { value: '91.9', unit: '%', label: 'answers judged correct (97 hand-written cases, n 62)' },
+  { value: '95.6', unit: '%', label: 'answers judged correct (240 generated cases over four films, n 136)' },
+  { value: '0', unit: '/ 240', label: 'generated cases with a rule-gate leak (2 flagged by the LLM judge only)' },
+  { value: '2.1', unit: 's', label: 'server time to a full answer, p50 (p90 3.2 s, generated cases)' },
+  { value: '1.01', unit: '', label: 'model calls per answer (generated cases)' },
+  { value: '≈ $0.002', unit: '', label: 'estimated Gemini cost per answer' },
+];
 
 export const RESULTS = [
   { value: '0', unit: '/ 120', label: 'gate violations in checked retrieval results' },
