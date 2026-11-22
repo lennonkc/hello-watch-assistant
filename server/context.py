@@ -134,7 +134,8 @@ def _dialogue(m: Moment) -> tuple[list[dict], str]:
     if not lines:
         lines = m.recent_dialogue(DIALOGUE_S, at_least=DIALOGUE_FALLBACK)
         head = ("Nothing was said in the last minute. THE LAST LINES BEFORE THAT (oldest first):" if lines
-                else "LAST LINES SPOKEN: nothing has been said yet.")
+                else "LAST LINES SPOKEN: nothing has been said yet." if m.has_subtitles
+                else "LAST LINES SPOKEN: not available — this film has no subtitle track, so what was said is unknown.")
     lines = lines[-DIALOGUE_MAX:]
     return lines, "\n".join([head] + [f"[{ln['at']}] {ln['speaker']}: \"{ln['text']}\"" for ln in lines])
 
@@ -168,9 +169,7 @@ def build(m: Moment, tap: dict | None, turn: A.Turn) -> Context:
     """Run the three lookups (bookkeeping into `turn` exactly as the tools do) and render the context. Blocking (pack
     reads, thumbnails that may come from Cloud Storage): the server calls it in a worker thread."""
     pos = ts(m.P)
-    phase = {"story": "during the story", "before_story": "before the story has started",
-             "credits": "the end credits are rolling; the story is over"}[m.phase]
-    sections = [f"SERVER CONTEXT for this question. It covers only what the viewer has seen up to {pos} ({phase}); "
+    sections = [f"SERVER CONTEXT for this question. It covers only what the viewer has seen up to {pos} ({m.phase_words}); "
                 f"nothing after {pos} exists for you."]
 
     screen = m.on_screen(tap, refs=True)

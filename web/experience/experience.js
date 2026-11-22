@@ -1137,7 +1137,12 @@ class Turn {
     const timing = t.first_text_ms != null && t.first_text_ms < total - 150
       ? `first words ${(t.first_text_ms / 1000).toFixed(1)} s · done ${(total / 1000).toFixed(1)} s`
       : `${(total / 1000).toFixed(1)} s`;
+    if (a.cut_off) this.card.classList.add('is-cut');
     this.card.append(h('div', { class: 'xp-answer__foot' }, guardEl,
+      a.cut_off ? h('span', {
+        class: 'xp-badge xp-badge--rewrite', title: 'The answer ran out of time; the sentences shown are complete and checked',
+        html: `${icon('clock')}<span>Cut short</span>`,
+      }) : null,
       total != null ? h('span', { class: 'xp-badge', html: `${icon('clock')}<span>${timing}</span>` }) : null));
   }
 

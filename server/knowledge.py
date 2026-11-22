@@ -49,6 +49,11 @@ def secs(stamp: str) -> float:
     return out
 
 
+def name_usable(known_at: float | None, P: float, m: dict) -> bool:
+    """The one name-visibility rule (spec §6): usable once `known_at` plus the reviewed-reveal margin is behind P."""
+    return known_at is not None and known_at + m["gate_margin_reviewed_reveal_s"] <= P + EPS
+
+
 def long_enough(text: str | None) -> bool:
     if not text:
         return False
@@ -84,6 +89,17 @@ def _index(pack: dict) -> dict:
     }
 
 
+def _norm_map(text: str) -> tuple[str, list[int]]:
+    """The case-preserving normalised text, character by character, with the index in `text` of every normalised
+    character (accent marks normalise to nothing; a ligature to several characters)."""
+    parts, where = [], []
+    for i, ch in enumerate(text):
+        n = normalize(ch, True)
+        parts.append(n)
+        where += [i] * len(n)
+    return "".join(parts), where
+
+
 class Moment:
     def __init__(self, title: Title, P: float, lang: str = "en"):
         self.title, self.P, self.lang = title, float(P), lang
@@ -105,6 +121,15 @@ class Moment:
             return "credits"
         return "story"
 
+    @property
+    def has_subtitles(self) -> bool:
+        return self.ix["track"] is not None
+
+    @property
+    def phase_words(self) -> str:
+        return {"story": "during the story", "before_story": "before the story has started",
+                "credits": "the end credits are rolling; the story is over"}[self.phase]
+
     @functools.cached_property
     def eligible(self) -> list[retrieval.Item]:
         return self.gate.eligible()
@@ -112,9 +137,12 @@ class Moment:
     def char_ok(self, cid: str | None) -> bool:
         return bool(cid) and self.gate.char_from(cid) <= self.P + EPS
 
+    def visible(self, known_at: float | None) -> bool:
+        """§6: a name or alias known from `known_at` may be used at P (after the reviewed-reveal margin)."""
+        return name_usable(known_at, self.P, self.m)
+
     def name_visible(self, c: dict) -> bool:
-        k = c.get("name_known_at_s")
-        return bool(c["name_public"]) or (k is not None and k + self.m["gate_margin_reviewed_reveal_s"] <= self.P + EPS)
+        return bool(c["name_public"]) or self.visible(c.get("name_known_at_s"))
 
     def label(self, cid: str, lang: str | None = None) -> str:
         """§6 at P: the name once it is visible, otherwise the pre-name label."""
@@ -137,10 +165,9 @@ class Moment:
     def _hidden_names(self) -> list[tuple[str, bool, re.Pattern, str, str]]:
         """(term, case_sensitive, pattern on case-preserving normalised text, label en, label zh) for every name /
         alias that is not visible at P; longest first so "Bob Smith" is replaced before "Bob"."""
-        mr = self.m["gate_margin_reviewed_reveal_s"]
         out = []
         for cid, term, known_at, cs in name_terms(self.pack):
-            if cid not in self.chars or self.P + EPS >= known_at + mr:
+            if cid not in self.chars or self.visible(known_at):
                 continue
             en, zh = self.label(cid, "en"), self.label(cid, "zh")
             t = normalize(term, True)
@@ -149,25 +176,46 @@ class Moment:
             out.append((term, bool(cs), re.compile(word_pattern(t), 0 if cs else re.IGNORECASE), en, zh))
         return sorted(out, key=lambda x: -len(x[0]))
 
+    @functools.cached_property
+    def _visible_names(self) -> list[re.Pattern]:
+        """Patterns for every name / non-generic alias visible at P: a hidden name inside a longer visible one ("Bob"
+        in "Mary Bob") is left alone."""
+        out = []
+        for c in self.chars.values():
+            if self.name_visible(c):
+                out += [n for n in (c["canonical_name"], c.get("name_zh")) if n]
+        out += [a["alias"] for als in self.ix["aliases"].values() for a in als
+                if not a["generic"] and self.visible(a["alias_known_at_s"])]
+        from ingest.derive import name_case_sensitive
+        return [re.compile(word_pattern(normalize(n, True)), 0 if name_case_sensitive(n) else re.IGNORECASE) for n in out]
+
     def sanitize(self, text: str | None) -> str | None:
-        """Replace not-yet-visible names / aliases with the character's label at P (whole words; CJK as substrings)."""
+        """Replace not-yet-visible names / aliases with the character's label at P (whole words; CJK as substrings),
+        in the label's language of the surrounding text. Only the matched spans change: the rest of the text is
+        returned exactly as given (accents, Traditional characters); the longest name wins."""
         if not text:
             return text
         hidden = [h for h in self._hidden_names if term_matches(h[0], text, "word", h[1])]
         if not hidden:
             return text
-        zh = has_cjk(text)                                   # the label in the language of the surrounding text
-        s = normalize(text, True)
-
-        def sub(label: str):
-            def f(mo: re.Match) -> str:
-                start = _SENTENCE_START.search(mo.string[:mo.start()]) is not None
-                return label[:1].upper() + label[1:] if start and label[:1].isalpha() else label
-            return f
-
-        for _term, _cs, pat, en, zh_label in hidden:
-            s = pat.sub(sub(zh_label if zh else en), s)
-        return s
+        zh = has_cjk(text)
+        norm, where = _norm_map(text)
+        keep = [mo.span() for pat in self._visible_names for mo in pat.finditer(norm)]
+        spans: list[tuple[int, int, str]] = []
+        for _term, _cs, pat, en, zh_label in hidden:                  # longest first
+            for mo in pat.finditer(norm):
+                s, e = mo.span()
+                if e <= s or any(vs <= s and e <= ve and ve - vs > e - s for vs, ve in keep):
+                    continue
+                if not any(s < pe and ps < e for ps, pe, _ in spans):
+                    spans.append((s, e, zh_label if zh else en))
+        out = text
+        for s, e, label in sorted(spans, reverse=True):
+            a, b = where[s], where[e - 1] + 1
+            if _SENTENCE_START.search(text[:a]) and label[:1].isalpha():
+                label = label[:1].upper() + label[1:]
+            out = out[:a] + label + out[b:]
+        return out
 
     # ── long-range memory: latest recap + what happened after it ────
 
@@ -340,9 +388,8 @@ class Moment:
             terms = [self.label(rid, "en"), self.label(rid, "zh")]
             if self.name_visible(c):
                 terms += [c["canonical_name"], c.get("name_zh")]
-            mr = self.m["gate_margin_reviewed_reveal_s"]
-            terms += [a["alias"] for a in self.pack.get("character_aliases", [])
-                      if a["character_id"] == rid and not a["generic"] and a["alias_known_at_s"] + mr <= self.P + EPS]
+            terms += [a["alias"] for a in self.ix["aliases"].get(rid, [])
+                      if not a["generic"] and self.visible(a["alias_known_at_s"])]
         else:
             o = next((o for o in self.pack.get("objects", []) if o["object_id"] == rid), None)
             terms = [self.sanitize(o["name_en"]), o.get("name_zh")] if o else []

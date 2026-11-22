@@ -74,6 +74,14 @@ def term_matches(term: str, text: str, match: str = "word", case_sensitive: bool
     return bool(_compile(term, match, bool(case_sensitive)).search(normalize(text, bool(case_sensitive))))
 
 
+def term_search(term: str, text: str, match: str = "word", case_sensitive: bool = False) -> str | None:
+    """Like `term_matches`, but returns the matched text (normalised), or None."""
+    if not text or not term:
+        return None
+    mo = _compile(term, match, bool(case_sensitive)).search(normalize(text, bool(case_sensitive)))
+    return mo.group(0) if mo else None
+
+
 def tokens(term: str) -> list[str]:
     """Tokens of a name / alias / canary (Latin ≥3 chars; CJK runs), for the id-opacity check. Regex metacharacters are stripped first."""
     t = normalize(re.sub(r"\\[a-zA-Z]|[\^$.*+?()\[\]{}|\\]", " ", term))

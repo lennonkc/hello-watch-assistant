@@ -86,7 +86,7 @@ def test_everyday_question_needs_one_model_call(wired):
 def test_throwaway_sessions_are_deleted(wired):
     wired.ctx.script = [{"text": "Fine."}]
     wired.ask(30.0, session_id="s-del")
-    assert not main.session_service.sessions.get(main.APP_NAME, {}).get("s-del:mini")
+    assert "s-del:mini" not in main.session_service.sessions.get(main.APP_NAME, {})     # no empty per-user entry
 
 
 def test_violating_sentence_never_leaves_the_server(wired):

@@ -296,6 +296,7 @@ class Conversations:
             old_key, old = self.map.popitem(last=False)
             with contextlib.suppress(Exception):
                 await session_service.delete_session(app_name=APP_NAME, user_id=old_key, session_id=old["sid"])
+            _forget_user(old_key)
         return cur["sid"]
 
 
@@ -493,7 +494,8 @@ async def _run(runner: Runner, user: str, sid: str, text: str, emit, turn: A.Tur
 
 
 def _retry_note(hits: list[dict]) -> str:
-    terms = list(dict.fromkeys(readable(h["term"]) for h in hits))
+    """The words to avoid: what was actually written for a regex canary, not every alternative of the pattern."""
+    terms = list(dict.fromkeys(h.get("match") or readable(h["term"]) for h in hits))
     return prompts.render("guard_retry", terms=", ".join(terms)) if terms else ""
 
 
@@ -505,6 +507,15 @@ async def _throwaway(runner: Runner, user: str, state: dict, text: str, emit, tu
     finally:
         with contextlib.suppress(Exception):
             await session_service.delete_session(app_name=APP_NAME, user_id=user, session_id=s.id)
+        _forget_user(user)
+
+
+def _forget_user(user: str) -> None:
+    """Deleting a session leaves an empty per-user entry in the in-memory service: drop it."""
+    for table in (getattr(session_service, "sessions", {}), getattr(session_service, "user_state", {})):
+        users = table.get(APP_NAME, {})
+        if user in users and not users[user]:
+            del users[user]
 
 
 class AskFailed(Exception):
@@ -564,8 +575,9 @@ async def flow_context(t, body: Ask, p: float, user: str, state: dict, emit, tur
         rec["preamble_only"] = bool(sink.preamble)
         await sink.send_final((TIMEOUT_FALLBACK if rec["fallback"] == "timeout" else FALLBACK)[body.lang])
         text = sink.answer_text()
-    else:
+    elif body.session_id:                              # a question without a session has no conversation to keep
         HISTORY.add(user, p, question, text)
+    rec["cut_off"] = rec["cut_off"] or (status in ("timeout", "error") and not rec["fallback"])
     rec["dropped"] = len(answer.dropped)
     return {"text": text, "terms": ctx.tapped_terms, "links": links,
             "rewritten": bool(answer.dropped or rec["retried"] or rec["fallback"] or sink.preamble)}
@@ -577,17 +589,22 @@ async def flow_tools(t, body: Ask, p: float, user: str, state: dict, emit, turn:
     m = A.moment_of(state)
     subjects = await asyncio.to_thread(lambda: C.focus(m, m.on_screen(state["tap"], refs=True)))
     check, links = await asyncio.to_thread(_checker, t, m, p, subjects, body.question, turn)
-    sid = await CONVERSATIONS.get(user, p)
-    text, status = await _run(runner, user, sid, question, emit, turn, deadline, None, False, state)
+    anon = not body.session_id                         # no conversation to keep: a session that is deleted after
+
+    async def run(text: str, fresh: bool = False) -> tuple[str, str]:
+        if anon:
+            return await _throwaway(runner, user, state, text, emit, turn, deadline, None, False)
+        sid = await CONVERSATIONS.get(user, p, fresh=fresh)
+        return await _run(runner, user, sid, text, emit, turn, deadline, None, False, state)
+
+    text, status = await run(question)
     hits, rewritten = check(text), False
     if (hits or not text) and status in ("ok", "limit"):
         # the bad draft must not stay in the conversation: retry in a fresh session
         rewritten, rec["retried"] = True, True
         log.warning("guard hit at p=%.1f: %s", p, [h["kind"] for h in hits])
         rec["dropped_kinds"] = sorted({h["kind"] for h in hits})
-        sid = await CONVERSATIONS.get(user, p, fresh=True)
-        text, status = await _run(runner, user, sid, f"{question}\n\n{_retry_note(hits)}".strip(), emit, turn,
-                                  deadline, None, False, state)
+        text, status = await run(f"{question}\n\n{_retry_note(hits)}".strip(), fresh=True)
     rec["status"] = status
     if not text and status == "error":
         raise AskFailed
@@ -595,7 +612,8 @@ async def flow_tools(t, body: Ask, p: float, user: str, state: dict, emit, turn:
         rewritten = True
         rec["fallback"] = "timeout" if status == "timeout" else "spoiler"
         text = (TIMEOUT_FALLBACK if status == "timeout" else FALLBACK)[body.lang]
-        await CONVERSATIONS.get(user, p, fresh=True)
+        if not anon:
+            await CONVERSATIONS.get(user, p, fresh=True)
     rec["first_text_ms"] = int((time.monotonic() - rec["t0"]) * 1000)
     await emit("delta", {"text": text})
     terms = await asyncio.to_thread(C.tapped_terms, A.moment_of(state), state["tap"])
@@ -643,6 +661,7 @@ async def ask(body: Ask, request: Request):
             await emit("answer", {"text": out["text"], "evidence": evidence, "frames": frames,
                                   "highlight": highlight,
                                   "guard": {"checked": True, "rewritten": out["rewritten"], "dropped": rec["dropped"]},
+                                  "cut_off": bool(rec["cut_off"]),
                                   "latency_ms": total, "usage": turn.usage(),
                                   "timing": {"first_text_ms": rec["first_text_ms"], "total_ms": total}, "flow": flow})
         except Exception as e:                                     # noqa: BLE001 — report, never leak internals

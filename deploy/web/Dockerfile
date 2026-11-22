@@ -1,7 +1,7 @@
 # Online Q&A service image (Cloud Run): FastAPI + ADK agent + static web front end.
 # Build context = repository root (deploy/web/deploy.sh packs the committed code with git archive).
-# Knowledge packs and prompts are NOT in the image: packs are pulled from Cloud Storage at startup, prompts come from
-# Secret Manager.
+# Knowledge packs are NOT in the image: they are pulled from Cloud Storage at startup. The agent prompts are: the
+# published prompts/agent/ is copied in and is what the service runs (an optional secret can still override it).
 FROM python:3.13-slim
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 WORKDIR /app

@@ -211,8 +211,11 @@ async def recent_dialogue(seconds: int, tool_context: ToolContext) -> dict:
     further back; at most 240), with who said each line when known."""
     m = moment_of(tool_context.state)
     lines = await asyncio.to_thread(m.recent_dialogue, min(max(int(seconds or 60), 10), 240))
-    _summarise(tool_context, note_dialogue(_turn(), lines))
-    return {"lines": [{k: v for k, v in ln.items() if k != "t"} for ln in lines]}
+    _summarise(tool_context, note_dialogue(_turn(), lines) if m.has_subtitles else "No subtitles for this film")
+    out = {"lines": [{k: v for k, v in ln.items() if k != "t"} for ln in lines]}
+    if not m.has_subtitles:
+        out["note"] = "This film has no subtitle track: what was said is not available."
+    return out
 
 
 async def on_screen(tool_context: ToolContext) -> dict:
@@ -341,23 +344,18 @@ def _characters(m: Moment) -> str:
                      for c in m.known_characters()) or "- (nobody yet)"
 
 
-def _phase(m: Moment) -> str:
-    return {"story": "during the story", "before_story": "before the story starts",
-            "credits": "during the end credits"}[m.phase]
-
-
 def instruction(ctx: ReadonlyContext) -> str:
     state = ctx.state
     m = moment_of(state)
     tap = ("The viewer tapped a point on the paused frame: call on_screen first to see who or what they mean."
            if state.get("tap") else "")
-    return prompts.render("agent_instruction", title=m.title.title, position=ts(m.P), phase=_phase(m),
+    return prompts.render("agent_instruction", title=m.title.title, position=ts(m.P), phase=m.phase_words,
                           lang=LANG_NAME.get(m.lang, "English"), characters=_characters(m), tap=tap)
 
 
 def context_instruction(ctx: ReadonlyContext) -> str:
     m = moment_of(ctx.state)
-    return prompts.render("agent_context", title=m.title.title, position=ts(m.P), phase=_phase(m),
+    return prompts.render("agent_context", title=m.title.title, position=ts(m.P), phase=m.phase_words,
                           lang=LANG_NAME.get(m.lang, "English"), characters=_characters(m))
 
 
