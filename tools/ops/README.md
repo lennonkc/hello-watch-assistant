@@ -18,5 +18,10 @@ Settings: the runner's git-ignored `.cache/ops.env` (`HOME`, `HELLO_WATCH_GEMINI
 with their defaults). Project, bucket, packs prefix and URLs are discovered from `gcloud` and from the service's own
 environment at run time. Secrets (the Gemini key, the bench token) are never printed.
 
+Python: the `.venv` is built with 3.13 (what the image runs), else 3.12, else 3.14, else a uv-managed 3.13; never
+3.15+. Packages are installed as wheels only (`--only-binary=:all:`), so a missing wheel fails at once with its name.
+Job logs stay short: listings are summarised and capped, full tool output goes to `.cache/ops-logs/`, and the bench
+prints the scorecard summary and failing case ids (the full scorecard stays in `.cache/bench/runs/<run>/`).
+
 `deploy/web/deploy.sh` is the full production deploy (service account, IAM, 100 % traffic); the agent prompts ship in
 the image (`prompts/agent/`).
