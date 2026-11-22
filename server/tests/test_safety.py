@@ -135,10 +135,9 @@ def test_preamble_is_left_out_of_the_final_text(wired):
 def test_deadline_keeps_a_finished_last_sentence(wired, monkeypatch):
     from server import config
     monkeypatch.setattr(config, "ASK_DEADLINE_S", 0.5)
-    wired.ctx.script = [{"text": ["That is the wolf.", " It is grey."], "gap": 2}]
-    t0 = time.monotonic()
+    wired.ctx.script = [{"text": ["That is the wolf.", " It is grey."], "gap": 10}]
     ev = wired.ask(61.2, tap=TAP_WOLF)
-    assert time.monotonic() - t0 < 1.5
+    assert answer(ev)["timing"]["total_ms"] < 5000          # server time: the 0.5 s deadline, not the 10 s gap
     assert sent(ev) == "That is the wolf." and answer(ev)["text"] == "That is the wolf."
 
 
@@ -514,13 +513,13 @@ def test_slow_or_failing_sources_never_cost_the_answer(wired, monkeypatch):
     real = type(title).prefetch
 
     def slow(self, ts_):
-        time.sleep(1.5)
+        time.sleep(3)
         return real(self, ts_)
     monkeypatch.setattr(type(title), "prefetch", slow)
     wired.ctx.script = [{"text": "Alice met the boy in a meadow."}]
     ev = wired.ask(70.0, "What happened?")
     a = answer(ev)
-    assert a["timing"]["total_ms"] - a["timing"]["first_text_ms"] < 900      # the 1.5 s fetch is not waited for
+    assert a["timing"]["total_ms"] - a["timing"]["first_text_ms"] < 2000     # the 3 s fetch is not waited for
     assert a["text"] == "Alice met the boy in a meadow." and a["frames"] == [] and a["evidence"]
 
     def boom(*_a, **_k):

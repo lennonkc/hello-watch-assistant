@@ -141,10 +141,10 @@ def test_text_before_a_tool_call_is_held_back(wired, caplog):
 
 def test_deadline_gives_a_timely_fallback(wired, monkeypatch):
     monkeypatch.setattr(config, "STEP_TIMEOUT_S", 0.3)
-    wired.ctx.script = [{"text": "Too slow.", "sleep": 3}]
-    t0 = time.monotonic()
+    wired.ctx.script = [{"text": "Too slow.", "sleep": 10}]
     ev = wired.ask(30.0)
-    assert time.monotonic() - t0 < 2.0
+    # server time, with a wide margin: stopped after the 0.3 s step timeout, nowhere near the model's 10 s
+    assert answer(ev)["timing"]["total_ms"] < 5000
     assert sent_text(ev) == main.TIMEOUT_FALLBACK["en"] and kinds(ev)[-2:] == ["answer", "done"]
 
 
@@ -295,7 +295,7 @@ def test_online_embedder_times_out_fails_over_and_caches(monkeypatch):
     async def run():
         e = OnlineEmbedder(timeout_s=0.1, cooldown_s=60, embed=slow)
         t0 = time.monotonic()
-        assert await e.vector("q") is None and time.monotonic() - t0 < 1
+        assert await e.vector("q") is None and time.monotonic() - t0 < 3       # 0.1 s timeout vs a 5 s call
         e._embed = ok
         assert await e.vector("q") is None and not calls                  # cooling down: no call at all
         e2 = OnlineEmbedder(embed=boom)
