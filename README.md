@@ -119,6 +119,12 @@ Each prompt's placeholders are validated on load, so a broken secret fails fast 
 
 ## Results on the demo films
 
+<!-- results:start round 3; replace these three lines with the final run's numbers -->
+- **Benchmark** (round 3, one staged revision; an LLM judge plus a rule gate): 97 hand-written cases on the three public films give 91.9 % accuracy (n 62) and 0 cases with a rule-gate leak. 240 generated cases over four films, the public three plus a private preview title (169 min), give 96.0 % (n 136) and 0 rule-gate leaks.
+- Server latency p50 / p90 is 2.2 s / 3.9 s, with 1.15 model calls and about $0.002 per answer. The earlier tool-calling flow on the same revision: 89.5 %, 1 leak, 4.1 s / 8.2 s, 2.42 calls.
+- Sample sizes, definitions and what the benchmark does not cover: [bench/README.md](bench/README.md#results).
+<!-- results:end -->
+
 All three films are processed end to end with the v1.1 pipeline:
 
 | Film | Shot captions / entities | Speaker-attributed dialogue lines | Recaps | Video windows | Embeddings |
