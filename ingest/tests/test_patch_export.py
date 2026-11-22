@@ -1,12 +1,13 @@
 """Review patch semantics, master / device export, versioning and idempotency."""
+import copy
 import json
 
 import pytest
 from PIL import Image
 
-from ingest import build, util
+from ingest import build, packdb, util
 from ingest.patch import PatchError, apply_patch
-from ingest.tests.conftest import SHA
+from ingest.tests.conftest import SHA, mini_pack
 
 
 def patch(reviewer, *ops):
@@ -190,3 +191,29 @@ def test_review_ui_patch_shape_applies(pack):
     assert any(r["item_type"] == "identity_link" and r["spoiler_critical"] == 1 and r["seconds_spent"] == 1.2
                for r in out["review_log"])
     assert any(k["term"] == "狼人" for k in out["canaries"])
+
+
+def test_device_views_drop_exemplars_of_removed_looks_and_unlink_recaps_of_removed_scenes(tmp_path):
+    """The two device clean-ups: an exemplar whose look is gone goes too; a recap whose upto scene is gone stays,
+    without the link. Both distributions then pass the db's foreign-key check."""
+    from ingest.build import AUTO_OK, device_view
+    p = copy.deepcopy(mini_pack())
+    p["character_looks"][0]["review_state"] = "flagged"                      # l001 (c01) is removed
+    p["character_exemplars"] = [
+        {"exemplar_id": "x1", "character_id": "c01", "t_s": 3.0, "bbox": "[0,0,500,500]", "look_id": "l001",
+         "source": "test", "review_state": "reviewed"},
+        {"exemplar_id": "x2", "character_id": "c01", "t_s": 4.0, "bbox": "[0,0,500,500]", "look_id": None,
+         "source": "test", "review_state": "reviewed"},
+        {"exemplar_id": "x3", "character_id": "c02", "t_s": 6.0, "bbox": "[0,0,500,500]", "look_id": "l002",
+         "source": "test", "review_state": "reviewed"}]
+    p["scenes"][1]["review_state"] = "rejected"                              # s02 is removed
+    p["recaps"] = [{"recap_id": "r1", "upto_scene_id": "s02", "upto_s": 100.0, "reveal_at_s": 100.0,
+                    "text_en": "So far.", "text_zh": None, "source": "test", "review_state": "reviewed"},
+                   {"recap_id": "r2", "upto_scene_id": "s01", "upto_s": 50.0, "reveal_at_s": 50.0,
+                    "text_en": "Earlier.", "text_zh": None, "source": "test", "review_state": "reviewed"}]
+    for keep, name in ((None, "device"), (AUTO_OK, "device-auto")):
+        d = device_view(p) if keep is None else device_view(p, keep)
+        assert [x["exemplar_id"] for x in d["character_exemplars"]] == ["x2", "x3"], name
+        assert {r["recap_id"]: r["upto_scene_id"] for r in d["recaps"]} == {"r1": None, "r2": "s01"}, name
+        d["pack_meta"] = {**d["pack_meta"], "distribution": name}
+        packdb.write_db(d, tmp_path / name / "pack.db")                       # foreign keys hold

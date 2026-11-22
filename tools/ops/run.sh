@@ -734,7 +734,12 @@ mode_job() {
   export HELLO_WATCH_GEMINI_KEY_FILE="${HELLO_WATCH_GEMINI_KEY_FILE:-}" HELLO_WATCH_MOVIES_DIR="${HELLO_WATCH_MOVIES_DIR:-}"
   export HELLO_WATCH_DEVICE_PACKS_DIR="${HELLO_WATCH_DEVICE_PACKS_DIR:-}" HELLO_WATCH_INGEST_CACHE="${HELLO_WATCH_INGEST_CACHE:-}"
   export PROJECT="${PROJECT:-}" BUCKET="${BUCKET:-}" SERVICE_ACCOUNT="$(svc_q sa)"
-  say "project: ${PROJECT:-?} · bucket: ${BUCKET:-?} · service account: ${SERVICE_ACCOUNT:-?}"
+  LIVE_PACKS_GCS=""
+  if [ -n "$SVC_JSON" ]; then
+    LIVE_PACKS_GCS=$(live_env WATCH_PACKS_GCS)       # what production serves: jobs never write there
+  fi
+  export LIVE_PACKS_GCS
+  say "project: ${PROJECT:-?} · bucket: ${BUCKET:-?} · service account: ${SERVICE_ACCOUNT:-?} · production packs: ${LIVE_PACKS_GCS:-?}"
   hr "tools/ops/job.sh"
   /bin/bash tools/ops/job.sh
 }

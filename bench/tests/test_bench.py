@@ -51,6 +51,10 @@ def test_marker_matching_folds_text_and_respects_word_boundaries():
     assert C.marker_hits("Scales", "史科尔斯Scales的")
     assert C.marker_hits("Bob", "Bobа")                                            # Cyrillic а after it
     assert not C.marker_hits("Bob", "Bobø") and not C.marker_hits("Bob", "Bob2")
+    # regex markers: \b on the same Latin word class (as the service's textnorm.latin_boundaries)
+    assert C.marker_hits({"regex": r"\b(aged|older)\b"}, "他变older了") and not C.marker_hits({"regex": r"\bolder\b"}, "colder")
+    assert C.marker_hits({"regex": r"\Bold"}, "bold") and not C.marker_hits({"regex": r"\Bold"}, "他old")
+    assert C.latin_boundaries(r"[\b]x\\b") == r"[\b]x\\b" and C.latin_boundaries(r"[]\b]") == r"[]\b]"
 
 
 # ── rule gate ────────────────────────────────────────────────────────
