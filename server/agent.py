@@ -17,6 +17,7 @@ import contextvars
 import dataclasses
 import functools
 import json
+import math
 import time
 
 from google.adk.agents import LlmAgent
@@ -27,7 +28,7 @@ from google.genai import types
 
 from ingest.retrieval import OnlineEmbedder
 from server import config, prompts
-from server.knowledge import TYPE_LABEL, Moment, ts
+from server.knowledge import TYPE_LABEL, Moment, secs, ts
 from server.packs import STORE
 
 EMBEDDER = OnlineEmbedder(timeout_s=config.EMBED_TIMEOUT_S, cooldown_s=config.EMBED_COOLDOWN_S)
@@ -65,6 +66,7 @@ class Turn:
     output_tokens: int = 0
     thought_tokens: int = 0
     tools: list = dataclasses.field(default_factory=list)      # names, in call order, server-run lookups as "ctx:<name>"
+    args_filter: object | None = None           # model-written tool arguments → what the step trace may show
 
     def add_frame(self, t: int | None, caption: str) -> None:
         if t is not None and all(f["t"] != t for f in self.frames) and len(self.frames) < 6:
@@ -118,10 +120,10 @@ def _summarise(tool_context: ToolContext, text: str) -> None:
 def note_story(turn: Turn, m: Moment, out: dict) -> str:
     items = out.get("since_recap") or out.get("so_far") or []
     if "recap" in out:
-        upto = _secs(out["recap"]["up_to"])
+        upto = secs(out["recap"]["up_to"])
         turn.add_evidence("recap", upto, upto, out["recap"]["text"])
     for it in items[-3:]:
-        turn.add_frame(m.evidence_frame(_secs(it["at"]), _secs(it["at"])), f"Earlier: {it['at']}")
+        turn.add_frame(m.evidence_frame(secs(it["at"]), secs(it["at"])), f"Earlier: {it['at']}")
     return (f"Recap up to {out['recap']['up_to']} + " if "recap" in out else "") + f"{len(items)} later moments"
 
 
@@ -218,8 +220,10 @@ async def look_closer(question: str, tool_context: ToolContext) -> dict:
     parts = [types.Part.from_text(text=text)]
     win = m.near_window(config.NEAR_WINDOW_S)
     video = bool(win and config.LOOK_VIDEO and config.ASSET_BUCKET)
-    # the paused frame and (without the video clip) stills every 3 s of the window, all ≤ floor(P), read concurrently
-    wanted = [m.fp] + ([] if video or not win else list(range(int(win[0]), int(win[1]) + 1, 3)))
+    # the paused frame and (without the video clip) up to LOOK_STILLS stills spread over the window (at least 3 s
+    # apart), all ≤ floor(P), read concurrently
+    step = max(3, math.ceil((win[1] - win[0]) / max(1, config.LOOK_STILLS - 1))) if win else 3
+    wanted = [m.fp] + ([] if video or not win else list(range(int(win[1]), int(win[0]) - 1, -step))[::-1])
     jpegs = await asyncio.gather(*(asyncio.to_thread(read_thumb, m.title, t) for t in wanted))
     frame, stills = jpegs[0], [(t, b) for t, b in zip(wanted[1:], jpegs[1:]) if b is not None]
     if video:
@@ -264,11 +268,6 @@ async def vision_generate(parts: list) -> types.GenerateContentResponse:
                                            media_resolution=types.MediaResolution.MEDIA_RESOLUTION_LOW,
                                            thinking_config=types.ThinkingConfig(thinking_level="LOW"),
                                            http_options=types.HttpOptions(timeout=int(config.LOOK_TIMEOUT_S * 1000))))
-
-
-def _secs(mmss: str) -> float:
-    mm, ss = mmss.split(":")
-    return int(mm) * 60 + int(ss)
 
 
 @functools.cache

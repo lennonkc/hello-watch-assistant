@@ -11,7 +11,7 @@ from ingest.retrieval import Gate, OnlineEmbedder
 from server import config, guard, main
 from server.answer import GuardedAnswer, split_ready, split_sentences
 from server.knowledge import Moment
-from server.tests.fakes import request_images, request_text, tools_off
+from server.tests.fakes import oracle_leaks, request_images, request_text, tools_off
 
 TAP_WOLF = {"x": 0.2, "y": 0.3}          # inside the wolf's box [100, 50, 600, 400] (keyframe 60 s)
 
@@ -121,10 +121,9 @@ def test_tool_rounds_are_capped(wired):
         return {"text": "Done looking."} if tools_off(req) else {"call": ("search_moments", {"query": "meadow"})}
     wired.ctx.script = [step, step, step, step]
     ev = wired.ask(70.0, "What happened in the meadow?")
-    assert [d["name"] for d in data(ev, "tool")] == ["on_screen", "recent_dialogue", "story_so_far",
-                                                     "search_moments", "search_moments"]
-    assert [tools_off(r) for r in wired.ctx.requests] == [False, False, True]
-    assert answer(ev)["usage"]["model_calls"] == 3 and sent_text(ev) == "Done looking."
+    assert [d["name"] for d in data(ev, "tool")] == ["on_screen", "recent_dialogue", "story_so_far", "search_moments"]
+    assert [tools_off(r) for r in wired.ctx.requests] == [False, True]     # one model-called round, then answer now
+    assert answer(ev)["usage"]["model_calls"] == 2 and sent_text(ev) == "Done looking."
     assert "matches" in data(ev, "tool_result")[-1]["summary"]
 
 
@@ -239,7 +238,7 @@ def test_tools_flow_guard_retry(wired, monkeypatch):
 # ── the sweep: nothing ineligible anywhere, at any P ─────────────────
 
 LEAKY = ("That is Bob. Bobby waves. It will howl. The wolf turns out to be Bob. Jane Realperson voices her. "
-         "原来狼就是鲍勃。")
+         "原来狼就是鲍勃。那是Bob。它会howl的。由Jane Realperson配音。The wolf, and Bob.")
 
 
 @pytest.mark.parametrize("lang", ["en", "zh"])
@@ -255,7 +254,7 @@ def test_sweep_context_evidence_and_deltas(wired, lang):
         shown = [sent_text(ev), a["text"], json.dumps(a["evidence"], ensure_ascii=False),
                  json.dumps(data(ev, "tool_result"), ensure_ascii=False), ctx_text]
         for text in shown:
-            assert guard.violations(title_pack, text, P) == [], (P, text[:300])
+            assert oracle_leaks(title_pack, text, P) == [], (P, text[:300])
         # no text of an ineligible row reaches the model
         g = Gate(title_pack, P, allow_auto=True)
         ok = {it.text for it in g.eligible() if it.text}

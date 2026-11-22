@@ -6,6 +6,7 @@ import pytest
 from ingest.retrieval import Gate
 from server import guard
 from server.knowledge import Moment, pick_entity
+from server.tests.fakes import oracle_leaks
 
 
 def test_labels_follow_name_visibility(title):
@@ -148,7 +149,7 @@ def test_sweep_views_never_leak(title, lang):
         m = Moment(title, P, lang)
         texts, hits = _views(m)
         for text in texts:
-            assert guard.violations(m.pack, text, P) == [], (P, text)
+            assert oracle_leaks(m.pack, text, P, prose=False) == [], (P, text)
         ok = {(it.item_type, it.item_id) for it in Gate(m.pack, P, allow_auto=True).eligible()}
         assert all((h.item_type, h.item_id) in ok for h in hits), P
 

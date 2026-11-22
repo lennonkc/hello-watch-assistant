@@ -59,9 +59,10 @@ BENCH_TOKEN = os.environ.get("WATCH_BENCH_TOKEN", "")
 # Bench-token requests may pick one per request with `X-Watch-Flow`.
 FLOW = os.environ.get("WATCH_FLOW", "context")
 THINKING_LEVEL = os.environ.get("WATCH_THINKING_LEVEL", "LOW")
-TOOL_ROUNDS = int(os.environ.get("WATCH_TOOL_ROUNDS", "2"))                  # context flow; the tools flow allows 3
-SOFT_DEADLINE_S = float(os.environ.get("WATCH_SOFT_DEADLINE_S", "9"))        # after it: no more tool calls
-STEP_TIMEOUT_S = float(os.environ.get("WATCH_STEP_TIMEOUT_S", "12"))         # longest silence from the agent run
-ASK_DEADLINE_S = float(os.environ.get("WATCH_ASK_DEADLINE_S", "25"))         # whole question, retry included
-LOOK_TIMEOUT_S = float(os.environ.get("WATCH_LOOK_TIMEOUT_S", "10"))         # nested look_closer model call
+TOOL_ROUNDS = int(os.environ.get("WATCH_TOOL_ROUNDS", "1"))                  # context flow; the tools flow allows 3
+SOFT_DEADLINE_S = float(os.environ.get("WATCH_SOFT_DEADLINE_S", "6"))        # after it: no more tool calls
+STEP_TIMEOUT_S = float(os.environ.get("WATCH_STEP_TIMEOUT_S", "8"))          # longest silence from the agent run
+ASK_DEADLINE_S = float(os.environ.get("WATCH_ASK_DEADLINE_S", "10"))         # whole question, retry included
+LOOK_TIMEOUT_S = float(os.environ.get("WATCH_LOOK_TIMEOUT_S", "6"))          # nested look_closer model call
+LOOK_STILLS = int(os.environ.get("WATCH_LOOK_STILLS", "8"))                  # look_closer: stills from the window, at most
 HISTORY_TURNS = int(os.environ.get("WATCH_HISTORY_TURNS", "6"))              # earlier turns sent with a question

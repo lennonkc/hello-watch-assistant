@@ -164,8 +164,10 @@ BENCH_HEADER = "x-watch-bench-token"
 
 
 def client_ip(request: Request) -> str:
-    fwd = request.headers.get("x-forwarded-for")
-    return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "?")
+    """The address Google's front end saw. It appends that to X-Forwarded-For, so the LAST hop is the real client;
+    earlier hops are whatever the client sent and cannot be trusted for rate limiting."""
+    fwd = [h.strip() for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
+    return fwd[-1] if fwd else (request.client.host if request.client else "?")
 
 
 def is_bench(request: Request) -> bool:
@@ -274,19 +276,35 @@ def sse(event: str, data) -> str:
 class Streamer:
     """Routes streamed model text into the guarded answer, one model call ("step") at a time.
 
-    A step's first sentence is held until a second sentence starts or the step ends without a function call: text
-    the model writes before calling a tool ("Let me look closer.") is never sent. If a step sends text and then calls
-    a tool anyway, that is counted as `leaked_preamble` (it was guarded, so it is safe, just out of place)."""
+    A step's first sentence is held until a second sentence starts or the step ends without a function call, so a
+    one-sentence "Let me look closer." before a tool call is never sent (`held_preamble`). A longer preamble can get
+    its first sentence out before the call arrives (`leaked_preamble`; guarded, so safe, just out of place). Text from
+    a step that ended in a tool call never counts as the answer: `answer_text()` leaves it out, so the final `answer`
+    event replaces it, and if nothing else was written the question gets a fallback instead."""
 
     def __init__(self, answer: GuardedAnswer, emit, rec: dict):
         self.answer, self.emit, self.rec = answer, emit, rec
         self.pending, self.released = "", False
+        self.step_sent: list[str] = []          # deltas sent during the current model call
+        self.kept: list[str] = []               # deltas of model calls that ended without a tool call
+        self.preamble: list[str] = []           # deltas of model calls that then called a tool
 
     async def _send(self, deltas: list[str]) -> None:
         for d in deltas:
             if self.rec.get("first_text_ms") is None:
                 self.rec["first_text_ms"] = int((time.monotonic() - self.rec["t0"]) * 1000)
+            self.step_sent.append(d)
             await self.emit("delta", {"text": d})
+
+    async def send_final(self, text: str) -> None:
+        """A fixed reply (fallback): sent and counted as the answer."""
+        await self._send([self.answer.force(text)])
+        self.kept += self.step_sent
+        self.step_sent = []
+
+    def answer_text(self) -> str:
+        text = "".join(self.kept)
+        return text.lstrip() if self.preamble else text
 
     async def text(self, chunk: str) -> None:
         if self.released:
@@ -304,21 +322,28 @@ class Streamer:
             if self.pending.strip() or self.answer.buf.strip():
                 self.rec["held_preamble"] += 1
                 log.info("dropped text written before a tool call: %r", (self.pending + self.answer.buf)[:200])
-            if self.released:
+            if self.step_sent:
                 self.rec["leaked_preamble"] += 1
+                self.preamble += self.step_sent
             self.pending, self.answer.buf = "", ""
         else:
             held, self.pending = self.pending, ""
             await self._send(self.answer.feed(held) + self.answer.flush())
-        self.released = False
+            self.kept += self.step_sent
+        self.step_sent, self.released = [], False
 
     async def abort(self) -> None:
-        """The run stopped early (deadline, error): send the sentences that are complete, drop a half-written one."""
+        """The run stopped early (deadline, error): send the sentences that are complete — including a last one that
+        ends with sentence punctuation — and drop a half-written one."""
         held, self.pending = self.pending, ""
-        await self._send(self.answer.feed(held))
+        deltas = self.answer.feed(held)
+        if re.search(r"[.!?。！？…][\"'”’)）]*$", self.answer.buf.rstrip()):
+            deltas += self.answer.flush()
+        await self._send(deltas)
         if self.answer.buf.strip():
             self.rec["cut_off"] = True
-        self.answer.buf, self.released = "", False
+        self.kept += self.step_sent
+        self.answer.buf, self.released, self.step_sent = "", False, []
 
 
 async def _run(runner: Runner, user: str, sid: str, text: str, emit, turn: A.Turn, deadline: float,
@@ -352,8 +377,11 @@ async def _run(runner: Runner, user: str, sid: str, text: str, emit, turn: A.Tur
             calls = ev.get_function_calls()
             for fc in calls:
                 turn.tools.append(fc.name)
+                args = A.args_preview(fc.args)
+                if args and turn.args_filter:
+                    args = await asyncio.to_thread(turn.args_filter, args)
                 await emit("tool", {"id": fc.id, "name": fc.name, "label": A.TOOL_LABELS.get(fc.name, fc.name),
-                                    "args": A.args_preview(fc.args)})
+                                    "args": args})
             for fr in ev.get_function_responses():
                 await emit("tool_result", {"id": fr.id, "name": fr.name, "summary": turn.summaries.get(fr.id, "done")})
             if ev.content and ev.content.role == "model":            # one model call completed
@@ -399,10 +427,28 @@ class AskFailed(Exception):
     pass
 
 
+def _checker(t, m, p: float, subjects, question: str, turn: A.Turn):
+    """The output guard for this question (spec §7 plus identity co-occurrence, `server/guard.py`). It also filters the
+    model-written tool arguments the step trace shows: names not visible yet become labels, and arguments the guard
+    still objects to are not shown at all. Blocking: call it in a worker thread."""
+    links = guard.identity_links(m, subjects, question)
+
+    def check(text: str) -> list[dict]:
+        return guard.violations(t.pack, text, p, links)
+
+    def args_filter(args: dict) -> dict:
+        clean = {k: (m.sanitize(v) if isinstance(v, str) else v) for k, v in args.items()}
+        return {} if check(" ".join(v for v in clean.values() if isinstance(v, str))) else clean
+
+    turn.args_filter = args_filter
+    return check
+
+
 async def flow_context(t, body: Ask, p: float, user: str, state: dict, emit, turn: A.Turn, rec: dict) -> dict:
     """Server-built context, then one streamed run; each finished sentence is guarded before it is sent."""
     m = A.moment_of(state)
     ctx = await asyncio.to_thread(C.build, m, state["tap"], turn)
+    check = await asyncio.to_thread(_checker, t, m, p, ctx.subjects, body.question, turn)
     for lk in ctx.lookups:
         turn.tools.append(f"ctx:{lk.name}")
         await emit("tool", {"id": lk.id, "name": lk.name, "label": lk.label, "args": {}})
@@ -411,12 +457,12 @@ async def flow_context(t, body: Ask, p: float, user: str, state: dict, emit, tur
             await emit("highlight", turn.highlight)
     turn.context = ctx
     turn.history, rec["history_turns"] = HISTORY.contents(user, p)
-    answer = GuardedAnswer(lambda s: guard.violations(t.pack, s, p))
+    answer = GuardedAnswer(check)
     sink = Streamer(answer, emit, rec)
     runner, deadline, question = RUNNERS["context"], turn.started + config.ASK_DEADLINE_S, body.question.strip()
     _text, status = await _throwaway(runner, user, state, question, emit, turn, deadline, sink, True)
-    if not answer.text and status in ("ok", "limit"):
-        # nothing survived the guard (or the model said nothing): one non-streamed retry with the note
+    if not sink.answer_text() and status in ("ok", "limit"):
+        # nothing survived the guard (or the model wrote nothing but a preamble): one non-streamed retry with the note
         rec["retried"] = True
         hits = [h for d in answer.dropped for h in d]
         note = _retry_note(hits)
@@ -426,24 +472,30 @@ async def flow_context(t, body: Ask, p: float, user: str, state: dict, emit, tur
     if answer.dropped:
         rec["dropped_kinds"] = sorted({h["kind"] for d in answer.dropped for h in d})
         log.warning("guard dropped %d sentence(s) at p=%.1f: %s", len(answer.dropped), p, rec["dropped_kinds"])
-    if not answer.text:
-        if status == "error":
+    text = sink.answer_text()
+    if not text:
+        if status == "error" and not sink.preamble:
             raise AskFailed
-        rec["fallback"] = "timeout" if status == "timeout" else "spoiler"
-        await sink._send([answer.force((TIMEOUT_FALLBACK if status == "timeout" else FALLBACK)[body.lang])])
+        rec["fallback"] = "timeout" if status in ("timeout", "error") else "spoiler"
+        rec["preamble_only"] = bool(sink.preamble)
+        await sink.send_final((TIMEOUT_FALLBACK if rec["fallback"] == "timeout" else FALLBACK)[body.lang])
+        text = sink.answer_text()
     else:
-        HISTORY.add(user, p, question, answer.text)
+        HISTORY.add(user, p, question, text)
     rec["dropped"] = len(answer.dropped)
-    return {"text": answer.text, "terms": ctx.tapped_terms,
-            "rewritten": bool(answer.dropped or rec["retried"] or rec["fallback"])}
+    return {"text": text, "terms": ctx.tapped_terms, "check": check,
+            "rewritten": bool(answer.dropped or rec["retried"] or rec["fallback"] or sink.preamble)}
 
 
 async def flow_tools(t, body: Ask, p: float, user: str, state: dict, emit, turn: A.Turn, rec: dict) -> dict:
     """The earlier design: the agent picks among five tools; the whole answer is guarded, then sent at once."""
     runner, deadline, question = RUNNERS["tools"], turn.started + config.ASK_DEADLINE_S, body.question.strip()
+    m = A.moment_of(state)
+    subjects = await asyncio.to_thread(lambda: C.focus(m, m.on_screen(state["tap"], refs=True)))
+    check = await asyncio.to_thread(_checker, t, m, p, subjects, body.question, turn)
     sid = await CONVERSATIONS.get(user, p)
     text, status = await _run(runner, user, sid, question, emit, turn, deadline, None, False, state)
-    hits, rewritten = guard.violations(t.pack, text, p), False
+    hits, rewritten = check(text), False
     if (hits or not text) and status in ("ok", "limit"):
         # the bad draft must not stay in the conversation: retry in a fresh session
         rewritten, rec["retried"] = True, True
@@ -455,7 +507,7 @@ async def flow_tools(t, body: Ask, p: float, user: str, state: dict, emit, turn:
     rec["status"] = status
     if not text and status == "error":
         raise AskFailed
-    if not text or guard.violations(t.pack, text, p):
+    if not text or check(text):
         rewritten = True
         rec["fallback"] = "timeout" if status == "timeout" else "spoiler"
         text = (TIMEOUT_FALLBACK if status == "timeout" else FALLBACK)[body.lang]
@@ -463,7 +515,7 @@ async def flow_tools(t, body: Ask, p: float, user: str, state: dict, emit, turn:
     rec["first_text_ms"] = int((time.monotonic() - rec["t0"]) * 1000)
     await emit("delta", {"text": text})
     terms = await asyncio.to_thread(C.tapped_terms, A.moment_of(state), state["tap"])
-    return {"text": text, "terms": terms, "rewritten": rewritten}
+    return {"text": text, "terms": terms, "check": check, "rewritten": rewritten}
 
 
 FLOWS = {"context": flow_context, "tools": flow_tools}
@@ -505,7 +557,10 @@ async def ask(body: Ask, request: Request):
             highlight = turn.highlight if turn.highlight and C.mentions(out["text"], out["terms"]) else None
             total = int((time.monotonic() - turn.started) * 1000)
             rec["highlight"] = highlight is not None
-            await emit("answer", {"text": out["text"], "evidence": turn.evidence, "frames": turn.frames,
+            # evidence rows are gated, but next to an answer about the a-side of a pending identity link even an
+            # eligible line naming the b-side would hint at it: the same guard decides what is listed
+            evidence = await asyncio.to_thread(lambda: [e for e in turn.evidence if not out["check"](e["text"] or "")])
+            await emit("answer", {"text": out["text"], "evidence": evidence, "frames": turn.frames,
                                   "highlight": highlight,
                                   "guard": {"checked": True, "rewritten": out["rewritten"], "dropped": rec["dropped"]},
                                   "latency_ms": total, "usage": turn.usage(),
