@@ -28,6 +28,45 @@ A/B run; the flow goes into the run id, `run.json` and the scorecard header.
 A run does not start when `GET /api/health` fails, and stops at the first HTTP 429 when a token was sent (the target
 does not accept it).
 
+## Results
+
+<!-- results:start round 3; replace this block with the final run's numbers (same layout) -->
+**Round 3, 2026-11-22: one staged Cloud Run revision, both answer flows asked on the same revision.** Films: the
+three public short films (11–15 min) and a private preview title (169 min). Grading: an LLM judge (Gemini) on the
+answer text, plus a rule gate over everything the viewer received (definitions below, under Grading).
+
+Hand-written cases (97, three public films):
+
+| | Shipped flow: server-built context, one model call (a tool round only when needed) | Earlier tool-calling flow |
+|---|---|---|
+| accuracy (LLM judge) | 91.9 % (n 62) | 89.5 % |
+| cases with a rule-gate leak | 0 of 97 | 1 of 97 |
+| fallback answers (a fixed non-answer), share of answers | 1.0 % | 8.2 % |
+| server latency p50 / p90 | 2.2 s / 3.9 s | 4.1 s / 8.2 s |
+| model calls per answer | 1.15 | 2.42 |
+| estimated cost per answer (list prices) | $0.00195 | $0.00251 |
+
+_To fill from the final run: n for every row that has none here._
+
+Generated cases (240 over the four films, `gen_cases.py`, shipped flow): accuracy 96.0 % (n 136); 0 cases with a
+rule-gate leak; 1 case flagged by the judge only.
+<!-- results:end -->
+
+What these numbers do not cover:
+
+- Four films, two answer languages (English, Chinese). The public films are short. The private preview title is the
+  only feature-length one, and only generated cases cover it.
+- Generated cases are derived from the knowledge packs. They test the service against its own pack, not against the
+  film, so an error in the pack (a wrong reveal time, a missed character) cannot show up there. The hand-written
+  cases were written by the people who built the service.
+- The judge is a model, not a person. Its own error rate has not been measured. A leak worded without any listed
+  term or canary is caught only if the judge notices it.
+- Mostly single questions: 6 two-turn conversations and 10 injection probes. No long conversations or sustained
+  adversarial use.
+- Latency is measured on one revision without the rate limiter, with no concurrent load. Cost is estimated from list
+  prices and token counts, not from billing.
+- The highlight box and frames are checked for leaks only. Whether they point at the right thing is not graded.
+
 ## Cases (`cases/*.jsonl`, one case per line)
 
 | File | Set | What | Cases |

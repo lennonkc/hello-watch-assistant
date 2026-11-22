@@ -45,8 +45,11 @@ flowchart LR
   subgraph Online["Online Q&A (Cloud Run)"]
     Q[Viewer question at position P] --> G{Spoiler gate<br/>reveal + margin ≤ P}
     K --> G
+    G --> C[Server-built context<br/>shot, last lines, story so far, frame]
     G --> R[Rank only the eligible set<br/>vector / full-text / hybrid]
-    R --> A[Answer with Gemini<br/>+ output guards]
+    C --> A[One Gemini call<br/>tools: search_moments, look_closer]
+    R --> A
+    A --> H[Sentence-level guard<br/>each sentence checked before it streams]
   end
 ```
 
@@ -68,9 +71,17 @@ flowchart LR
    rank by vector similarity, full-text or reciprocal-rank fusion. Retrieval can't leak what the gate removed, because
    ranking never sees it. (This is why managed RAG with metadata filters was rejected: a filter that silently fails
    would be a spoiler.)
-3. **Answer, then guard.** Answers are generated from the eligible evidence plus a short "near window" of the video
-   before *P*. Output guards then check them against a real-person-name blocklist, future "canary" terms and
-   name-visibility rules.
+3. **Server-built context, one model call, a guard per sentence.** For each question the server runs the lookups
+   itself, inside the eligible set at *P*: the current shot's entities (and what a tap on the frame falls on), the
+   last minute of dialogue with speakers, the story so far (the latest recap and what came after it) and the paused
+   frame. One Gemini call answers from that context. Only two tools stay callable, for one round: `search_moments`
+   (ranked search for anything earlier that the summary does not cover) and `look_closer` (stills from the last
+   30 s). The answer streams sentence by sentence. Each sentence goes out only after the output guard passes it
+   together with everything already sent: a real-person-name blocklist, future "canary" terms, name visibility, and
+   an identity rule that keeps a character and an identity not yet revealed out of the same passage.
+4. **Private titles.** Besides the public films, the service can serve private preview titles. They are not listed,
+   and their URLs answer 404, until the browser unlocks them with an access code (`POST /api/unlock` sets a cookie;
+   failed attempts are rate limited).
 
 | "What did I miss?" at 07:11 | The gate at work |
 |---|---|
@@ -95,15 +106,15 @@ The full contract is in [docs/knowledge-pack.md](docs/knowledge-pack.md). How th
 | Image build | **Cloud Build** + **Artifact Registry** (pinned FFmpeg / Python for byte-reproducible packs) | `deploy/ingest/` |
 | Secrets: API key and **all prompts** | **Secret Manager** (prompts are never baked into the image) | `ingest/promptbook.py`, `deploy/prompts/` |
 | Upload renewal | **Cloud Scheduler** → Cloud Run Job | `deploy/ingest/renew-job.yaml` |
-| Online assistant: tool-using agent with gate-aware tools, streamed to the browser | **Agent Development Kit (ADK)** `LlmAgent` on **Gemini 3.8 Flash** (Agent Platform), served by **Cloud Run** | `server/`, `web/`, `deploy/web/` |
+| Online assistant: server-built context at P, one model call with two gate-bounded tools, answers streamed sentence by sentence through the guard | **Agent Development Kit (ADK)** `LlmAgent` on **Gemini 3.8 Flash** (Agent Platform), served by **Cloud Run** | `server/`, `web/`, `deploy/web/` |
 | Playback | **Cloud Storage** V4 signed URLs, signed by the service's own identity (IAM `signBlob`, no key files) | `server/main.py` |
 
 ## Prompts: open code, private know-how
 
 The code in this repository is complete and runnable.
 
-**Agent prompts: published.** [`prompts/agent/`](prompts/agent/) holds the agent instructions (one per answer
-flow), the `look_closer` request and the guard's retry note. These are the prompts the live demo runs. `server/prompts.py` loads them from
+**Agent prompts: published.** [`prompts/agent/`](prompts/agent/) holds the answer instruction, the `look_closer`
+request and the guard's retry note. These are the prompts the live demo runs. `server/prompts.py` loads them from
 `WATCH_AGENT_PROMPTS_SECRET` (Secret Manager), else `WATCH_AGENT_PROMPTS_DIR`, else that directory.
 
 **Ingest prompts: private.** The production ingest prompts are not in the repository.
@@ -118,6 +129,12 @@ Each prompt's placeholders are validated on load, so a broken secret fails fast 
 `deploy/prompts/push_prompts.sh` bundles a prompt directory into a new secret version.
 
 ## Results on the demo films
+
+<!-- results:start round 3; replace these three lines with the final run's numbers -->
+- **Benchmark** (round 3, one staged revision; an LLM judge plus a rule gate): 97 hand-written cases on the three public films give 91.9 % accuracy (n 62) and 0 cases with a rule-gate leak. 240 generated cases over four films, the public three plus a private preview title (169 min), give 96.0 % (n 136) and 0 rule-gate leaks.
+- Server latency p50 / p90 is 2.2 s / 3.9 s, with 1.15 model calls and about $0.002 per answer. The earlier tool-calling flow on the same revision: 89.5 %, 1 leak, 4.1 s / 8.2 s, 2.42 calls.
+- Sample sizes, definitions and what the benchmark does not cover: [bench/README.md](bench/README.md#results).
+<!-- results:end -->
 
 All three films are processed end to end with the v1.1 pipeline:
 
@@ -145,7 +162,7 @@ Total Gemini cost for the three films, including all re-runs: about $8.
 | `ingest/cloud/`, `deploy/ingest/` | Cloud Run Jobs runner, GCS layout, image build and job specs. See [docs/cloud-deploy.md](docs/cloud-deploy.md) |
 | `ingest/promptbook.py`, `prompts/`, `deploy/prompts/` | Runtime prompt loading (Secret Manager), reference prompts |
 | `schema/` | Knowledge-pack SQLite DDL and the shared normalisation wordlists |
-| `server/` | Online Q&A service: FastAPI + ADK agent, gate-first views at P (`knowledge.py`), output guards (`guard.py`). Contract: [docs/web-api.md](docs/web-api.md) |
+| `server/` | Online Q&A service: FastAPI + ADK agent, server-built context (`context.py`), gate-first views at P (`knowledge.py`), sentence-level output guard (`guard.py`), access-coded private titles (`packs.py`). Contract: [docs/web-api.md](docs/web-api.md) |
 | `web/` | Static front end: "Live demo" player tab and the interactive "How it works" tab |
 | `deploy/web/` | Web service image and Cloud Run deployment (service account, prompt secret, limits) |
 | `catalog/` | Demo catalog (the three open films) |
