@@ -193,3 +193,16 @@ def test_promote_refuses_an_image_of_another_commit_without_moving_traffic(ops):
     r = ops("promote")
     assert r.returncode != 0 and "is not the checked-out commit" in r.stderr
     assert not [c for c in _calls(ops) if "update-traffic" in c]
+
+
+def test_exit_traps_do_not_read_function_locals():
+    """An EXIT trap runs after the function that set it has returned: a single-quoted trap that reads one
+    of that function's locals fails under `set -u` and turns a finished job into a failed one."""
+    for script in sorted(ROOT.glob("tools/ops/*.sh")) + sorted(ROOT.glob("deploy/**/*.sh")):
+        text = script.read_text(encoding="utf-8")
+        local_names = set()
+        for decl in re.findall(r"^\s*local\s+([^\n#]+)", text, flags=re.M):
+            local_names.update(re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)(?:=|\b)", decl))
+        for body in re.findall(r"\btrap\s+'([^']*)'\s+EXIT", text):
+            used = set(re.findall(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)", body))
+            assert not (used & local_names), f"{script.relative_to(ROOT)}: EXIT trap reads local(s) {sorted(used & local_names)}"
