@@ -196,7 +196,8 @@ def _vs():
             "shots": [
                 sh(6.0, 8.0, "{c02} waves at {c01}.", "{c02}向{c01}挥手。", [ch("c02", act="{c02} waves"), ch("c01")]),
                 sh(8.0, 9.5, "Bob smiles.", "鲍勃笑了。", [ch("c02")]),                     # name too early: replaced with a descriptor
-                sh(56.0, 58.0, "{c03} prowls. It lets out a howl.", "{c03}徘徊。", [ch("c03"), ch("c02", "boy")]),  # clue sentence removed; b not attached before its reveal
+                sh(56.0, 58.0, "{c03} prowls. It lets out a howl.", "{c03}徘徊。",
+                   [ch("c03"), ch("c02", "boy"), ch("other", "person behind {c13}")]),  # clue sentence removed; b not attached before its reveal
                 sh(58.0, 59.0, "A howl.", None, [ch("c03")]),                               # whole caption hits: deferred
                 sh(70.0, 72.0, "Jane Realperson waves.", None, [ch("c01")]),               # real person's name: dropped
                 sh(73.0, 75.0, "{c01} holds a lamp.", None, [ch("c01")],
@@ -222,7 +223,8 @@ def test_assemble_shots_rows_and_guards(monkeypatch):
     assert 70.0 not in caps
     assert all(c["reveal_at_s"] >= c["end_s"] for c in caps.values())
     ents = [e for e in asm.pack["shot_entities"] if e["shot_caption_id"] == caps[56.0]["shot_caption_id"]]
-    assert [(e["character_id"], e["label_en"]) for e in ents] == [("c03", "the wolf"), (None, "boy")]
+    assert [(e["character_id"], e["label_en"]) for e in ents] == [("c03", "the wolf"), (None, "Boy"),
+                                                                     (None, "Person behind someone")]   # tokens rendered
     e6 = [e for e in asm.pack["shot_entities"] if e["shot_caption_id"] == caps[6.0]["shot_caption_id"]]
     assert e6[0]["label_en"] == "the boy" and e6[0]["action_en"] == "The boy waves" and e6[0]["bbox_t_s"] == 6
     lamp = [e for e in asm.pack["shot_entities"] if e["entity_type"] == "object"]

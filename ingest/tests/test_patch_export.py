@@ -25,6 +25,36 @@ def test_claude_prereview_sets_prereviewed_and_logs(pack):
     assert all(r["reviewer"] == "claude-prereview" for r in logs)
 
 
+def test_speaker_edit_and_safe_blank_cue_delete(pack):
+    cue = dict(pack["cues"][0], cue_id="en.generated:001", track="en.generated", text=" ")
+    pack["cues"].append(cue)
+    pack["cue_speakers"].append({"cue_id": cue["cue_id"], "character_id": None, "diar_label": "S1", "confidence": 0.9,
+                                 "method": "visual", "review_state": "auto"})
+    out = apply_patch(pack, patch("claude-content-fix", {"op": "edit", "table": "cue_speakers",
+                                                        "key": {"cue_id": cue["cue_id"]}, "set": {"character_id": "c02"}}))
+    speaker = out["cue_speakers"][0]
+    assert speaker["character_id"] == "c02" and speaker["review_state"] == "prereviewed"
+    with pytest.raises(PatchError, match="still has dependent rows"):      # its speaker row still points at it
+        apply_patch(out, patch("claude-content-fix", {"op": "delete", "table": "cues", "key": {"cue_id": cue["cue_id"]}}))
+    out = apply_patch(out, patch("claude-content-fix",
+                                {"op": "delete", "table": "cue_speakers", "key": {"cue_id": cue["cue_id"]}},
+                                {"op": "delete", "table": "cues", "key": {"cue_id": cue["cue_id"]}}))
+    assert cue["cue_id"] not in {c["cue_id"] for c in out["cues"]} and not out["cue_speakers"]
+
+
+def test_recap_and_shot_caption_patches(pack):
+    pack["recaps"].append({"recap_id": "rc001", "upto_scene_id": "s01", "upto_s": 50.0, "reveal_at_s": 50.0,
+                           "text_en": "old", "text_zh": None, "source": "test", "review_state": "auto"})
+    pack["shot_captions"].append({"shot_caption_id": "sc001", "start_s": 1.0, "end_s": 2.0, "reveal_at_s": 2.0,
+                                  "caption_en": "old", "caption_zh": None, "source": "test", "review_state": "auto"})
+    out = apply_patch(pack, patch("claude-content-fix",
+                                 {"op": "edit", "table": "recaps", "key": {"recap_id": "rc001"}, "set": {"text_en": "new"}},
+                                 {"op": "edit", "table": "shot_captions", "key": {"shot_caption_id": "sc001"},
+                                  "set": {"caption_en": "new"}}))
+    assert out["recaps"][0]["text_en"] == "new" and out["recaps"][0]["review_state"] == "prereviewed"
+    assert out["shot_captions"][0]["caption_en"] == "new" and out["shot_captions"][0]["review_state"] == "prereviewed"
+
+
 def test_prereview_never_downgrades_human(pack):
     out = apply_patch(pack, patch("claude-prereview", {"op": "approve", "table": "events", "key": {"event_id": "e001"}}))
     assert next(x for x in out["events"] if x["event_id"] == "e001")["review_state"] == "reviewed"

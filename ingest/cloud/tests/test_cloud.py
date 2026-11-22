@@ -159,3 +159,26 @@ def test_upload_tool_catalog_match_and_index_merge():
     new = m.merge_index(old, [{"asset_sha256": "a", "title": "Spring", "file": "new"}])
     assert new["count"] == 2 and [a["asset_sha256"] for a in new["assets"]] == ["b", "a"]
     assert new["assets"][1]["file"] == "new"
+
+
+def test_failed_asset_prints_its_traceback_and_the_task_goes_on(monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    from ingest.cloud import job
+    monkeypatch.setattr(job.gcs, "bucket_name", lambda b: "bkt")
+    monkeypatch.setattr(job.gcs, "bucket", lambda name: object())
+    monkeypatch.setattr(job, "install_key_from_env", lambda: None)
+    monkeypatch.setattr(job, "select_shas", lambda bkt, args: (["a" * 64, "b" * 64], {"a" * 64: {"catalog_id": "x"}, "b" * 64: {"catalog_id": "y"}}))
+    monkeypatch.setattr(job, "task_slot", lambda: (0, 1))
+    monkeypatch.setattr(job, "merged_titles", lambda bkt, ids: pathlib.Path("."))
+
+    def run_one(bkt, sha, entry, titles, args):
+        if sha.startswith("a"):
+            raise KeyError("missing stage output")
+        return {"asset_sha256": sha, "rc": 0}
+
+    monkeypatch.setattr(job, "run_one", run_one)
+    assert job.cmd_run(SimpleNamespace(bucket="bkt")) == 1
+    out = capsys.readouterr()
+    assert "Traceback (most recent call last)" in out.err and "KeyError: 'missing stage output'" in out.err
+    assert out.out.count("RESULT ") == 2                          # the second asset still ran

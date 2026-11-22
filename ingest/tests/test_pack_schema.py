@@ -28,6 +28,13 @@ def test_write_read_roundtrip(pack, tmp_path):
     assert len(packdb.read_fts(tmp_path / "pack.db")) == len(fts_rows(pack))
 
 
+def test_cues_sorted_by_time_without_renumbering(pack):
+    pack["cues"] = [dict(pack["cues"][0], cue_id="en.official:1009", start_s=60.0, end_s=61.0),
+                    dict(pack["cues"][1], cue_id="en.official:101", start_s=10.0, end_s=11.0)]
+    out = packdb.normalize_pack(pack)
+    assert [c["cue_id"] for c in out["cues"]] == ["en.official:101", "en.official:1009"]
+
+
 def test_same_content_same_bytes(pack, tmp_path):
     packdb.write_db(pack, tmp_path / "a.db", fts_rows(pack))
     packdb.write_db(pack, tmp_path / "b.db", fts_rows(pack))

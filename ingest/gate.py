@@ -38,7 +38,9 @@ class Gate:
         if P < a["story_start_s"]:
             return out
         mr = m["gate_margin_reviewed_reveal_s"]
-        out["cues"] = [c for c in p["cues"] if c["kind"] != "lyrics" and c["end_s"] + m["gate_margin_cue_s"] <= P]
+        out["cues"] = sorted((c for c in p["cues"] if c["kind"] != "lyrics" and c["text"].strip()
+                              and c["end_s"] + m["gate_margin_cue_s"] <= P),
+                             key=lambda c: (c["start_s"], c["end_s"], c["track"], c["cue_id"]))
         out["scenes"] = [s for s in p["scenes"] if self.ok_pre(s) and s["reveal_at_s"] + (
             m["gate_margin_scene_snapped_s"] if s["snapped"] else m["gate_margin_scene_unsnapped_s"]) <= P]
         out["events"] = [e for e in p["events"] if (self.ok_rev(e) if (e["kind"] == "reveal" or e["spoiler_critical"])
@@ -90,6 +92,15 @@ class Gate:
             out += [("character_look", lk["look_id"], k, lk[k]) for k in ("description_en", "description_zh") if lk[k]]
         for k in e["identity_links"]:
             out += [("identity_link", k["link_id"], f, k[f]) for f in ("text_en", "text_zh") if k[f]]
+        shot_ids = set()
+        for s in self.p.get("shot_captions", []):
+            if self.ok_pre(s) and max(s["reveal_at_s"], s["end_s"]) + self.m["gate_margin_scene_snapped_s"] <= P:
+                shot_ids.add(s["shot_caption_id"])
+                out += [("shot_caption", s["shot_caption_id"], f, s[f]) for f in ("caption_en", "caption_zh") if s.get(f)]
+        for x in self.p.get("shot_entities", []):
+            if x["shot_caption_id"] in shot_ids:
+                out += [("shot_entity", f"{x['shot_caption_id']}/{x['seq']}", f, x[f])
+                        for f in ("label_en", "label_zh", "action_en", "action_zh") if x.get(f)]
         for t in e["title_info"]:
             out += [("title_info", t["field"], f, t[f]) for f in ("text_en", "text_zh") if t[f]]
         return out

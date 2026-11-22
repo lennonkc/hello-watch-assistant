@@ -13,6 +13,7 @@ import pathlib
 import shutil
 import tempfile
 import time
+import traceback
 
 from ingest.cloud import gcs
 from ingest.util import CACHE, TITLES_DIR, read_json, sha256_file, work_dir, write_json
@@ -156,6 +157,7 @@ def cmd_run(args) -> int:
         try:
             res = run_one(bkt, sha, by_sha[sha], titles, args)
         except Exception as e:  # one failed asset does not take down the rest of the task
+            traceback.print_exc()
             res = {"asset_sha256": sha, "rc": 1, "error": f"{type(e).__name__}: {e}"}
         failed += res["rc"] != 0
         print("RESULT " + json.dumps(res, ensure_ascii=False, sort_keys=True), flush=True)

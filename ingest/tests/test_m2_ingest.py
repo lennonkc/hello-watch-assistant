@@ -9,7 +9,8 @@ from ingest.assemble import Assembler, match_quote, present_rows
 from ingest.ledger import Ledger
 from ingest.stages import Ctx
 from ingest.stages.gemini_stages import _full_inputs, _seg_inputs
-from ingest.stages.subtitles import generated_cues, merge_plain, plain_text, surface_tokens
+from ingest.stages.subtitles import (generated_cues, merge_plain, plain_text, surface_tokens,
+                                     validate_generated_cues, words_from_transcript)
 from ingest.tests.conftest import mini_pack
 
 ITEMS = [{"id": "m1", "type": "movie", "title": "Sonic the Hedgehog 2", "title_zh": "刺猬索尼克2", "duration_s": 130},
@@ -87,6 +88,26 @@ def test_plain_text_from_interaction_steps():
     assert plain_text(raw) == "Hello there."
 
 
+def test_blank_words_never_create_cues():
+    raw = {"steps": [{"content": [{"annotations": [
+        {"type": "word_info", "start_offset": "1.0s", "end_offset": "2.0s", "text": " "},
+        {"type": "word_info", "start_offset": "2.0s", "end_offset": "2.5s", "text": " Hello "},
+    ]}]}]}
+    words = words_from_transcript(raw)
+    assert words == [{"s": 2.0, "e": 2.5, "text": "Hello", "speaker": None}]
+    assert generated_cues([{"s": 1.0, "e": 2.0, "text": " "}, *words])[0]["text"] == "Hello"
+    # a word that ends earlier than the one before never shortens the cue
+    cue = generated_cues([{"s": 1.0, "e": 2.0, "text": "one"}, {"s": 1.5, "e": 1.8, "text": "two"}])[0]
+    assert cue["end_s"] == 2.0 and cue["text"] == "one two"
+
+
+@pytest.mark.parametrize("cue", [{"start_s": 1.0, "end_s": 2.0, "text": " "}, {"start_s": 2.0, "end_s": 2.0, "text": "x"},
+                                 {"start_s": 2.0, "end_s": 18.0, "text": "runaway"}])
+def test_generated_cues_are_validated(cue):
+    with pytest.raises(ValueError):
+        validate_generated_cues([{"start_s": 0.0, "end_s": 1.0, "text": "fine"}, cue])
+
+
 def test_cjk_tokens_and_cues():
     assert [k for k, _ in surface_tokens("你好, Scales!")] == ["你", "好", "scales"]
     cues = generated_cues([{"s": 1.0, "e": 1.2, "text": "你"}, {"s": 1.2, "e": 1.4, "text": "好。"},
@@ -101,6 +122,17 @@ def test_match_quote_cjk():
 
 
 # ── Presence backfill ───────────────────────────────────────────────────
+
+def test_scene_lists_each_character_once():
+    asm = object.__new__(Assembler)
+    asm.full = {"scenes": [{"start": "0:00", "end": "0:30", "summary_en": "Bob meets the boy.", "location": "A meadow",
+                            "characters": ["Bob", "the boy", "Bob", "Nobody"]}]}
+    asm.pack, asm.cuts, asm.dur, asm.src_full = {}, [], 100.0, "t"
+    asm.ref2id, asm.name2id, asm.aux = {}, {"bob": "c02", "boy": "c02"}, {"unmapped_refs": []}
+    asm.scene_rows()
+    assert [(r["item_id"], r["character_id"]) for r in asm.pack["item_characters"]] == [("s01", "c02")]
+    assert asm.aux["unmapped_refs"] == ["Nobody"]
+
 
 def test_present_rows_from_appearances():
     p = mini_pack()
