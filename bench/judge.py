@@ -465,7 +465,7 @@ def judge_run(run_dir: pathlib.Path, cases: dict, use_llm: bool, use_rules: bool
                "server_tools": r.get("server_tools") or [], "model_tools": r.get("model_tools") or [],
                "guard_rewritten": r.get("guard_rewritten"), "fallback": fallback_kind(r),
                "usage": usage_summary(r.get("usage"), model),
-               "server_first_text_ms": (r.get("timing") or {}).get("first_text_ms"), "flow": r.get("flow"),
+               "server_first_text_ms": (r.get("timing") or {}).get("first_text_ms"),
                "answer": answer, "answer_sha": sha, "cache": key,
                "channels": sorted({w for w, t, _p in chans if t and w != "answer"}),
                "n_evidence": len(r.get("evidence_text") or []) if r["status"] == "ok" else None,
@@ -524,14 +524,6 @@ def _lat(xs) -> dict:
     return {"n": len(xs), "p50": quantile(xs, 0.5), "p90": quantile(xs, 0.9),
             "p95": quantile(xs, 0.95) if len(xs) >= MIN_N_P95 else None,
             "mean": round(statistics.mean(xs)) if xs else None}
-
-
-def _count(xs) -> dict:
-    out: dict = {}
-    for x in xs:
-        if x is not None:
-            out[x] = out.get(x, 0) + 1
-    return out
 
 
 def _mean(xs, nd: int = 2):
@@ -593,7 +585,6 @@ def summarize(rows: list[dict]) -> dict:
         "model_calls_per_answer": _mean(u["model_calls"] for u in usage_rows),
         "cost_usd_per_q": _mean((u["cost_usd"] for u in usage_rows), 5),
         "latency_server_first_text_ms": _lat(r.get("server_first_text_ms") for r in ok),
-        "flow_mix": ", ".join(f"{k} {v}" for k, v in sorted(_count(r.get("flow") for r in ok).items())) or None,
     }
 
 
@@ -628,7 +619,7 @@ METRICS = [("cases", "n", None), ("errors (no answer; graded as non-answers)", "
            ("fallback answers % (a fixed non-answer the viewer sees)", "fallback_pct", "ok_n"),
            ("streamed answers %", "streamed_pct", "ok_n"), ("tool calls / answer", "tools_per_answer", None),
            ("· server-run (ctx-)", "server_tools_per_answer", None), ("· model-called", "model_tools_per_answer", None),
-           ("answer flow (count)", "flow_mix", None), ("model calls / answer", "model_calls_per_answer", None),
+           ("model calls / answer", "model_calls_per_answer", None),
            ("input tokens / answer, p50", "tokens_in_p50", None), ("input tokens / answer, p90", "tokens_in_p90", None),
            ("output tokens (incl. thinking) / answer, p50", "tokens_out_p50", None),
            ("output tokens (incl. thinking) / answer, p90", "tokens_out_p90", None),
@@ -669,8 +660,10 @@ def report(runs: dict[str, list[dict]], out: pathlib.Path, meta: dict | None = N
     L = [f"# Benchmark scorecard: {' vs '.join(names)}", ""]
     for n in names:
         m = (meta or {}).get(n) or {}
-        L.append(f"- **{n}**: base `{m.get('base', '?')}`, flow `{m.get('flow') or 'server default'}`, "
-                 f"commit `{m.get('commit') or '?'}`"
+        L.append(f"- **{n}**: base `{m.get('base', '?')}`, "
+                 + (f"answer flow `{m['flow']}` (recorded by a run before the tools flow was removed), "
+                    if m.get("flow") else "")
+                 + f"commit `{m.get('commit') or '?'}`"
                  + (f", {m['label']}" if m.get("label") else "") + f", judge prompt `{PROMPT_SHA}`")
     if partial:
         L += ["", f"> Only the {len(shared)} cases present in every run are compared (left out: "

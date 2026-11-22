@@ -104,7 +104,7 @@ The full contract is in [docs/knowledge-pack.md](docs/knowledge-pack.md). How th
 | Batch ingest | **Cloud Run Jobs** (parallel tasks, one asset per task) | `ingest/cloud/`, `deploy/ingest/` |
 | Media and pack storage | **Cloud Storage** (assets, work dirs, versioned packs) | `ingest/cloud/gcs.py` |
 | Image build | **Cloud Build** + **Artifact Registry** (pinned FFmpeg / Python for byte-reproducible packs) | `deploy/ingest/` |
-| Secrets: API key and **all prompts** | **Secret Manager** (prompts are never baked into the image) | `ingest/promptbook.py`, `deploy/prompts/` |
+| Secrets: API key and **the ingest prompts** | **Secret Manager** (ingest prompts are never baked into an image; the agent prompts are published and ship in the web image) | `ingest/promptbook.py`, `deploy/prompts/` |
 | Upload renewal | **Cloud Scheduler** → Cloud Run Job | `deploy/ingest/renew-job.yaml` |
 | Online assistant: server-built context at P, one model call with two gate-bounded tools, answers streamed sentence by sentence through the guard | **Agent Development Kit (ADK)** `LlmAgent` on **Gemini 3.8 Flash** (Agent Platform), served by **Cloud Run** | `server/`, `web/`, `deploy/web/` |
 | Playback | **Cloud Storage** V4 signed URLs, signed by the service's own identity (IAM `signBlob`, no key files) | `server/main.py` |
@@ -132,7 +132,7 @@ Each prompt's placeholders are validated on load, so a broken secret fails fast 
 
 <!-- results:start round 3; replace these three lines with the final run's numbers -->
 - **Benchmark** (round 3, one staged revision; an LLM judge plus a rule gate): 97 hand-written cases on the three public films give 91.9 % accuracy (n 62) and 0 cases with a rule-gate leak. 240 generated cases over four films, the public three plus a private preview title (169 min), give 96.0 % (n 136) and 0 rule-gate leaks.
-- Server latency p50 / p90 is 2.2 s / 3.9 s, with 1.15 model calls and about $0.002 per answer. The earlier tool-calling flow on the same revision: 89.5 %, 1 leak, 4.1 s / 8.2 s, 2.42 calls.
+- Server latency p50 / p90 is 2.2 s / 3.9 s, with 1.15 model calls and about $0.002 per answer. The earlier tool-calling flow, measured on the same revision before it was removed: 89.5 %, 1 leak, 4.1 s / 8.2 s, 2.42 calls.
 - Sample sizes, definitions and what the benchmark does not cover: [bench/README.md](bench/README.md#results).
 <!-- results:end -->
 

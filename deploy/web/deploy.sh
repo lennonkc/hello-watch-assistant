@@ -24,7 +24,7 @@ MIN_INSTANCES=${MIN_INSTANCES:-1}
 WATCH_ASK_PER_MINUTE=${WATCH_ASK_PER_MINUTE:-6}
 WATCH_ASK_PER_DAY_PER_IP=${WATCH_ASK_PER_DAY_PER_IP:-80}
 WATCH_ASK_PER_DAY_TOTAL=${WATCH_ASK_PER_DAY_TOTAL:-1500}
-EXTRA_ENV=${EXTRA_ENV:-}                     # more env vars, comma-separated KEY=VALUE (e.g. WATCH_FLOW=…)
+EXTRA_ENV=${EXTRA_ENV:-}                     # more env vars, comma-separated KEY=VALUE (e.g. WATCH_MODEL=…)
 SA=$SA_NAME@$PROJECT.iam.gserviceaccount.com
 ROOT=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 cd "$ROOT"
