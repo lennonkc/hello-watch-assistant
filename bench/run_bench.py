@@ -35,6 +35,8 @@ from bench.common import CASES_DIR, REPO, RUNS_DIR, read_cases, read_jsonl, writ
 
 TIMEOUT_S = 180
 TOKEN_HEADER = "X-Watch-Bench-Token"
+FLOW_HEADER = "X-Watch-Flow"                     # context | tools; honoured only together with a valid bench token
+FLOWS = ("context", "tools")
 SERVER_TOOL_PREFIX = "ctx-"
 
 
@@ -75,10 +77,25 @@ def _json(s: str):
 
 class Client:
     def __init__(self, base: str, token: str | None = None, token_header: str = TOKEN_HEADER,
-                 timeout: float = TIMEOUT_S, retry_429: int = 2, wait_429: float = 20.0):
-        self.url = base.rstrip("/") + "/api/ask"
-        self.token, self.token_header = token, token_header
-        self.timeout, self.retry_429, self.wait_429 = timeout, retry_429, wait_429
+                 timeout: float = TIMEOUT_S, retry_429: int = 2, wait_429: float = 20.0, flow: str | None = None):
+        self.base = base.rstrip("/")
+        self.url = self.base + "/api/ask"
+        self.token, self.token_header, self.flow = token, token_header, flow
+        self.timeout, self.wait_429 = timeout, wait_429
+        self.retry_429 = 0 if token else retry_429          # with a token a 429 means it was not accepted: no retry
+
+    def health(self) -> str | None:
+        """None when `GET /api/health` answers 200 with ok = true, else a one-line reason."""
+        try:
+            with urllib.request.urlopen(urllib.request.Request(self.base + "/api/health",
+                                                               headers={"User-Agent": "hello-watch-bench/1"}),
+                                        timeout=60) as r:
+                data = _json(r.read().decode("utf-8", "replace"))
+            if not (isinstance(data, dict) and data.get("ok")):
+                return f"unexpected body {str(data)[:120]}"
+            return None
+        except Exception as e:
+            return f"{type(e).__name__}: {e}"
 
     def _request(self, body: dict) -> urllib.request.Request:
         req = urllib.request.Request(self.url, data=json.dumps(body, ensure_ascii=False).encode(), method="POST")
@@ -87,6 +104,8 @@ class Client:
         req.add_header("User-Agent", "hello-watch-bench/1")
         if self.token:
             req.add_header(self.token_header, self.token)
+        if self.flow:
+            req.add_header(FLOW_HEADER, self.flow)
         return req
 
     def turn(self, title_id: str, P: float, question: str, lang: str, session_id: str, tap=None) -> dict:
@@ -160,7 +179,8 @@ def _partial(events: list, deltas: list, first: dict) -> dict:
         "streamed_text": streamed if deltas and streamed.strip() != ((ans or {}).get("text") or "").strip() else None,
         "server_latency_ms": (ans or {}).get("latency_ms"),
         "guard_rewritten": ((ans or {}).get("guard") or {}).get("rewritten"),
-        "usage": (ans or {}).get("usage"), "timing": (ans or {}).get("timing"),
+        "guard_dropped": ((ans or {}).get("guard") or {}).get("dropped"),
+        "usage": (ans or {}).get("usage"), "timing": (ans or {}).get("timing"), "flow": (ans or {}).get("flow"),
         "gate": next((e["data"] for e in events if e["event"] == "gate"), None),
         "raw": {"events": [e for e in events if e["event"] != "answer"], "answer": ans},
     }
@@ -206,6 +226,9 @@ def main(argv=None) -> int:
     ap.add_argument("--timeout", type=float, default=TIMEOUT_S)
     ap.add_argument("--retry-errors", action="store_true")
     ap.add_argument("--progress", type=int, default=1, help="print every Nth case (errors are always printed)")
+    ap.add_argument("--flow", choices=FLOWS, default=os.environ.get("BENCH_FLOW") or None,
+                    help=f"ask the server for this answer flow ({FLOW_HEADER} header; needs the bench token)")
+    ap.add_argument("--no-health-check", action="store_true", help="do not require GET /api/health to pass first")
     args = ap.parse_args(argv)
     token = args.token
     if args.token_file:
@@ -215,7 +238,7 @@ def main(argv=None) -> int:
     if args.only:
         pre = tuple(p for p in args.only.split(",") if p)
         cases = [c for c in cases if c["id"].startswith(pre)]
-    run_id = args.run_id or f"{dt.datetime.now():%m%d-%H%M}"
+    run_id = args.run_id or f"{dt.datetime.now():%m%d-%H%M}" + (f"-{args.flow}" if args.flow else "")
     out = RUNS_DIR / run_id
     out.mkdir(parents=True, exist_ok=True)
     rpath = out / "results.jsonl"
@@ -225,7 +248,12 @@ def main(argv=None) -> int:
     todo = [c for c in cases if c["id"] not in done]
     if args.limit is not None:
         todo = todo[:args.limit]
-    meta = {"run_id": run_id, "base": args.base, "label": args.label, "cases": len(cases), "commit": _git_commit(),
+    client = Client(args.base, token, args.token_header, args.timeout, flow=args.flow)
+    if not args.no_health_check and (why := client.health()):
+        print(f"ERROR: {args.base}/api/health failed ({why}); not starting the run", file=sys.stderr)
+        return 2
+    meta = {"run_id": run_id, "base": args.base, "label": args.label, "flow": args.flow, "cases": len(cases),
+            "commit": _git_commit(),
             "workers": args.workers, "token": bool(token), "started": dt.datetime.now().isoformat(timespec="seconds")}
     mpath = out / "run.json"
     if mpath.exists():
@@ -233,11 +261,13 @@ def main(argv=None) -> int:
         meta = {**old, **{k: v for k, v in meta.items() if k not in ("started",)}, "resumed": meta["started"]}
     mpath.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
 
-    client = Client(args.base, token, args.token_header, args.timeout)
     lock = threading.Lock()
+    abort = threading.Event()
     pace = {"next": 0.0}
 
     def one(c):
+        if abort.is_set():
+            return None
         if args.sleep:
             with lock:                                           # global pacing across workers
                 wait = pace["next"] - time.monotonic()
@@ -248,12 +278,20 @@ def main(argv=None) -> int:
             res = run_case(client, c)
         except Exception as e:                                   # never abort the whole run
             res = _error(f"{type(e).__name__}: {e}", None)
+        if token and res.get("http_status") == 429:
+            abort.set()                                          # set here, before this worker takes the next case
         return {"id": c["id"], **res, "finished": dt.datetime.now().isoformat(timespec="seconds")}
 
     rows = dict(done)
     print(f"{run_id}: {len(todo)} to run ({len(done)} done) → {args.base}", flush=True)
     with cf.ThreadPoolExecutor(max(1, args.workers)) as ex:
         for i, r in enumerate(ex.map(one, todo), 1):
+            if r is None:
+                continue
+            if token and r.get("http_status") == 429:
+                print(f"ERROR: HTTP 429 although a bench token was sent ({r['id']}): the target does not accept the "
+                      f"token (check WATCH_BENCH_TOKEN on the revision); stopping", file=sys.stderr)
+                return 2
             rows[r["id"]] = r
             if r["status"] == "ok" and i % max(1, args.progress) and i != len(todo):
                 write_jsonl(rpath, sorted(rows.values(), key=lambda x: x["id"]))

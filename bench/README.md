@@ -8,6 +8,7 @@ or any deployed revision (for example a tagged Cloud Run revision that takes no 
 # 1. ask (resumable; --only filters by case-id prefix, --workers 1 keeps latency clean)
 python bench/run_bench.py --base http://127.0.0.1:8080 --run-id local-1
 python bench/run_bench.py --base https://next---<service-url> --token-file .cache/bench_token --run-id next-1
+python bench/run_bench.py --base https://next---<service-url> --token-file .cache/bench_token --flow tools  # A/B
 
 # 2. grade + scorecard (runs/<run>/scorecard.{md,json}); two runs side by side → runs/compare-A-vs-B/
 python bench/judge.py next-1 --packs .cache/packs
@@ -20,7 +21,12 @@ python bench/judge.py next-1 --no-llm --no-rules
 
 The public demo is rate limited per IP (6 questions a minute, 80 a day): use `--sleep 11 --limit N` there. A
 deployment can let the benchmark past the limiter with a shared token, sent as the `X-Watch-Bench-Token` header
-(`--token`, `--token-file`, or env `BENCH_TOKEN`; header name via `--token-header`).
+(`--token`, `--token-file`, or env `BENCH_TOKEN`; header name via `--token-header`). With a valid token, `--flow
+context|tools` asks the server for that answer flow (`X-Watch-Flow` header), so one revision serves both arms of an
+A/B run; the flow goes into the run id, `run.json` and the scorecard header.
+
+A run does not start when `GET /api/health` fails, and stops at the first HTTP 429 when a token was sent (the target
+does not accept it).
 
 ## Cases (`cases/*.jsonl`, one case per line)
 
@@ -69,7 +75,8 @@ report `base` and `new` separately.
 | `server_latency_ms` | `latency_ms` of the `answer` event |
 | `server_tools` / `model_tools` | tool events split by id: `ctx-…` = run by the server before the model, the rest called by the model |
 | `guard_rewritten` | `answer.guard.rewritten` |
-| `usage`, `timing` | copied from the `answer` event when present |
+| `usage`, `timing`, `flow` | copied from the `answer` event: `usage = {input_tokens, output_tokens (incl. thinking), thought_tokens, model_calls}`, `timing = {first_text_ms, total_ms}` |
+| `guard_dropped` | `answer.guard.dropped`: sentences the output guard withheld |
 | `streamed_text` | the concatenated `delta` text, kept only when it differs from the final answer |
 
 ## Grading (`judge.py`)
@@ -83,9 +90,9 @@ report `base` and `new` separately.
 | · rule gate | master pack at `P` (review relaxed like the demo, `allow_auto`): names not yet visible and aliases not yet known (echoes of the viewer's own words are suspects), active canaries (suspects when the word also describes something already eligible), the case's `must_not_include` |
 | · LLM judge | gets the next 30 future items after `P` plus pending names / identities, and decides whether the answer states or implies them |
 | real names | `blocklist` hits, reported separately |
-| latency | p50 / p90 / p95 (nearest rank) of total, first text, first tool, server `latency_ms` |
+| latency | p50 / p90 / p95 (nearest rank) of client total, client first text, server `timing.first_text_ms`, first tool, server `latency_ms` |
 | tools | calls per answer, split server-run / model-called, and usage by tool name |
-| tokens, cost | per question from `answer.usage` (a Gemini `usage_metadata`-style object, a list of them, or `{"calls": [...]}`); `cost_usd` in the usage wins, else list prices from `ingest/ledger.py` |
+| tokens, cost | from `answer.usage`: input and output (incl. thinking) tokens per answer p50 / p90, model calls per answer, estimated cost per answer (list prices from `ingest/ledger.py`); answers per flow |
 
 Checked text = answer + evidence text (+ streamed text that differs from the final answer: the viewer saw it).
 LLM grades are cached per (case id, answer hash, prompt hash) in `runs/<run>/judged.jsonl`, so re-grading is free
