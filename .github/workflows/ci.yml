@@ -19,5 +19,7 @@ jobs:
         run: python -c "from ingest import promptbook as pb; pb.validate(pb.read_dir(pb.DEFAULT_DIR)); print('prompts OK')"
       - name: Shared wordlists self-test
         run: python -I schema/wordlists/normalize.py --selftest
+      - name: Benchmark cases are consistent
+        run: python bench/judge.py --lint
       - name: Unit tests
-        run: python -m pytest -q -p no:cacheprovider ingest/tests ingest/cloud/tests server/tests
+        run: python -m pytest -q -p no:cacheprovider ingest/tests ingest/cloud/tests server/tests bench/tests
