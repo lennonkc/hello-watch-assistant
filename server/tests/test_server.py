@@ -3,55 +3,9 @@ import json
 
 import pytest
 
-from ingest import packdb
 from ingest.retrieval import Gate
-from ingest.tests.conftest import mini_pack
 from server import guard
 from server.knowledge import Moment, pick_entity
-from server.packs import Title
-
-
-@pytest.fixture
-def title(tmp_path):
-    p = mini_pack()
-    p["shot_captions"] = [
-        {"shot_caption_id": "sc000", "start_s": 0.0, "end_s": 50.0, "reveal_at_s": 50.0, "source": "t",
-         "caption_en": "A girl walks through a meadow.", "caption_zh": None, "review_state": "auto"},
-        {"shot_caption_id": "sc001", "start_s": 50.0, "end_s": 100.0, "reveal_at_s": 100.0, "source": "t",
-         "caption_en": "The wolf howls; it is Bob.", "caption_zh": None, "review_state": "auto"}]
-    p["shot_entities"] = [
-        {"shot_caption_id": "sc001", "seq": 0, "entity_type": "character", "character_id": "c03", "object_id": None,
-         "label_en": "the wolf", "label_zh": None, "position": "left", "bbox": "[100, 50, 600, 400]", "bbox_t_s": 60,
-         "action_en": "howling at Bob's house", "action_zh": None},
-        {"shot_caption_id": "sc001", "seq": 1, "entity_type": "character", "character_id": "c01", "object_id": None,
-         "label_en": "Alice", "label_zh": None, "position": "right", "bbox": "[100, 600, 900, 900]", "bbox_t_s": 60,
-         "action_en": None, "action_zh": None}]
-    p["recaps"] = [{"recap_id": "r01", "upto_scene_id": "s01", "upto_s": 50.0, "reveal_at_s": 50.0,
-                    "text_en": "Alice met the boy in a meadow.", "text_zh": None, "source": "t", "review_state": "auto"}]
-    # a row that names Bob before his name is visible (11 s): eligible at 10 s, must reach the model as "the boy"
-    p["events"].append({"event_id": "e003", "t_s": 6.0, "reveal_at_s": 7.0, "kind": "action",
-                        "text_en": "Alice waves at Bob.", "text_zh": None, "spoiler_critical": 0, "review_state": "reviewed",
-                        "source": "test"})
-    p["item_characters"] += [{"item_type": "event", "item_id": "e003", "character_id": c, "relation": "present"}
-                             for c in ("c01", "c02")]
-    p["character_aliases"] = [{"character_id": "c02", "alias": "Bobby", "lang": "en", "alias_known_at_s": 30.0, "generic": 0}]
-    p["events"].append({"event_id": "e004", "t_s": 20.0, "reveal_at_s": 21.0, "kind": "action",
-                        "text_en": "Bobby climbs a tree in the meadow.", "text_zh": None, "spoiler_critical": 0,
-                        "review_state": "reviewed", "source": "test"})
-    # a second subtitle track repeating the lines, and a longer line on both
-    p["subtitle_tracks"].append({**p["subtitle_tracks"][0], "track": "zh.official", "lang": "zh", "priority": 1})
-    p["cues"].append({"cue_id": "en.official:003", "track": "en.official", "start_s": 20.0, "end_s": 23.0,
-                      "text": "Look at the meadow from up here!", "kind": "dialogue", "speaker_raw": None})
-    # spoken by Bob while the wolf is on screen and before "the wolf is Bob" is revealed (60.5 s)
-    p["cues"].append({"cue_id": "en.official:004", "track": "en.official", "start_s": 57.0, "end_s": 58.0,
-                      "text": "Who is out there in the dark?", "kind": "dialogue", "speaker_raw": None})
-    p["cues"] += [{**c, "cue_id": c["cue_id"].replace("en.", "zh."), "track": "zh.official"} for c in list(p["cues"])]
-    p["cue_speakers"] = [{"cue_id": f"en.official:00{i}", "character_id": "c02", "diar_label": "S1", "confidence": 0.9,
-                          "method": "t", "review_state": "auto"} for i in (2, 3, 4)]
-    root = tmp_path / "master"
-    root.mkdir()
-    packdb.write_db(packdb.normalize_pack(p), root / "pack.db")
-    return Title("mini", "ab" * 32, "Mini", "", "CC-BY-3.0", "", root)
 
 
 def test_labels_follow_name_visibility(title):
@@ -214,23 +168,21 @@ def test_limiter(monkeypatch):
 
 
 def test_429_names_the_limit_and_bench_token_skips_it(title, monkeypatch):
-    from fastapi.testclient import TestClient
-
     from server import config, main
-    from server.packs import STORE
-    monkeypatch.setitem(STORE.titles, "mini", title)
+    from server.tests.conftest import wire
+    w = wire(monkeypatch, title)
+    w.ctx.script = [{"text": "Alice, in her red coat."}]
     monkeypatch.setattr(config, "ASK_PER_MINUTE", 0)
-    monkeypatch.setattr(main, "LIMITER", main.Limiter())
-    c = TestClient(main.app)
+    c = w.client
     body = {"title_id": "mini", "p": 30, "question": "Who is that?"}
     r = c.post("/api/ask", json=body)
     assert r.status_code == 429 and r.json()["limit"] == "per_minute" and r.headers["retry-after"]
     assert c.post("/api/ask", json=body, headers={main.BENCH_HEADER: "anything"}).status_code == 429   # no token set
     monkeypatch.setattr(config, "BENCH_TOKEN", "s3cret")
     assert c.post("/api/ask", json=body, headers={main.BENCH_HEADER: "wrong"}).status_code == 429
-
-    async def fake_agent(*_a, **_k):
-        return "Alice, in her red coat."
-    monkeypatch.setattr(main, "_run_agent", fake_agent)
     r = c.post("/api/ask", json=body, headers={main.BENCH_HEADER: "s3cret"})
     assert r.status_code == 200 and "event: answer" in r.text
+    # bench requests may pick the flow
+    w.tools.script = [{"text": "Alice, in her red coat."}]
+    r = c.post("/api/ask", json=body, headers={main.BENCH_HEADER: "s3cret", "x-watch-flow": "tools"})
+    assert '"flow": "tools"' in r.text and not w.tools.script

@@ -179,7 +179,7 @@ class Gate:
 
         out = []
         for c in p.get("cues", []):
-            if c["kind"] != "lyrics":
+            if c["kind"] != "lyrics" and (c["text"] or "").strip():      # generated tracks can contain blank cues
                 out.append(Item("cue", c["cue_id"], c["start_s"], c["end_s"], c["end_s"] + m["gate_margin_cue_s"], c["text"]))
         for s in p.get("scenes", []):
             mm = m["gate_margin_scene_snapped_s"] if s["snapped"] else m["gate_margin_scene_unsnapped_s"]

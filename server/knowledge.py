@@ -188,7 +188,7 @@ class Moment:
         cid = sp["character_id"] if sp else None
         if not cid or not self.char_ok(cid) or self.gate.char_isolated(cid, cue["start_s"], cue["end_s"]):
             return "unknown speaker"
-        return self.label(cid, "en")
+        return self.label(cid)
 
     @functools.cached_property
     def _speakers(self) -> dict:
@@ -198,8 +198,8 @@ class Moment:
     def _lines(self) -> list[dict]:
         """Eligible dialogue cues on the chosen track, oldest first."""
         track, ok = self._cue_track(), {it.item_id for it in self.eligible if it.item_type == "cue"}
-        return sorted((c for c in self.pack["cues"] if c["cue_id"] in ok and c["track"] == track and c["kind"] == "dialogue"),
-                      key=lambda c: c["start_s"])
+        return sorted((c for c in self.pack["cues"] if c["cue_id"] in ok and c["track"] == track and c["kind"] == "dialogue"
+                       and (c["text"] or "").strip()), key=lambda c: c["start_s"])
 
     def recent_dialogue(self, seconds: float = 90.0, at_least: int = 0) -> list[dict]:
         """Lines that started in the last `seconds` before P (a line still on screen is excluded, §5.2); if fewer than
@@ -239,7 +239,9 @@ class Moment:
     def _object_ok(self, oid: str | None) -> bool:
         return bool(oid) and any(it.item_type == "object" and it.item_id == oid for it in self.eligible)
 
-    def on_screen(self, tap: dict | None = None) -> dict:
+    def on_screen(self, tap: dict | None = None, refs: bool = False) -> dict:
+        """Entities of the current shot (§5.2 current-shot rule). `refs=True` adds `ref` = (kind, id) to each entity
+        for server-side use (`mention_terms`); never send that to the model."""
         if self.phase == "credits":
             return {"note": "The end credits are rolling; there is nobody to identify on screen."}
         shots = sorted(self.pack.get("shot_captions", []), key=lambda s: s["start_s"])
@@ -264,21 +266,24 @@ class Moment:
         out_entities = []
         for e in sorted(entities, key=lambda e: e["seq"]):
             ent = {"position": e["position"], "bbox": json.loads(e["bbox"]), "frame_t": e["bbox_t_s"]}
+            ref = None
             if e["entity_type"] == "character":
                 cid = e.get("character_id")
                 if self.char_ok(cid) and not self.gate.char_isolated(cid, e["bbox_t_s"], e["bbox_t_s"]):
-                    c = self.chars[cid]
-                    ent.update(kind="character", label=self.label(cid, "en"), name_known=self.name_visible(c),
+                    c, ref = self.chars[cid], ("character", cid)
+                    ent.update(kind="character", label=self.label(cid), name_known=self.name_visible(c),
                                look=self._look(cid), facts=self._facts(cid)[-6:], reference_frames=self.exemplars(cid))
                 else:
                     ent.update(kind="character", label="a character who has only just appeared (nothing known yet)")
             else:
                 oid = e.get("object_id")
                 if self._object_ok(oid):
-                    o = next(o for o in self.pack["objects"] if o["object_id"] == oid)
+                    o, ref = next(o for o in self.pack["objects"] if o["object_id"] == oid), ("object", oid)
                     ent.update(kind="object", label=self.sanitize(o["name_en"]), description=self.sanitize(o["description_en"]))
                 else:
                     ent.update(kind="object", label="an object (not described yet)")
+            if refs:
+                ent["ref"] = ref
             out_entities.append(ent)
         out = {"position": ts(self.P), "entities": out_entities}
         if not out_entities:
@@ -293,6 +298,33 @@ class Moment:
                 out["tap_note"] = "The tap is not on any known entity."
         if used_shot is not None:
             out["shot_started"] = ts(used_shot["start_s"])
+        return out
+
+    def mention_terms(self, ref: tuple[str, str] | None) -> list[str]:
+        """Words by which an answer at P can refer to an on-screen entity: its labels in both languages (without a
+        leading article), its visible names and visible non-generic aliases. Used to decide whether an answer is
+        about the tapped entity."""
+        if not ref:
+            return []
+        kind, rid = ref
+        if kind == "character":
+            c = self.chars.get(rid)
+            if not c:
+                return []
+            terms = [self.label(rid, "en"), self.label(rid, "zh")]
+            if self.name_visible(c):
+                terms += [c["canonical_name"], c.get("name_zh")]
+            mr = self.m["gate_margin_reviewed_reveal_s"]
+            terms += [a["alias"] for a in self.pack.get("character_aliases", [])
+                      if a["character_id"] == rid and not a["generic"] and a["alias_known_at_s"] + mr <= self.P + EPS]
+        else:
+            o = next((o for o in self.pack.get("objects", []) if o["object_id"] == rid), None)
+            terms = [self.sanitize(o["name_en"]), o.get("name_zh")] if o else []
+        out = []
+        for t in terms:
+            t = re.sub(r"^(the|a|an)\s+", "", (t or "").strip(), flags=re.IGNORECASE)
+            if t and t not in out:
+                out.append(t)
         return out
 
     # ── media ───────────────────────────────────────────────────────
