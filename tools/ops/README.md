@@ -32,5 +32,8 @@ the image (`prompts/agent/`).
 |---|---|---|
 | `inspect-packs` | per public film: pack versions per distribution in the ingest cache and under the bucket prefixes, raw `{oNN}` / `{other}` placeholders, blank and out-of-order cues; per `PRIVATE_TITLE_SHAS` entry: where its pack lives, manifest flags, row counts, vectors, story bounds, recaps, speakers, characters, safeguards, thumbnails, what the server would miss (`server.packs.check_pack`), whether the film file is under `HELLO_WATCH_MOVIES_DIR` (matched by sha256) and which local catalog JSON describes it (path and field names only) | nothing |
 
+| `bench-show` | per case of a graded run (`BENCH_SHOW_RUN`, default the latest; `BENCH_SHOW_CASES`, default every failing case): P, language, question, answer (≤ 400 characters), rule hits with the matched text (re-checked with this commit's rules when the bench's packs are in `.cache/packs`), the judge's reason, timings, tools; at most 120 lines | nothing |
+| `logs` | Cloud Logging of the `TAG` revision for the last `LOGS_SINCE` (default 2h): severity ≥ WARNING plus the question records flagged error / cut_off / retried, optionally narrowed by `LOGS_FILTER`; time, severity and the first 300 characters | nothing |
+
 The job's full output is kept in `.cache/ops-logs/job-<name>.log`; the job log shows at most 80 lines. A private
 preview title appears in job logs only as its sha256 and as counts, never with its title, synopsis or file names.

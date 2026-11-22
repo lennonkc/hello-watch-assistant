@@ -677,7 +677,165 @@ def _work() -> pathlib.Path:
     return WORK
 
 
-JOBS = {"inspect-packs": inspect_packs}
+# ── bench-show ───────────────────────────────────────────────────────
+
+def _clip(s, n: int) -> str:
+    s = " ⏎ ".join(x.strip() for x in str(s or "").splitlines() if x.strip())
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+
+def _failing_kind(r: dict) -> str | None:
+    llm = r.get("llm") or {}
+    if r.get("status") != "ok":
+        return "error"
+    if r.get("rule_leaks") or r.get("real_names"):
+        return "leak (rule gate)"
+    if llm.get("leak"):
+        return "leak (judge only)"
+    if llm.get("verdict") in ("incorrect", "nonanswer"):
+        return llm["verdict"]
+    if llm.get("verdict") == "declined" and r.get("expect") == "answer":
+        return "declined, answer was on screen"
+    if llm.get("appropriate") is False:
+        return "inappropriate"
+    return None
+
+
+def bench_show(max_lines: int = 118) -> int:
+    """Per case one compact block from a graded run: question, answer, rule hits (re-checked with this commit's rules
+    when the packs of the last bench are present), the judge's reason, timings and tools."""
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from bench import common as C
+    from bench import judge as J
+
+    runs = ROOT / ".cache" / "bench" / "runs"
+    name = env("BENCH_SHOW_RUN")
+    if not name:
+        cands = sorted((d for d in runs.glob("*") if (d / "judged.jsonl").exists()), key=lambda d: d.stat().st_mtime)
+        if not cands:
+            raise OpsError(f"no graded run under {runs}")
+        name = cands[-1].name
+    run = runs / name
+    if not (run / "results.jsonl").exists():
+        raise OpsError(f"no run {name!r} under {runs}")
+    results = {r["id"]: r for r in C.read_jsonl(run / "results.jsonl")}
+    judged = {r["id"]: r for r in C.read_jsonl(run / "judged.jsonl")}
+    cases = {c["id"]: c for c in C.read_cases(strict=False)}
+    want = [x.strip() for x in env("BENCH_SHOW_CASES").split(",") if x.strip()]
+    if not want:
+        want = [i for i, r in judged.items() if _failing_kind(r)]
+    packs = ROOT / ".cache" / "packs"
+    recheck = packs.is_dir()
+    if recheck:
+        J.PACKS = packs
+    say(f"run {name}: {len(results)} results, {len(judged)} graded · showing {len(want)} case(s)"
+        f" · rule hits {'re-checked with this commit' if recheck else 'as graded (no .cache/packs)'}")
+    lines = 1
+    for n, cid in enumerate(want):
+        r, j, c = results.get(cid), judged.get(cid) or {}, cases.get(cid)
+        block = []
+        if r is None or c is None:
+            block.append(f"-- {cid}: {'not in this run' if r is None else 'unknown case id'}")
+        else:
+            kind = _failing_kind(j) if j else None
+            block.append(f"-- {cid} · {c['title']} · P {c['P']} {c['lang']} · {c['category']} · expect {c['expect']}"
+                         + (f" · [{kind}]" if kind else ""))
+            hist = " | ".join(h["question"] for h in c.get("history") or [])
+            block.append(f"  Q: {_clip(c['question'], 200)}" + (f"   (after: {_clip(hist, 120)})" if hist else ""))
+            if r.get("status") != "ok":
+                block.append(f"  error: {_clip(r.get('error'), 300)} · HTTP {r.get('http_status')} · "
+                             f"stream {r.get('stream_end', '?')} · {r.get('t_total_ms')} ms")
+            block.append(f"  A: {_clip(r.get('answer'), 400) or '(none)'}")
+            hits = j.get("rule_hits")
+            if recheck and r.get("status") == "ok":
+                try:
+                    hits = J.rule_check(c, r.get("answer") or "", r.get("evidence_text") or [],
+                                        r.get("streamed_text"))["rule_hits"]
+                except SystemExit as e:
+                    block.append(f"  rule: not re-checked ({e})")
+            for h in (hits or [])[:4]:
+                block.append(f"  rule: {h['rule']}  {_clip(h['match'], 110)}")
+            if hits and len(hits) > 4:
+                block.append(f"  rule: … {len(hits) - 4} more")
+            if hits is None and (j.get("rule_leaks") or j.get("suspects")):
+                block.append(f"  rule: {', '.join((j.get('rule_leaks') or []) + (j.get('suspects') or []))[:200]}")
+            llm = j.get("llm") or {}
+            if llm:
+                leak = f" · leak {_clip(llm.get('leak_quote'), 80)!r} ⇐ {_clip(llm.get('leak_fact'), 80)}" \
+                    if llm.get("leak") else ""
+                block.append(f"  judge: {llm.get('verdict')} · appropriate {llm.get('appropriate')}{leak} — "
+                             f"{_clip(llm.get('rationale'), 220)}")
+            t = r.get("timing") or {}
+            block.append(f"  time: server {r.get('server_latency_ms')} ms (first text {t.get('first_text_ms')}) · "
+                         f"client {r.get('t_total_ms')} ms (first text {r.get('t_first_text_ms')}) · tools "
+                         f"{', '.join(r.get('tools') or []) or '-'} · flow {r.get('flow')}")
+        if lines + len(block) > max_lines:
+            say(f"... {len(want) - n} more case(s): {', '.join(want[n:])[:300]}")
+            break
+        for b in block:
+            say(b)
+        lines += len(block)
+    return 0
+
+
+# ── logs ─────────────────────────────────────────────────────────────
+
+def _svc() -> dict:
+    project, region, service = env("PROJECT"), env("REGION", "us-west1"), env("SERVICE", "hello-watch")
+    if not project:
+        raise OpsError("project unknown")
+    r = gcloud("run", "services", "describe", service, "--project", project, "--region", region, "--format=json")
+    if r.returncode:
+        raise OpsError(f"cannot describe {service}: {_err(r)}")
+    return json.loads(r.stdout)
+
+
+def logs() -> int:
+    """Warnings and errors of the tagged revision, plus the one-line question records flagged error / cut_off /
+    retried. Read-only."""
+    since = env("LOGS_SINCE", "2h")
+    if not re.fullmatch(r"\d{1,4}[smhd]", since):
+        raise OpsError(f"LOGS_SINCE must look like 30m, 2h or 1d (got {since!r})")
+    svc = _svc()
+    tag = env("TAG", "next")
+    rev = next((t.get("revisionName") for t in svc.get("status", {}).get("traffic", []) if t.get("tag") == tag), None)
+    service = svc.get("metadata", {}).get("name") or env("SERVICE", "hello-watch")
+    flt = [f'resource.type="cloud_run_revision"', f'resource.labels.service_name="{service}"']
+    if rev:
+        flt.append(f'resource.labels.revision_name="{rev}"')
+    flagged = ('(textPayload:"ask {" AND (textPayload:"\\"status\\": \\"error\\"" OR '
+               'textPayload:"\\"cut_off\\": true" OR textPayload:"\\"retried\\": true"))')
+    flt.append(f'(severity>=WARNING OR textPayload:" WARNING " OR textPayload:" ERROR " OR {flagged})')
+    if env("LOGS_FILTER"):
+        flt.append(f"({env('LOGS_FILTER')})")
+    r = gcloud("logging", "read", " AND ".join(flt), "--project", env("PROJECT"), f"--freshness={since}",
+               "--limit=300", "--format=json", "--order=desc")
+    if r.returncode:
+        raise OpsError(f"gcloud logging read: {_err(r)}")
+    entries = json.loads(r.stdout or "[]")
+    say(f"revision {rev or '(tag ' + tag + ' not found: whole service)'} · last {since} · {len(entries)} entries"
+        f"{' (limit reached)' if len(entries) >= 300 else ''}")
+    sev = collections.Counter(e.get("severity", "DEFAULT") for e in entries)
+    if entries:
+        say("by severity: " + ", ".join(f"{k} {v}" for k, v in sev.most_common()))
+    shown = list(reversed(entries[:74]))
+    if len(entries) > 74:
+        say(f"(oldest {len(entries) - 74} not shown)")
+    for e in shown:
+        ts = str(e.get("timestamp", ""))[11:19]
+        if e.get("httpRequest"):
+            h = e["httpRequest"]
+            msg = (f"{h.get('requestMethod', '')} {str(h.get('requestUrl', '')).split('?')[0][-80:]} "
+                   f"{h.get('status', '')} {h.get('latency', '')}")
+        else:
+            msg = e.get("textPayload") or (e.get("jsonPayload") or {}).get("message") or json.dumps(
+                e.get("jsonPayload") or {}, ensure_ascii=False)
+        say(f"{ts} {e.get('severity', 'DEFAULT')[:7]:<7} {_clip(msg, 300)}")
+    return 0
+
+
+JOBS = {"inspect-packs": inspect_packs, "bench-show": bench_show, "logs": logs}
 
 
 def main(argv: list[str]) -> int:
