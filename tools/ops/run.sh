@@ -54,6 +54,9 @@ for d in "$HOME/google-cloud-sdk/bin" \
     PATH="$d:$PATH"
   fi
 done
+if [ -n "${OPS_TEST_BIN:-}" ]; then   # tools/ops/tests only: fake gcloud / curl / python ahead of every real one
+  PATH="$OPS_TEST_BIN:$PATH"
+fi
 export PATH
 
 say() { printf '%s\n' "$*"; }
@@ -234,6 +237,16 @@ elif what == "tag-revision":
     for t in svc.get("status", {}).get("traffic", []):
         if t.get("tag") == sys.argv[2]:
             print(t.get("revisionName", ""))
+elif what == "split":
+    # the revisions serving traffic now, REV=PERCENT,… largest first ("latest" resolved to its revision name):
+    # exactly what --to-revisions needs to put traffic back
+    st, pct = svc.get("status", {}), {}
+    for t in st.get("traffic", []):
+        p = t.get("percent") or 0
+        rev = t.get("revisionName") or (st.get("latestReadyRevisionName", "") if t.get("latestRevision") else "")
+        if p > 0 and rev:
+            pct[rev] = pct.get(rev, 0) + p
+    print(",".join("%s=%d" % rp for rp in sorted(pct.items(), key=lambda rp: (-rp[1], rp[0]))))
 '
 
 # asset sha of every film in catalog/catalog.json (from ingest/titles/<id>.json)
@@ -446,6 +459,8 @@ mode_info() {
   fi
 }
 
+# Exit statuses come from pytest and the lint themselves (output to a file, never through a pipe or tail; the logs
+# are shown afterwards), so a failure always fails the job (pinned by tools/ops/tests/test_run_sh.py).
 mode_tests() {
   local rc=0 lint=0
   ensure_venv
@@ -689,9 +704,26 @@ mode_bench() {
 
 # Move 100 % of traffic to the $TAG revision, after checking it: Ready, image built from the checked-out commit,
 # healthy with every public film, and no bench token (deploy it with RELEASE=1 first; PROMOTE_WITH_BENCH_TOKEN=1
-# overrides). Prints the env names it carries.
+# overrides). Prints the env names it carries and, as its last lines, the revision production served before and the
+# one-line command that puts that traffic back.
+rollback_lines() {               # BEFORE (REV=PCT,… from svc_q split) PROMOTED
+  hr "rollback"
+  if [ -z "$1" ]; then
+    say "previous production revision: (none: no revision was serving traffic)"
+    return 0
+  fi
+  if [ "$1" = "$2=100" ]; then
+    say "previous production revision: ${1%%=*} (the promoted revision itself: nothing to roll back)"
+  elif [ "${1#*,}" != "$1" ]; then
+    say "previous production revision: ${1%%=*} (traffic was split: $1)"
+  else
+    say "previous production revision: ${1%%=*}"
+  fi
+  say "rollback: gcloud run services update-traffic $SERVICE --project $PROJECT --region $REGION --to-revisions $1"
+}
+
 mode_promote() {
-  local url rev image want names
+  local url rev image want names before
   cloud_discover
   url=$(svc_q tag-url "$TAG")
   rev=$(svc_q tag-revision "$TAG")
@@ -715,13 +747,19 @@ mode_promote() {
       say "WARN: promoting a revision that carries the bench token (PROMOTE_WITH_BENCH_TOKEN=1)" ;;
   esac
   check_health "$url"
+  refresh_service                                # the traffic as it is now, after the checks
+  before=$(svc_q split)
   hr "traffic before"
   svc_q traffic
-  gcloud run services update-traffic "$SERVICE" --project "$PROJECT" --region "$REGION" --to-tags "$TAG=100" \
-    --quiet 2>&1 | tail -5 || die "update-traffic failed"
+  if ! gcloud run services update-traffic "$SERVICE" --project "$PROJECT" --region "$REGION" --to-tags "$TAG=100" \
+      --quiet 2>&1 | tail -5; then
+    rollback_lines "$before" "$rev"
+    die "update-traffic failed (check the traffic: gcloud run services describe $SERVICE --region $REGION)"
+  fi
   refresh_service
   hr "traffic after"
   svc_q traffic
+  rollback_lines "$before" "$rev"
 }
 
 # One-off operations: run tools/ops/job.sh of this commit (with the .venv and the machine-local paths exported).
