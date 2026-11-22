@@ -22,6 +22,10 @@ from ingest.util import CACHE, fingerprint, read_json, sha256_bytes, sha256_file
 STATE_TABLES = {"characters", "character_looks", "character_facts", "identity_links", "appearances", "scenes", "events", "objects",
                 "character_exemplars", "shot_captions", "cue_speakers", "recaps"}
 PRE = {"prereviewed", "reviewed"}
+# Development distribution: the device pack's structure (no review_log) but auto rows kept; consumers must apply the
+# gate with allow_auto (review requirement relaxed, time conditions unchanged).
+DEVICE_AUTO = "device-auto"
+AUTO_OK = PRE | {"auto"}
 
 
 def build_auto(ctx) -> dict:
@@ -92,12 +96,14 @@ def apply_flags(pack: dict, flag_items: list) -> list[list]:
     return applied
 
 
-def device_view(master: dict) -> dict:
-    """spec §2: strip review_log, keep only prereviewed / reviewed rows (also dropping dangling link rows)."""
+def device_view(master: dict, keep: set[str] = PRE) -> dict:
+    """spec §2: strip review_log, keep only rows in a `keep` state (default prereviewed / reviewed; also dropping
+    dangling link rows). `keep=AUTO_OK` gives the device-auto distribution: auto rows stay too, flagged / rejected
+    rows are still removed."""
     d = json.loads(json.dumps(master))
     d["review_log"] = []
     for t in STATE_TABLES:
-        d[t] = [r for r in d[t] if r["review_state"] in PRE]
+        d[t] = [r for r in d[t] if r["review_state"] in keep]
     chars = {c["character_id"] for c in d["characters"]}
     d["character_aliases"] = [a for a in d["character_aliases"] if a["character_id"] in chars]
     for t in ("character_looks", "character_facts", "appearances"):
@@ -109,7 +115,11 @@ def device_view(master: dict) -> dict:
     d["item_cues"] = [x for x in d["item_cues"] if x["item_id"] in exists.get(x["item_type"], set())]
     objs = {o["object_id"] for o in d["objects"]}
     d["object_sightings"] = [x for x in d["object_sightings"] if x["object_id"] in objs]
-    d["character_exemplars"] = [x for x in d["character_exemplars"] if x["character_id"] in chars]
+    looks = {lk["look_id"] for lk in d["character_looks"]}
+    d["character_exemplars"] = [x for x in d["character_exemplars"] if x["character_id"] in chars
+                                and (x["look_id"] is None or x["look_id"] in looks)]   # look dropped → its exemplars too
+    scenes = {s["scene_id"] for s in d["scenes"]}
+    d["recaps"] = [{**r, "upto_scene_id": r["upto_scene_id"] if r["upto_scene_id"] in scenes else None} for r in d["recaps"]]
     d["cue_speakers"] = [x for x in d["cue_speakers"] if x["character_id"] in chars or x["character_id"] is None]
     shots = {s["shot_caption_id"] for s in d["shot_captions"]}
     d["shot_entities"] = [{**x, "character_id": x["character_id"] if x["character_id"] in chars else None,
@@ -120,6 +130,10 @@ def device_view(master: dict) -> dict:
               "segment": {s["segment_id"] for s in d["segments"]}}
     d["embeddings"] = [x for x in d.get("embeddings", []) if x["item_id"] in exists.get(x["item_type"], set())]
     # title_info has no review_state, so "must be reviewed" can only be judged from review_log; the device pack has no review_log, so only human-approved fields go in
+    if "auto" in keep:                  # device-auto: every field not rejected stays (auto counts as usable, as with allow_auto)
+        rejected = {r["item_id"] for r in master["review_log"] if r["item_type"] == "title_info" and r["decision"] == "reject"}
+        d["title_info"] = [t for t in d["title_info"] if t["field"] not in rejected]
+        return packdb.normalize_pack(d)
     human_titles = {r["item_id"] for r in master["review_log"] if r["item_type"] == "title_info"
                     and not r["reviewer"].startswith("claude-") and r["decision"] in ("approve", "edit")}
     d["title_info"] = [t for t in d["title_info"] if t["field"] in human_titles]
@@ -169,6 +183,8 @@ def write_pack_dir(pack: dict, out: pathlib.Path, thumbs_src: pathlib.Path, embe
     manifest = {"schema_version": int(meta["schema_version"]), "pack_version": int(meta["pack_version"]),
                 "distribution": meta["distribution"], "asset_sha256": meta["asset_sha256"], "built_at": meta["built_at"],
                 "review_complete": meta["review_complete"] == "1", "files": files}
+    if meta["distribution"] == DEVICE_AUTO:
+        manifest["allow_auto"] = True
     write_json(tmp / "MANIFEST.json", manifest)
     if out.exists():
         shutil.rmtree(out)
@@ -204,12 +220,16 @@ def export_all(sha: str, write: bool = True, extra_patch: dict | None = None) ->
     master["pack_meta"] = {**common, "distribution": "master"}
     device = device_view(master)
     device["pack_meta"] = {**common, "distribution": "device"}
+    device_auto = device_view(master, AUTO_OK)
+    device_auto["pack_meta"] = {**common, "distribution": DEVICE_AUTO}
     res = {"pack_version": ver, "review_complete": review_complete == "1", "flagged": len(flagged), "checks": rep,
            "checks_failed": [f"{c['id']} {c['name']} ({len(c['issues'])})" for c in rep["checks"] if not c["ok"]],
-           "master": str(wd / "master"), "device": str(wd / "device"), "patches": patches}
+           "master": str(wd / "master"), "device": str(wd / "device"),
+           "device_auto": str(wd / DEVICE_AUTO), "patches": patches}
     if write:
         write_pack_dir(master, wd / "master", wd / "thumbs", master_emb)
         write_pack_dir(device, wd / "device", wd / "thumbs", embed.pack_rows(device, wd))
+        write_pack_dir(device_auto, wd / DEVICE_AUTO, wd / "thumbs", embed.pack_rows(device_auto, wd))
         write_json(wd / "checks.json", {"asset_sha256": sha, "pack_version": ver, "built_at": built,
                                         "review_complete": review_complete == "1", "flagged_items": flagged, **rep})
         write_json(wd / "review" / "needs_human.json", needs_human(master, rep))

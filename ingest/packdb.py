@@ -124,7 +124,7 @@ def write_db(pack: dict, path: pathlib.Path, fts_rows: list[dict] | None = None,
         bad = db.execute("PRAGMA foreign_key_check").fetchall()
         if bad:
             raise sqlite3.IntegrityError(f"foreign_key_check: {bad[:5]}")
-        if pack["pack_meta"].get("distribution") == "device":
+        if pack["pack_meta"].get("distribution") in ("device", "device-auto"):
             # spec §2: device packs carry no review_log (not even an empty table; the online service refuses to load a pack that has it)
             if pack["review_log"]:
                 raise ValueError("device pack must not carry review_log rows")
