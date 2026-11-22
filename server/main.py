@@ -332,46 +332,14 @@ def is_bench(request: Request) -> bool:
     return bool(config.BENCH_TOKEN and sent) and hmac.compare_digest(sent.encode(), config.BENCH_TOKEN.encode())
 
 
-# ── agents and conversations ────────────────────────────────────────
+# ── the agent and the conversation memory ────────────────────────────
 
-RUNNERS = {"context": Runner(app_name=APP_NAME, agent=A.build_context_agent(), session_service=session_service),
-           "tools": Runner(app_name=APP_NAME, agent=A.build_agent(), session_service=session_service)}
-TOOL_ROUNDS = {"context": config.TOOL_ROUNDS, "tools": 3}
+RUNNERS = {"context": Runner(app_name=APP_NAME, agent=A.build_context_agent(), session_service=session_service)}
 TIMEOUT_FALLBACK = {
     "en": "Sorry, that took me too long to work out. Please ask again in a moment.",
     "zh": "抱歉,这个问题我想得太久了,请稍后再问一次。",
 }
 EPS = 1e-9
-
-
-class Conversations:
-    """`tools` flow: browser session → ADK session. A seek backwards (or a guard rewrite) starts a fresh ADK session,
-    because earlier turns may contain things that are not eligible at the new P."""
-    MAX_TURNS = 8
-
-    def __init__(self):
-        self.map: collections.OrderedDict = collections.OrderedDict()
-
-    async def get(self, key: str, p: float, fresh: bool = False) -> str:
-        cur = self.map.get(key)
-        if fresh or cur is None or p + 1.0 < cur["p"] or cur["turns"] >= self.MAX_TURNS:
-            s = await session_service.create_session(app_name=APP_NAME, user_id=key)
-            if cur:
-                with contextlib.suppress(Exception):
-                    await session_service.delete_session(app_name=APP_NAME, user_id=key, session_id=cur["sid"])
-            cur = {"sid": s.id, "p": p, "turns": 0}
-        cur["p"], cur["turns"] = max(cur["p"], p), cur["turns"] + 1
-        self.map[key] = cur
-        self.map.move_to_end(key)
-        while len(self.map) > 500:
-            old_key, old = self.map.popitem(last=False)
-            with contextlib.suppress(Exception):
-                await session_service.delete_session(app_name=APP_NAME, user_id=old_key, session_id=old["sid"])
-            _forget_user(old_key)
-        return cur["sid"]
-
-
-CONVERSATIONS = Conversations()
 
 
 class History:
@@ -526,7 +494,7 @@ class Streamer:
 
 
 async def _run(runner: Runner, user: str, sid: str, text: str, emit, turn: A.Turn, deadline: float,
-               sink: Streamer | None = None, streaming: bool = True, state_delta: dict | None = None) -> tuple[str, str]:
+               sink: Streamer | None = None, streaming: bool = True) -> tuple[str, str]:
     """One agent run → (final text, status ∈ ok / timeout / limit / error). Tool calls and results go to `emit` as
     they happen; with a `sink`, model text goes to it as it streams. The run is bounded twice: no event for
     STEP_TIMEOUT_S (a stalled model call or tool) and the question's overall deadline."""
@@ -535,7 +503,7 @@ async def _run(runner: Runner, user: str, sid: str, text: str, emit, turn: A.Tur
                    max_llm_calls=turn.max_tool_rounds + 2)
     turn.run_calls = 0
     final, status, streamed = "", "ok", False
-    agen = runner.run_async(user_id=user, session_id=sid, new_message=msg, run_config=rc, state_delta=state_delta)
+    agen = runner.run_async(user_id=user, session_id=sid, new_message=msg, run_config=rc)
     try:
         while True:
             left = deadline - time.monotonic()
@@ -715,50 +683,6 @@ def _retry_deadline(turn: A.Turn, question: str, dropped: bool, rec: dict) -> fl
     return time.monotonic() + min(left, config.RETRY_TIMEOUT_S)
 
 
-async def flow_tools(t, body: Ask, p: float, user: str, state: dict, emit, turn: A.Turn, rec: dict) -> dict:
-    """The earlier design: the agent picks among five tools; the whole answer is guarded, then sent at once."""
-    runner, question = RUNNERS["tools"], body.question.strip()
-    m = A.moment_of(state)
-    tapped, screen = await asyncio.to_thread(lambda: C.focus(m.on_screen(state["tap"], refs=True)))
-    check, links = await asyncio.to_thread(_checker, t, m, p, tapped, screen, body.question, turn)
-    anon = not body.session_id                         # no conversation to keep: a session that is deleted after
-
-    async def run(text: str, deadline: float, fresh: bool = False) -> tuple[str, str]:
-        if anon:
-            return await _throwaway(runner, user, state, text, emit, turn, deadline, None, False)
-        sid = await CONVERSATIONS.get(user, p, fresh=fresh)
-        return await _run(runner, user, sid, text, emit, turn, deadline, None, False, state)
-
-    text, status = await run(question, turn.deadline)
-    hits, rewritten = check(text), False
-    if (hits or not text) and status in ("ok", "limit"):
-        # the bad draft must not stay in the conversation: retry in a fresh session
-        rewritten = True
-        if hits:
-            log.warning("guard hit at p=%.1f: %s", p, [h["kind"] for h in hits])
-            log.info("dropped draft %s: %r", sorted({h["kind"] for h in hits}), text[:240])
-        rec["dropped_kinds"] = sorted({h["kind"] for h in hits})
-        retry = _retry_deadline(turn, question, bool(hits), rec)
-        text, status = (await run(f"{question}\n\n{_retry_note(hits)}".strip(), retry, fresh=True) if retry is not None
-                        else ("", status))
-    rec["status"] = status
-    if not text and status == "error":
-        raise AskFailed
-    if not text or check(text):
-        rewritten = True
-        rec["fallback"] = "spoiler" if (text or rec["dropped_kinds"]) else "timeout"
-        text = (TIMEOUT_FALLBACK if rec["fallback"] == "timeout" else FALLBACK)[body.lang]
-        if not anon:
-            await CONVERSATIONS.get(user, p, fresh=True)
-    rec["first_text_ms"] = int((time.monotonic() - rec["t0"]) * 1000)
-    await emit("delta", {"text": text})
-    terms = await asyncio.to_thread(C.tapped_terms, A.moment_of(state), state["tap"])
-    return {"text": text, "terms": terms, "links": links, "rewritten": rewritten}
-
-
-FLOWS = {"context": flow_context, "tools": flow_tools}
-
-
 @app.post("/api/ask")
 async def ask(body: Ask, request: Request):
     t = _title(body.title_id)
@@ -769,8 +693,7 @@ async def ask(body: Ask, request: Request):
     bench = is_bench(request)
     if not bench and (limited := LIMITER.check(client_ip(request))):
         return JSONResponse(limited, status_code=429, headers={"Retry-After": str(limited["retry_after_s"])})
-    flow = request.headers.get("x-watch-flow") if bench else None
-    flow = flow if flow in FLOWS else (config.FLOW if config.FLOW in FLOWS else "context")
+    flow = "context"                     # the only flow; an `X-Watch-Flow` header (older bench runs) is ignored
 
     user = f"{body.session_id or uuid.uuid4().hex}:{t.id}"
     rid = uuid.uuid4().hex[:8]                         # request id: in the answer / error event and every log line
@@ -782,7 +705,7 @@ async def ask(body: Ask, request: Request):
 
     async def work():
         REQUEST_ID.set(rid)
-        turn = A.Turn(max_tool_rounds=TOOL_ROUNDS[flow], soft_deadline_s=config.SOFT_DEADLINE_S)
+        turn = A.Turn(max_tool_rounds=config.TOOL_ROUNDS, soft_deadline_s=config.SOFT_DEADLINE_S)
         turn.deadline, turn.lang = turn.started + config.ASK_DEADLINE_S, body.lang
         A.TURN.set(turn)
         rec = {"t0": turn.started, "first_text_ms": None, "held_preamble": 0, "leaked_preamble": 0, "retried": False,
@@ -793,7 +716,7 @@ async def ask(body: Ask, request: Request):
             elig = sum(counts["eligible"].values())
             await emit("gate", {"p": round(p, 2), "eligible_total": elig,
                                 "locked_total": sum(counts["total"].values()) - elig})
-            out = await FLOWS[flow](t, body, p, user, state, emit, turn, rec)
+            out = await flow_context(t, body, p, user, state, emit, turn, rec)
             evidence, frames, highlight = await _sources(t, p, state, turn, out, rec)
             total = int((time.monotonic() - turn.started) * 1000)
             rec["highlight"], rec["evidence"] = highlight is not None, len(evidence)
@@ -830,7 +753,7 @@ async def ask(body: Ask, request: Request):
 
 
 def _pick_sources(t, p: float, state: dict, turn: A.Turn, out: dict, rec: dict):
-    """(evidence rows, frame plan, highlight, check) to show with the final answer, both flows. Only the sources the
+    """(evidence rows, frame plan, highlight, check) to show with the final answer. Only the sources the
     answer rests on (`server.evidence`); a pure refusal or a fallback lists none. Every evidence line, frame caption and
     the highlight label goes through the guard relative to the answer's subject (`guard.source_violations`). The
     highlight only when the answer is about the tapped entity, so the box never contradicts the text."""

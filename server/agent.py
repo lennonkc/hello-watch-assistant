@@ -1,9 +1,8 @@
-"""The ADK agents (Gemini on Agent Platform) and their gate-aware tools. Two flows, selected with `WATCH_FLOW`:
-
-- `context` (default): the server builds the answering context itself (on screen + tap, recent dialogue, story so far,
-  the paused frame; `server/context.py`) and `inject_context` puts it into every model request of the question, so
-  the everyday questions need one model call. Only `search_moments` and `look_closer` remain callable.
-- `tools`: the earlier design, one agent with five tools and a routing-table instruction.
+"""The ADK agent (Gemini on Agent Platform) and its gate-aware tools. The server builds the answering context itself
+(on screen + tap, recent dialogue, story so far, the paused frame; `server/context.py`) and `inject_context` puts it
+into every model request of the question, so the everyday questions need one model call; `search_moments` and
+`look_closer` remain callable for what the context does not cover. (The earlier design — five tools and a routing-table
+instruction — was removed after three benchmark rounds; docs/online-qa.md §4a has the comparison.)
 
 The locked position P never comes from the model: the server writes `title_id`, `p`, `lang` and `tap` into session
 state, and each tool reads them from `ToolContext.state`. Tools build a `Moment` for that P, so the model can only ever
@@ -175,24 +174,10 @@ def note_on_screen(turn: Turn, m: Moment, out: dict) -> str:
 
 # ── tools ────────────────────────────────────────────────────────────
 
-# Every tool does its pack reads and thumbnail lookups in a worker thread: `Title.thumb()` may fetch from Cloud Storage
-# on demand, and nothing on the answer path may block the event loop (other viewers' streams share it).
-
-async def story_so_far(tool_context: ToolContext) -> dict:
-    """Recap of the story up to the viewer's pause point: the latest "story so far" recap plus every scene and event
-    after it. Use it for "what did I miss / what's going on" questions and to orient yourself before answering."""
-    m, turn = moment_of(tool_context.state), _turn()
-
-    def run():
-        out = m.story_so_far(refs=True)
-        return out, note_story(turn, m, out)
-    out, summary = await asyncio.to_thread(run)
-    _summarise(tool_context, summary)
-    for k in ("since_recap", "so_far"):
-        if k in out:
-            out[k] = [{f: v for f, v in it.items() if f != "ref"} for it in out[k]]
-    return out
-
+# The lookups the server runs itself (`server/context.py`) keep their step labels: on_screen, recent_dialogue,
+# story_so_far. Every tool does its pack reads and thumbnail lookups in a worker thread: `Title.thumb()` may fetch
+# from Cloud Storage on demand, and nothing on the answer path may block the event loop (other viewers' streams share
+# it).
 
 async def search_moments(query: str, tool_context: ToolContext) -> dict:
     """Search everything the viewer has already seen (scenes, events, shots, character facts, objects and spoken
@@ -211,30 +196,6 @@ async def search_moments(query: str, tool_context: ToolContext) -> dict:
     _summarise(tool_context, say(m.lang, f"{len(results)} matches, all before {ts(m.P)}",
                                  f"{len(results)} 条结果，都在 {ts(m.P)} 之前"))
     return {"query": query, "results": results}
-
-
-async def recent_dialogue(seconds: int, tool_context: ToolContext) -> dict:
-    """Lines spoken in the last `seconds` seconds before the pause (use 60 unless the viewer asks about something
-    further back; at most 240), with who said each line when known."""
-    m = moment_of(tool_context.state)
-    lines = await asyncio.to_thread(m.recent_dialogue, min(max(int(seconds or 60), 10), 240))
-    _summarise(tool_context, note_dialogue(_turn(), lines, m.lang) if m.has_subtitles
-               else say(m.lang, "No subtitles for this film", "这部影片没有字幕"))
-    out = {"lines": [{k: v for k, v in ln.items() if k != "t"} for ln in lines]}
-    if not m.has_subtitles:
-        out["note"] = "This film has no subtitle track: what was said is not available."
-    return out
-
-
-async def on_screen(tool_context: ToolContext) -> dict:
-    """Who and what is in the frame at the pause point, with their screen position, what is known about each
-    character so far, and — if the viewer tapped the frame — which entity they tapped (`tapped` is an index into
-    `entities`)."""
-    state = tool_context.state
-    m = moment_of(state)
-    out = await asyncio.to_thread(m.on_screen, state.get("tap"))
-    _summarise(tool_context, note_on_screen(_turn(), m, out))
-    return out
 
 
 async def look_closer(question: str, tool_context: ToolContext) -> dict:
@@ -365,15 +326,6 @@ def _characters(m: Moment) -> str:
                      for c in m.known_characters()) or "- (nobody yet)"
 
 
-def instruction(ctx: ReadonlyContext) -> str:
-    state = ctx.state
-    m = moment_of(state)
-    tap = ("The viewer tapped a point on the paused frame: call on_screen first to see who or what they mean."
-           if state.get("tap") else "")
-    return prompts.render("agent_instruction", title=m.title.title, position=ts(m.P), phase=m.phase_words,
-                          lang=LANG_NAME.get(m.lang, "English"), characters=_characters(m), tap=tap)
-
-
 def context_instruction(ctx: ReadonlyContext) -> str:
     m = moment_of(ctx.state)
     return prompts.render("agent_context", title=m.title.title, position=ts(m.P), phase=m.phase_words,
@@ -389,17 +341,6 @@ def _gemini() -> Gemini:
 def _generate_config(**kw) -> types.GenerateContentConfig:
     return types.GenerateContentConfig(temperature=0.3, max_output_tokens=4096,
                                        thinking_config=types.ThinkingConfig(thinking_level=config.THINKING_LEVEL), **kw)
-
-
-def build_agent(model=None) -> LlmAgent:
-    """`tools` flow: five tools, routing-table instruction."""
-    return LlmAgent(
-        name="watch_companion",
-        description="Answers questions about a paused film using only what the viewer has already seen.",
-        model=model or _gemini(), instruction=instruction,
-        tools=[story_so_far, search_moments, recent_dialogue, on_screen, look_closer],
-        before_model_callback=budget, after_model_callback=count_usage,
-        generate_content_config=_generate_config())
 
 
 def build_context_agent(model=None) -> LlmAgent:

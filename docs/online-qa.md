@@ -85,7 +85,7 @@ over `server/knowledge.py` (gate-first views at P). P, title, language and tap c
 server; tools read them from `ToolContext.state`, so the model has no parameter that could move P. HTTP contract:
 [web-api.md](web-api.md).
 
-**Context first, tools second** (`WATCH_FLOW=context`, the default). Measured on the live demo, most tool calls were
+**Context first, tools second.** Measured on the live demo, most tool calls were
 local lookups that cost nothing to compute but one model round trip (≈1.5 s) each. So the server runs them itself for
 every question, `server/context.py`:
 
@@ -138,7 +138,7 @@ has seen Bob since then." after a passage about the wolf) when the answer's subj
 question. The time gate keeps the reveal out of the model's context, and the judge-measured leak rate of the
 benchmark covers what is left.
 
-**Sources shown with the answer** (`server/evidence.py`, both flows). The context is attached whether or not the
+**Sources shown with the answer** (`server/evidence.py`). The context is attached whether or not the
 answer uses it, so it is not the evidence list. The lookups and tools only offer candidates (recaps sentence by
 sentence, story items, lines, the tapped entity's facts, search hits); once the answer is final the server keeps those
 that share content words with the answer's *assertive* sentences (two, or one for a fact about the tapped entity the
@@ -184,7 +184,7 @@ with nothing connected to the future in it; prompt rule 4 says the same for ever
 | Query embedding (`search_moments`) | 1.5 s, one attempt, no retry loop | full-text ranking; embeddings paused for 60 s |
 | `look_closer` (stills + nested call) | 6 s, the paused frame + at most 8 stills (read concurrently, at most half the budget), and never more than what is left of the question minus 3 s for the answer step (`WATCH_ANSWER_RESERVE_S`); with less than 1 s it does not start | the tool returns a note; the model answers without it (slow stills: only the paused frame is looked at) |
 | Paused frame for the context | 1.5 s (`WATCH_FRAME_WAIT_S`; on-demand titles fetch it from the bucket) | the context goes without the image |
-| Model-called tool rounds per question | 1 (3 in the `tools` flow) | function calls are switched off (`FunctionCallingConfig` `NONE`) and the model is told to answer now |
+| Model-called tool rounds per question | 1 | function calls switched off (`FunctionCallingConfig` `NONE`), the model is told to answer now |
 | Soft deadline | 6 s | same as above |
 | Silence from the agent run | 8 s | the run is stopped |
 | Whole question | 10 s, retry included | the run is stopped; complete sentences stand (a last one that ends with sentence punctuation counts, unless it looks like a preamble), else a "took too long" reply |
@@ -204,13 +204,21 @@ P (the gate's candidate list and lookups, dialogue tracks, shots, speakers) is b
 per-question build runs in a worker thread: on a synthetic 10,000-cue / 3,000-shot pack it takes 30–50 ms (about 120 ms
 for the first question, which builds the indexes).
 
-**The earlier flow** (`WATCH_FLOW=tools`) stays available for benchmarking: five tools (`story_so_far`,
-`search_moments`, `recent_dialogue`, `on_screen`, `look_closer`) and a routing-table instruction. To be precise about
-the comparison: it is the earlier routing on the new plumbing — it shares the budget callback, the deadlines, the
-guard (identity co-occurrence included), the step labels and the source selection, so a difference between the flows
-measures the server-built context and the one-round tool cap, not those. Its ADK session
-carries the conversation and is replaced after a seek backwards or a guard rewrite. The whole answer is guarded at
-once and sent as a single `delta`.
+**The earlier flow, removed.** Until round 3 the service could also answer the earlier way (`WATCH_FLOW=tools`): one
+agent choosing among five tools (`story_so_far`, `search_moments`, `recent_dialogue`, `on_screen`, `look_closer`) by a
+routing-table instruction, the whole answer guarded at once and sent as a single `delta`. It ran on the same plumbing
+(budget callback, deadlines, guard, source selection), so the comparison measured the server-built context and the
+one-round tool cap. Three benchmark rounds in a row gave the same picture, so it was deleted; `X-Watch-Flow` is
+ignored since. Last comparison, hand-written set (97 cases), staged revision 00010 = finale `646e7ad`:
+
+| | context flow | tools flow (removed) |
+|---|---|---|
+| Accuracy | 91.9 % | 89.5 % |
+| Fallback replies | 1.0 % | 8.2 % |
+| Guard rewrites | 2.1 % | 9.3 % |
+| Server time p50 / p90 | 2.2 s / 3.9 s | 4.1 s / 8.2 s |
+| Model calls per answer | 1.15 | 2.42 |
+| Rule-gate leaks | 0 | 1 (in evidence) |
 
 `look_closer` sends the current frame plus stills from the 30 s before P (every 3 s, all `≤ floor(P)`). The `gs://` clip
 mode is optional (`WATCH_LOOK_VIDEO=1`) because clipping a whole-film URI adds tens of seconds.

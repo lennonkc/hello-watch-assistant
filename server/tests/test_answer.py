@@ -1,5 +1,5 @@
 """The answer path end to end with scripted models: context injection, streaming through the per-sentence guard,
-retry / fallback, tool budget, deadlines, history across seeks, highlight truthfulness, the tools flow."""
+retry / fallback, tool budget, deadlines, history across seeks, highlight truthfulness."""
 import asyncio
 import json
 import logging
@@ -216,25 +216,6 @@ def test_zh_labels_in_context_and_highlight(wired):
     assert "1. 狼 (character" in request_text(wired.ctx.requests[0])
 
 
-# ── tools flow (kept selectable for the benchmark) ───────────────────
-
-def test_tools_flow_still_works(wired, monkeypatch):
-    monkeypatch.setattr(config, "FLOW", "tools")
-    wired.tools.script = [{"call": ("on_screen", {})}, {"text": "That is the wolf."}]
-    ev = wired.ask(61.2, tap=TAP_WOLF)
-    assert [d["name"] for d in data(ev, "tool")] == ["on_screen"]
-    assert data(ev, "delta") == [{"text": "That is the wolf."}]
-    a = answer(ev)
-    assert a["flow"] == "tools" and a["highlight"]["label"] == "the wolf" and a["usage"]["model_calls"] == 2
-
-
-def test_tools_flow_guard_retry(wired, monkeypatch):
-    monkeypatch.setattr(config, "FLOW", "tools")
-    wired.tools.script = [{"text": "That's Bob."}, {"text": "That's the boy."}]
-    ev = wired.ask(8.0)
-    assert sent_text(ev) == "That's the boy." and answer(ev)["guard"]["rewritten"]
-
-
 # ── the sweep: nothing ineligible anywhere, at any P ─────────────────
 
 LEAKY = ("That is Bob. Bobby waves. It will howl. The wolf turns out to be Bob. Jane Realperson voices her. "
@@ -315,7 +296,7 @@ def test_search_falls_back_to_full_text_without_vectors(title):
 
 def test_prompt_dir_without_a_new_prompt_falls_back(tmp_path, monkeypatch):
     from server import prompts
-    for n in ("agent_instruction", "look_closer", "guard_retry"):
+    for n in ("look_closer", "guard_retry"):
         (tmp_path / f"{n}.txt").write_text((prompts.DEFAULT_DIR / f"{n}.txt").read_text())
     monkeypatch.setenv(prompts.DIR_ENV, str(tmp_path))
     prompts._load.cache_clear()
@@ -385,10 +366,6 @@ def test_thumbnails_are_read_off_the_event_loop_and_stills_together(wired, monke
     assert [d["name"] for d in data(ev, "tool")][-2:] == ["look_closer", "search_moments"]
     assert answer(ev)["text"] == "That is the wolf." and answer(ev)["frames"]
     assert on_loop == [] and max(len(b) for b in batches) >= 6            # frame + stills of the last 30 s at once
-    monkeypatch.setattr(config, "FLOW", "tools")
-    wired.tools.script = [{"call": ("story_so_far", {})}, {"call": ("on_screen", {})}, {"text": "A wolf."}]
-    wired.ask(61.2, "What did I miss?", tap=TAP_WOLF)
-    assert on_loop == []
 
 
 # ── the join after a dropped sentence ────────────────────────────────

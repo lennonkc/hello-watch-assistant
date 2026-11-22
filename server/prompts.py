@@ -25,8 +25,7 @@ DIR_ENV = "WATCH_AGENT_PROMPTS_DIR"
 DEFAULT_DIR = REPO / "prompts" / "agent"
 
 NAMES: dict[str, tuple[str, ...]] = {
-    "agent_instruction": ("title", "position", "phase", "lang", "characters", "tap"),     # WATCH_FLOW=tools
-    "agent_context": ("title", "position", "phase", "lang", "characters"),               # WATCH_FLOW=context
+    "agent_context": ("title", "position", "phase", "lang", "characters"),
     "look_closer": ("position", "characters", "question", "lang"),
     "guard_retry": ("terms",),
 }

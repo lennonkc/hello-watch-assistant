@@ -450,17 +450,15 @@ def test_refusals_are_decided_per_sentence():
     assert E.select(cands, "We don't know yet why Bob climbs a tree in the meadow.", lambda _s: []) == []
 
 
-def test_tools_flow_fallback_and_refusal_show_no_sources(wired, monkeypatch):
-    from server import config
-    monkeypatch.setattr(config, "FLOW", "tools")
+def test_fallback_and_refusal_show_no_sources(wired):
     leak = "Alice waves at Bob."                                   # Bob's name is visible from 11 s
-    wired.tools.script = [{"call": ("story_so_far", {})}, {"text": leak}, {"call": ("story_so_far", {})}, {"text": leak}]
+    wired.ctx.script = [{"text": leak}, {"text": leak}]
     a = answer(wired.ask(8.0, "What happened?"))
     assert a["text"] == main.FALLBACK["en"] and a["evidence"] == [] and a["frames"] == []
-    wired.tools.script = [{"call": ("story_so_far", {})}, {"text": "We don't know yet why Alice met the boy in a meadow."}]
+    wired.ctx.script = [{"text": "We don't know yet why Alice met the boy in a meadow."}]
     a = answer(wired.ask(70.0, "Why did she meet him?"))
     assert a["evidence"] == [] and a["frames"] == []
-    wired.tools.script = [{"call": ("story_so_far", {})}, {"text": "Alice met the boy in a meadow."}]
+    wired.ctx.script = [{"text": "Alice met the boy in a meadow."}]
     a = answer(wired.ask(70.0, "What happened?"))
     assert [e["text"] for e in a["evidence"]] == ["Alice met the boy in a meadow."] and a["frames"]
 
