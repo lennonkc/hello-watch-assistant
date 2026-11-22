@@ -204,5 +204,33 @@ def test_limiter(monkeypatch):
     monkeypatch.setattr(config, "ASK_PER_MINUTE", 2)
     lim = main.Limiter()
     assert lim.check("1.2.3.4") is None and lim.check("1.2.3.4") is None
-    assert lim.check("1.2.3.4") is not None
+    hit = lim.check("1.2.3.4")
+    assert hit["limit"] == "per_minute" and hit["scope"] == "ip" and 1 <= hit["retry_after_s"] <= 60
     assert lim.check("5.6.7.8") is None
+    monkeypatch.setattr(config, "ASK_PER_MINUTE", 100)
+    monkeypatch.setattr(config, "ASK_PER_DAY_TOTAL", 3)
+    hit = lim.check("9.9.9.9")
+    assert hit["limit"] == "daily" and hit["scope"] == "total"
+
+
+def test_429_names_the_limit_and_bench_token_skips_it(title, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from server import config, main
+    from server.packs import STORE
+    monkeypatch.setitem(STORE.titles, "mini", title)
+    monkeypatch.setattr(config, "ASK_PER_MINUTE", 0)
+    monkeypatch.setattr(main, "LIMITER", main.Limiter())
+    c = TestClient(main.app)
+    body = {"title_id": "mini", "p": 30, "question": "Who is that?"}
+    r = c.post("/api/ask", json=body)
+    assert r.status_code == 429 and r.json()["limit"] == "per_minute" and r.headers["retry-after"]
+    assert c.post("/api/ask", json=body, headers={main.BENCH_HEADER: "anything"}).status_code == 429   # no token set
+    monkeypatch.setattr(config, "BENCH_TOKEN", "s3cret")
+    assert c.post("/api/ask", json=body, headers={main.BENCH_HEADER: "wrong"}).status_code == 429
+
+    async def fake_agent(*_a, **_k):
+        return "Alice, in her red coat."
+    monkeypatch.setattr(main, "_run_agent", fake_agent)
+    r = c.post("/api/ask", json=body, headers={main.BENCH_HEADER: "s3cret"})
+    assert r.status_code == 200 and "event: answer" in r.text

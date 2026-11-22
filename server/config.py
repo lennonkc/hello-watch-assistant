@@ -51,3 +51,6 @@ LOOK_VIDEO = os.environ.get("WATCH_LOOK_VIDEO", "0") == "1"      # near window a
 # Online answer path: deadlines (seconds). Every model / embedding call is bounded; see docs/online-qa.md §4a.
 EMBED_TIMEOUT_S = float(os.environ.get("WATCH_EMBED_TIMEOUT_S", "1.5"))     # query embedding, one attempt
 EMBED_COOLDOWN_S = float(os.environ.get("WATCH_EMBED_COOLDOWN_S", "60"))    # after a failure: full-text ranking only
+
+# Benchmark runs against a deployed revision: requests with this value in `X-Watch-Bench-Token` skip the limiter
+BENCH_TOKEN = os.environ.get("WATCH_BENCH_TOKEN", "")

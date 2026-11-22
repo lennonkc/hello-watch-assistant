@@ -10,6 +10,7 @@ import collections
 import contextlib
 import datetime as dt
 import functools
+import hmac
 import logging
 import math
 import re
@@ -123,12 +124,15 @@ def gate(title_id: str, p: float):
 # ── rate limiting (per instance; max instances is capped at deploy time) ──
 
 class Limiter:
+    """Per-IP questions per minute, per-IP and total questions per day. `check` returns None (allowed) or the 429 body:
+    `{"message", "limit": "per_minute" | "daily", "scope": "ip" | "total", "retry_after_s"}` so the UI can word it."""
+
     def __init__(self):
         self.minute: dict[str, collections.deque] = collections.defaultdict(collections.deque)
         self.day: dict[str, int] = collections.Counter()
         self.total, self.today = 0, dt.date.today()
 
-    def check(self, ip: str) -> str | None:
+    def check(self, ip: str) -> dict | None:
         now, today = time.monotonic(), dt.date.today()
         if today != self.today:
             self.day.clear()
@@ -137,9 +141,14 @@ class Limiter:
         while q and now - q[0] > 60:
             q.popleft()
         if len(q) >= config.ASK_PER_MINUTE:
-            return "You're asking quickly. Give it a few seconds and try again."
+            wait = max(1, math.ceil(60 - (now - q[0]))) if q else 60
+            return {"message": "You're asking quickly. Give it a few seconds and try again.", "limit": "per_minute",
+                    "scope": "ip", "retry_after_s": wait}
         if self.day[ip] >= config.ASK_PER_DAY_PER_IP or self.total >= config.ASK_PER_DAY_TOTAL:
-            return "The demo has reached its daily question limit. Please come back tomorrow."
+            midnight = dt.datetime.combine(today + dt.timedelta(days=1), dt.time())
+            return {"message": "The demo has reached its daily question limit. Please come back tomorrow.",
+                    "limit": "daily", "scope": "ip" if self.day[ip] >= config.ASK_PER_DAY_PER_IP else "total",
+                    "retry_after_s": max(1, int((midnight - dt.datetime.now()).total_seconds()))}
         q.append(now)
         self.day[ip] += 1
         self.total += 1
@@ -147,11 +156,19 @@ class Limiter:
 
 
 LIMITER = Limiter()
+BENCH_HEADER = "x-watch-bench-token"
 
 
 def client_ip(request: Request) -> str:
     fwd = request.headers.get("x-forwarded-for")
     return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "?")
+
+
+def is_bench(request: Request) -> bool:
+    """Benchmark runs against a deployed revision skip the limiter when they carry `WATCH_BENCH_TOKEN` in the
+    `X-Watch-Bench-Token` header. Constant-time compare; the token is never logged."""
+    sent = request.headers.get(BENCH_HEADER)
+    return bool(config.BENCH_TOKEN and sent) and hmac.compare_digest(sent.encode(), config.BENCH_TOKEN.encode())
 
 
 # ── conversations ───────────────────────────────────────────────────
@@ -231,8 +248,8 @@ async def ask(body: Ask, request: Request):
         raise HTTPException(400, "lang must be en or zh")
     a = t.pack["asset"]
     p = min(body.p, a["duration_s"])
-    if msg := LIMITER.check(client_ip(request)):
-        return JSONResponse({"message": msg}, status_code=429)
+    if not is_bench(request) and (limited := LIMITER.check(client_ip(request))):
+        return JSONResponse(limited, status_code=429, headers={"Retry-After": str(limited["retry_after_s"])})
 
     user = f"{body.session_id or uuid.uuid4().hex}:{t.id}"
     state = {"title_id": t.id, "p": p, "lang": body.lang, "tap": body.tap.model_dump() if body.tap else None}
