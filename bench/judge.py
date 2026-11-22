@@ -66,12 +66,17 @@ def _pack(c: dict):
 # ── pack lookups ─────────────────────────────────────────────────────
 
 def eligible_text(c: dict) -> str:
-    """Every text eligible at P (allow_auto) + visible names of characters already on screen + title info."""
+    """Every text eligible at P (allow_auto), English and Chinese, + character looks already shown + visible names of
+    characters already on screen + title info."""
     pv, P = _pack(c), c["P"]
     items = pv.gate(P).eligible()
+    texts = [it.text for it in items if it.text] + [pv.zh[k] for it in items if (k := (it.item_type, it.item_id)) in pv.zh]
+    looks = [lk.get(f) or "" for lk in pv.data.get("character_looks", [])
+             if pv.reviewed_ok(lk.get("review_state")) and lk.get("reveal_at_s") is not None
+             and lk["reveal_at_s"] + pv.m_rev <= P + 1e-9 for f in ("description_en", "description_zh")]
     names = [pv.visible_name(cid, P, lang) for cid in pv.chars if pv.appeared(cid, P) for lang in ("en", "zh")]
     titles = [t.get(f) or "" for t in pv.title_info for f in ("text_en", "text_zh")]
-    return "\n".join([it.text for it in items if it.text] + names + titles)
+    return "\n".join(texts + looks + names + titles)
 
 
 def future_facts(c: dict, limit: int = 30) -> list[str]:
@@ -116,24 +121,53 @@ def viewer_text(c: dict) -> str:
     return "\n".join([h["question"] for h in c.get("history") or []] + [c["question"]])
 
 
-def rule_check(c: dict, text: str) -> dict:
+def rule_check(c: dict, text: str, evidence=(), streamed: str | None = None) -> dict:
+    """Rule gate over what the viewer received: the answer, the evidence texts shown with it, and streamed text that
+    differs from the final answer. Each hit is listed once, with where it matched (`rule_hits`: rule, where, the
+    matched part with context); a label gets ` @evidence` / ` @streamed` when it did not match in the answer."""
     pv, P, q = _pack(c), c["P"], viewer_text(c)
-    leaks, suspects = [], []
+    sources = [("answer", text or "")] + [("evidence", e) for e in evidence or () if e] + \
+        ([("streamed", streamed)] if streamed else [])
+    leaks, suspects, found = [], [], []
+
+    def first(span_of):
+        for where, t in sources:
+            if (sp := span_of(t)) is not None:
+                return where, sp
+        return None
+
+    def record(bucket: list, label: str, hit) -> None:
+        where, sp = hit
+        label = label if where == "answer" else f"{label} @{where}"
+        bucket.append(label)
+        found.append({"rule": label, "where": where, "match": C.snippet(sp)})
+
     for term, cs, _cid, kind in pv.hidden_terms(P):
         m = {"term": term, "case_sensitive": cs}
-        if marker_hits(m, text):
+        if hit := first(lambda t: C.marker_span(m, t)):
             echo = marker_hits(m, q)
-            (suspects if echo else leaks).append(f"hidden_{kind}:{term}" + (" (echo)" if echo else ""))
+            record(suspects if echo else leaks, f"hidden_{kind}:{term}" + (" (echo)" if echo else ""), hit)
     legal = None
     for k in pv.active_canaries(P):
-        if C.canary_hits(k, text) and not C.canary_hits(k, q):
+        if (hit := first(lambda t: C.canary_span(k, t))) and not C.canary_hits(k, q):
             legal = eligible_text(c) if legal is None else legal
             # a canary word can also describe something already eligible (an earlier, similar action) → suspect
-            (suspects if C.canary_hits(k, legal) else leaks).append(f"canary:{k['term']}")
-    real = [b["term"] for b in pv.blocklist if marker_hits({"term": b["term"]}, text)]
-    leaks += [f"must_not_include:{t}" for t in hits(c.get("must_not_include"), text)]
-    suspects += [f"flag:{t}" for t in hits(c.get("flag_if_any"), text)]
-    return {"rule_leaks": sorted(set(leaks)), "real_names": sorted(set(real)), "suspects": sorted(set(suspects))}
+            already = C.canary_hits(k, legal)
+            record(suspects if already else leaks, f"canary:{k['term']}" + (" (already eligible)" if already else ""),
+                   hit)
+    real = []
+    for b in pv.blocklist:
+        if hit := first(lambda t: C.marker_span({"term": b["term"]}, t)):
+            real.append(b["term"])
+            found.append({"rule": f"real:{b['term']}", "where": hit[0], "match": C.snippet(hit[1])})
+    for m in c.get("must_not_include") or []:
+        if hit := first(lambda t: C.marker_span(m, t)):
+            record(leaks, f"must_not_include:{C.marker_label(m)}", hit)
+    for m in c.get("flag_if_any") or []:
+        if hit := first(lambda t: C.marker_span(m, t)):
+            record(suspects, f"flag:{C.marker_label(m)}", hit)
+    return {"rule_leaks": sorted(set(leaks)), "real_names": sorted(set(real)), "suspects": sorted(set(suspects)),
+            "rule_hits": found}
 
 
 # ── LLM judge ────────────────────────────────────────────────────────
@@ -247,7 +281,8 @@ def judge_run(run_dir: pathlib.Path, cases: dict, use_llm: bool, use_rules: bool
         if r.get("llm") and r["llm"].get("prompt_sha") and not r["llm"].get("judge_error"):
             llm_cache[(r["id"], r["answer_sha"], r["llm"]["prompt_sha"])] = r["llm"]
         if r.get("rule_leaks") is not None:
-            rule_cache[(r["id"], r["answer_sha"])] = {k: r.get(k) for k in ("rule_leaks", "real_names", "suspects")}
+            rule_cache[(r["id"], r["answer_sha"])] = {k: r.get(k) for k in ("rule_leaks", "real_names", "suspects",
+                                                                            "rule_hits")}
 
     def one(r):
         c = cases.get(r["id"])
@@ -258,6 +293,7 @@ def judge_run(run_dir: pathlib.Path, cases: dict, use_llm: bool, use_rules: bool
         sha = hashlib.sha256(checked.encode()).hexdigest()[:16]
         row = {"id": r["id"], "file": c["_file"], "set": case_set(c), "category": c["category"], "title": c["title"],
                "lang": c["lang"], "expect": c["expect"], "status": r["status"], "error": r.get("error"),
+               "http_status": r.get("http_status"), "stream_end": r.get("stream_end"), "P": c["P"],
                "t_total_ms": r.get("t_total_ms"), "t_first_text_ms": r.get("t_first_text_ms"),
                "t_first_tool_ms": r.get("t_first_tool_ms"), "server_latency_ms": r.get("server_latency_ms"),
                "streamed": bool(r.get("streamed")), "tools": r.get("tools") or [],
@@ -267,7 +303,7 @@ def judge_run(run_dir: pathlib.Path, cases: dict, use_llm: bool, use_rules: bool
                "answer": r.get("answer"), "answer_sha": sha,
                "include_hits": hits(c.get("must_include_any"), answer_text) if c.get("must_include_any") else None}
         if use_rules:
-            row.update(rule_check(c, checked))
+            row.update(rule_check(c, r.get("answer") or "", r.get("evidence_text") or [], r.get("streamed_text")))
         else:
             row.update(rule_cache.get((r["id"], sha)) or {"rule_leaks": None, "real_names": None, "suspects": None})
         if r["status"] != "ok":
@@ -338,6 +374,9 @@ def summarize(rows: list[dict]) -> dict:
         "appropriate_pct": _pct(bool(r["llm"].get("appropriate")) for r in graded),
         "keyword_hit_pct": _pct(bool(r["include_hits"]) for r in kw_rows),
         "leak_pct": _pct(bool(r.get("rule_leaks")) or bool((r.get("llm") or {}).get("leak")) for r in leak_rows),
+        "leaks_any": sum(1 for r in leak_rows if r.get("rule_leaks") or (r.get("llm") or {}).get("leak")),
+        "leaks_rule": sum(1 for r in ruled if r["rule_leaks"]) if ruled else None,
+        "leaks_judge_only": sum(1 for r in graded if r["llm"].get("leak") and not r.get("rule_leaks")),
         "rule_leak_pct": _pct(bool(r["rule_leaks"]) for r in ruled),
         "llm_leak_pct": _pct(bool(r["llm"].get("leak")) for r in graded),
         "real_name_leaks": sum(bool(r.get("real_names")) for r in ruled) if ruled else None,
@@ -378,10 +417,11 @@ def _delta(a, b) -> str:
     return f"{d:+g}"
 
 
-METRICS = [("cases", "n"), ("errors", "errors"), ("accuracy % (correct = 1, partial = 0.5)", "accuracy_pct"),
+METRICS = [("cases", "n"), ("errors (no answer; graded as non-answers)", "errors"),
+           ("accuracy % (correct = 1, partial = 0.5)", "accuracy_pct"),
            ("fully correct %", "correct_pct"), ("appropriate behaviour %", "appropriate_pct"),
            ("key-term hit %", "keyword_hit_pct"), ("spoiler leak % (rules ∪ LLM)", "leak_pct"),
-           ("· rule-gate leak %", "rule_leak_pct"), ("· LLM-judged leak %", "llm_leak_pct"),
+           ("spoiler leaks, cases", "leaks_any"), ("· rule gate", "leaks_rule"), ("· judge only", "leaks_judge_only"),
            ("real-name leaks (cases)", "real_name_leaks"), ("guard rewrites %", "guard_rewrite_pct"),
            ("streamed answers %", "streamed_pct"), ("tool calls / answer", "tools_per_answer"),
            ("· server-run (ctx-)", "server_tools_per_answer"), ("· model-called", "model_tools_per_answer"),
@@ -390,9 +430,10 @@ METRICS = [("cases", "n"), ("errors", "errors"), ("accuracy % (correct = 1, part
            ("output tokens (incl. thinking) / answer, p50", "tokens_out_p50"),
            ("output tokens (incl. thinking) / answer, p90", "tokens_out_p90"),
            ("est. cost / answer, USD", "cost_usd_per_q")]
-LATENCY = [("total (client)", "latency_total_ms"), ("first text (client)", "latency_first_text_ms"),
-           ("first text (server timing.first_text_ms)", "latency_server_first_text_ms"),
-           ("first tool (client)", "latency_first_tool_ms"), ("server latency_ms", "latency_server_ms")]
+LATENCY = [("server total (answer.latency_ms)", "latency_server_ms"),
+           ("server first text (timing.first_text_ms)", "latency_server_first_text_ms"),
+           ("client total (adds the network to the bench host)", "latency_total_ms"),
+           ("client first text", "latency_first_text_ms"), ("client first tool", "latency_first_tool_ms")]
 
 
 def report(runs: dict[str, list[dict]], out: pathlib.Path, meta: dict | None = None) -> str:
@@ -436,14 +477,15 @@ def report(runs: dict[str, list[dict]], out: pathlib.Path, meta: dict | None = N
 
     def compact(title: str, table: dict) -> None:
         L.extend(["", f"## {title}", "", "| group | n | " + " | ".join(f"acc % {n}" for n in names) + " | "
-                  + " | ".join(f"leak % {n}" for n in names) + " | " + " | ".join(f"p50 ms {n}" for n in names) + " |",
+                  + " | ".join(f"leaks rule / judge-only {n}" for n in names) + " | "
+                  + " | ".join(f"server p50 ms {n}" for n in names) + " |",
                   "|---|---|" + "---|" * (3 * len(names))])
         for g, per in table.items():
             if not any(per[n]["n"] for n in names):
                 continue
             L.append(f"| {g} | {per[names[0]]['n']} | " + " | ".join(_fmt(per[n]["accuracy_pct"]) for n in names) + " | "
-                     + " | ".join(_fmt(per[n]["leak_pct"]) for n in names) + " | "
-                     + " | ".join(_fmt(per[n]["latency_total_ms"]["p50"]) for n in names) + " |")
+                     + " | ".join(f"{_fmt(per[n]['leaks_rule'])} / {_fmt(per[n]['leaks_judge_only'])}" for n in names)
+                     + " | " + " | ".join(_fmt(per[n]["latency_server_ms"]["p50"]) for n in names) + " |")
 
     compact("By set and case file", {g: v for g, v in card["groups"].items() if g != "all"})
     compact("By category", card["by_category"])
@@ -460,12 +502,12 @@ def report(runs: dict[str, list[dict]], out: pathlib.Path, meta: dict | None = N
                 why = (r.get("rule_leaks") or []) + [f"real:{t}" for t in r.get("real_names") or []]
                 if llm.get("leak"):
                     why.append(f"llm: {llm.get('leak_quote', '')[:120]!r} ⇐ {llm.get('leak_fact', '')[:120]}")
-                leak_lines.append(f"- **{n}** `{r['id']}` ({r['category']}) — " + "; ".join(why))
+                kind = "rule" if r.get("rule_leaks") or r.get("real_names") else "judge only"
+                leak_lines.append(f"- **{n}** `{r['id']}` ({r['category']}) [{kind}] — " + "; ".join(why))
     L += leak_lines[:MAX_LEAK_LINES] or ["- none"]
     if len(leak_lines) > MAX_LEAK_LINES:
         L.append(f"- … {len(leak_lines) - MAX_LEAK_LINES} more in scorecard.json / judged.jsonl")
-    err_lines = [f"- **{n}** `{r['id']}` — {str(r.get('error'))[:160]}" for n, rows in runs.items() for r in rows
-                 if r["status"] != "ok"]
+    err_lines = error_lines(runs)
     if err_lines:
         L += ["", "## Errors", ""] + err_lines[:MAX_ERROR_LINES]
         if len(err_lines) > MAX_ERROR_LINES:
@@ -473,6 +515,8 @@ def report(runs: dict[str, list[dict]], out: pathlib.Path, meta: dict | None = N
     md = "\n".join(L) + "\n"
     (out / "scorecard.md").write_text(md, encoding="utf-8")
     summary += ["", "## Failing cases", ""] + failing_lines(runs)
+    if err_lines:
+        summary += ["", f"## Errors ({len(err_lines)})", ""] + err_lines[:MAX_ERROR_LINES]
     if leak_lines:
         summary += ["", f"## Leaks (first {min(10, len(leak_lines))} of {len(leak_lines)})", ""] + leak_lines[:10]
     summary += ["", f"Full scorecard: {out / 'scorecard.md'}"]
@@ -480,19 +524,35 @@ def report(runs: dict[str, list[dict]], out: pathlib.Path, meta: dict | None = N
     return md
 
 
+def error_lines(runs: dict[str, list[dict]]) -> list[str]:
+    """One line per errored case: what the client saw (HTTP status, how the stream ended, the error event)."""
+    out = []
+    for n, rows in runs.items():
+        for r in rows:
+            if r["status"] != "ok":
+                how = ", ".join(x for x in (f"HTTP {r['http_status']}" if r.get("http_status") else "",
+                                            f"stream {r['stream_end']}" if r.get("stream_end") else "",
+                                            f"{r['t_total_ms']} ms" if r.get("t_total_ms") is not None else "") if x)
+                out.append(f"- **{n}** `{r['id']}` ({how or '?'}) — {str(r.get('error'))[:220]}")
+    return out
+
+
 def failing_lines(runs: dict[str, list[dict]], max_chars: int = 400) -> list[str]:
     """Case ids per failure kind and run, one line each (for short job logs)."""
     out = []
     for n, rows in runs.items():
-        kinds: dict[str, list[str]] = {"error": [], "leak": [], "incorrect / nonanswer": [],
+        kinds: dict[str, list[str]] = {"error": [], "leak (rule gate)": [], "leak (judge only)": [],
+                                       "incorrect / nonanswer": [],
                                        "declined, but the answer was on screen": [], "inappropriate": []}
         for r in rows:
             llm = r.get("llm") or {}
             if r["status"] != "ok":
                 kinds["error"].append(r["id"])
                 continue
-            if r.get("rule_leaks") or r.get("real_names") or llm.get("leak"):
-                kinds["leak"].append(r["id"])
+            if r.get("rule_leaks") or r.get("real_names"):
+                kinds["leak (rule gate)"].append(r["id"])
+            elif llm.get("leak"):
+                kinds["leak (judge only)"].append(r["id"])
             if llm.get("verdict") in ("incorrect", "nonanswer"):
                 kinds["incorrect / nonanswer"].append(r["id"])
             elif llm.get("verdict") == "declined" and r["expect"] == "answer":

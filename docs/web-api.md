@@ -44,8 +44,20 @@ on `:root`, overridden under `@media (prefers-color-scheme: dark)` and `:root[da
 ```json
 [{"id": "c4c02a81-…", "title": "Sintel", "duration_s": 888, "story_start_s": 18.0, "story_end_s": 840.0,
   "poster_t": 120, "license": "CC-BY-3.0", "attribution": "Sintel (c) Blender Foundation | durian.blender.org",
-  "synopsis": "A lonely young woman…"}]
+  "synopsis": "A lonely young woman…", "playback": "standard"}]
 ```
+
+- `playback`: `standard` (the film as ingested) or `preview` (a low-bitrate copy, 640 px wide: the UI may say so).
+- Private preview titles are listed only while the browser holds a valid access code (see `GET /api/unlock`), after
+  the public films, with `"private": true`; the response is then `Cache-Control: private, no-store`.
+
+### `GET /api/unlock?code=…`
+
+Access code for the private preview titles. `204` with the cookie `watch_access` (HttpOnly, Secure, SameSite=Lax,
+Path=/, 30 days) when the code is valid, else `404`; at most 10 attempts per minute and IP (`429`, `Retry-After`).
+Afterwards reload `/api/titles`. Without the cookie every endpoint answers `404 unknown title` for a private title, the
+question endpoint included; with it, frames and the video redirect of a private title are `Cache-Control: private,
+no-store`.
 
 ### `GET /api/titles/{id}/video`
 
@@ -121,7 +133,7 @@ Order: `gate`, then the trace (`tool` / `tool_result`, possibly `highlight`), th
 
 ### `GET /api/health` (also `/healthz` locally; Cloud Run reserves that path)
 
-`{"ok": true, "titles": 3}`.
+`{"ok": true, "titles": 3}` (public films only).
 
 ## Limits
 
