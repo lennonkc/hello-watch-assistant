@@ -4,8 +4,9 @@ One file per prompt template (`<name>.txt`, Python `str.format` placeholders; `{
 
 ## Agent prompts (`agent/`): the production prompts
 
-[`agent/`](agent/) holds the prompts the online assistant uses: the agent instruction, the nested `look_closer`
-request and the guard's retry note. **These are the prompts the live demo runs**, published as they are. Their names
+[`agent/`](agent/) holds the prompts the online assistant uses: the agent instruction for each answer flow
+(`agent_context` for the default server-built-context flow, `agent_instruction` for the tool-routing flow), the nested
+`look_closer` request and the guard's retry note. **These are the prompts the live demo runs**, published as they are. Their names
 and placeholders are defined by `NAMES` in [`server/prompts.py`](../server/prompts.py) and validated on load. The
 service can still read them from Secret Manager (`WATCH_AGENT_PROMPTS_SECRET`) or another directory
 (`WATCH_AGENT_PROMPTS_DIR`); `deploy/web/deploy.sh` publishes a directory as a new secret version.

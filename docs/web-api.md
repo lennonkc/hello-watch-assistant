@@ -84,11 +84,17 @@ The response is `text/event-stream` (read it with `fetch` + a stream reader; `Ev
 | `event:` | `data:` (JSON) | Meaning |
 |---|---|---|
 | `gate` | `{"p": 431.2, "eligible_total": 140, "locked_total": 380}` | Gate computed for this question |
-| `tool` | `{"id": "t1", "name": "story_so_far", "label": "Reading the story so far", "args": {…}}` | Agent called a tool |
-| `tool_result` | `{"id": "t1", "name": "story_so_far", "summary": "1 recap + 6 events, up to 06:58"}` | Tool finished |
-| `answer` | see below | Final, guarded answer |
-| `error` | `{"message": "…"}` | Something failed; show it politely |
+| `tool` | `{"id": "t1", "name": "story_so_far", "label": "Reading the story so far", "args": {…}}` | A lookup started: a tool the agent called, or (ids `ctx-1`…`ctx-3`) one the server ran to build the context |
+| `tool_result` | `{"id": "t1", "name": "story_so_far", "summary": "1 recap + 6 events, up to 06:58"}` | That lookup finished |
+| `highlight` | `{"bbox": [210, 380, 760, 560], "label": "the young woman", "frame_t": 430}` | The tap matched an entity whose box was measured within 1 s of the paused frame; draw it right away |
+| `delta` | `{"text": " She is looking for her dragon."}` | Next piece of the answer: one sentence that already passed the output guard, with its leading space if any. Append as is |
+| `answer` | see below | Final, guarded answer; `text` equals the concatenation of all `delta` texts |
+| `error` | `{"message": "…"}` | Something failed before any answer text; show it politely |
 | `done` | `{}` | Stream finished |
+
+Order: `gate`, then the trace (`tool` / `tool_result`, possibly `highlight`), then `delta`s interleaved with further
+`tool` / `tool_result` pairs, then `answer` (or `error`), then `done`. With `WATCH_FLOW=tools` there is exactly one
+`delta`, holding the whole answer, just before `answer`.
 
 `answer` payload:
 
@@ -96,14 +102,22 @@ The response is `text/event-stream` (read it with `fetch` + a stream reader; `Ev
 {"text": "That's the young woman who …",
  "evidence": [{"type": "scene", "start_s": 398.0, "end_s": 420.0, "text": "…"}],
  "frames": [{"t": 402, "caption": "Earlier: 06:42"}],
- "highlight": {"bbox": [210, 380, 760, 560], "label": "the young woman"},
- "guard": {"checked": true, "rewritten": false},
- "latency_ms": 4210}
+ "highlight": {"bbox": [210, 380, 760, 560], "label": "the young woman", "frame_t": 430},
+ "guard": {"checked": true, "rewritten": false, "dropped": 0},
+ "latency_ms": 4210,
+ "usage": {"input_tokens": 2950, "output_tokens": 84, "thought_tokens": 40, "model_calls": 1},
+ "timing": {"first_text_ms": 1380, "total_ms": 2210},
+ "flow": "context"}
 ```
 
-- `highlight.bbox` is `[ymin, xmin, ymax, xmax]` normalised to 0–1000 on the current frame; draw it over the video.
+- `highlight.bbox` is `[ymin, xmin, ymax, xmax]` normalised to 0–1000 on frame `frame_t` (≤ `P`, from the shot's
+  keyframe). In `answer` it is `null` unless the answer text mentions the tapped entity, so the box never contradicts
+  the text; the early `highlight` event is sent only when the box is fresh (within 1 s of `floor(P)`).
 - `frames[].t` → `/api/titles/{id}/frames/{t}.jpg`; every frame is at or before `P`.
-- `guard.rewritten = true` means the output guard caught something and the answer was regenerated or replaced.
+- `guard.rewritten = true` means the output guard caught something: `dropped` sentences were never sent, or the
+  answer was regenerated (one retry) or replaced by a fixed reply.
+- `usage` counts every model call of the question (the nested `look_closer` call included); `output_tokens` includes
+  `thought_tokens`. `timing.first_text_ms` is the time to the first `delta`.
 
 ### `GET /api/health` (also `/healthz` locally; Cloud Run reserves that path)
 
@@ -111,4 +125,7 @@ The response is `text/event-stream` (read it with `fetch` + a stream reader; `Ev
 
 ## Limits
 
-Questions are rate limited per client IP (HTTP 429 with `{"message": …}`); the UI should show a friendly note.
+Questions are rate limited per client IP (HTTP 429, `Retry-After` header) with the body
+`{"message": "…", "limit": "per_minute" | "daily", "scope": "ip" | "total", "retry_after_s": 42}`; the UI should show a
+friendly note worded for the limit that was hit. Benchmark runs against a deployed revision skip the limiter by sending
+`X-Watch-Bench-Token: <WATCH_BENCH_TOKEN>`; such requests may also choose the flow with `X-Watch-Flow: context|tools`.
