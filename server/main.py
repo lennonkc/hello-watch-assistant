@@ -15,6 +15,7 @@ import hmac
 import json
 import logging
 import math
+import os
 import re
 import time
 import uuid
@@ -99,7 +100,11 @@ def _title(title_id: str):
 @app.get("/healthz")
 @app.get("/api/health")                                # Cloud Run reserves /healthz on its front end
 def healthz():
-    return {"ok": True, "titles": sum(1 for t in STORE.titles.values() if not t.hidden)}
+    """Public films only: their count, and the pack each one serves (so a benchmark can grade against the same packs
+    and refuse to mix revisions); `revision` is Cloud Run's revision name."""
+    public = sorted((t for t in STORE.titles.values() if not t.hidden), key=lambda t: t.sha)
+    return {"ok": True, "titles": len(public), "revision": os.environ.get("K_REVISION"),
+            "packs": [{"sha": t.sha, "dist": t.dist, "version": t.pack["pack_meta"].get("pack_version")} for t in public]}
 
 
 @app.get("/api/titles")

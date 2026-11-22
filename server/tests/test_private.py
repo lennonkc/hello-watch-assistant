@@ -197,7 +197,9 @@ COOKIE = {"Cookie": f"watch_access={CODE}"}
 def test_hidden_everywhere_without_the_cookie(client):
     assert [t["id"] for t in client.get("/api/titles").json()] == ["mini"]
     assert client.get("/api/titles").json()[0]["playback"] == "standard"
-    assert client.get("/api/health").json() == {"ok": True, "titles": 1}
+    h = client.get("/api/health").json()
+    assert h["ok"] is True and h["titles"] == 1 and [x["sha"] for x in h["packs"]] == [SHA]
+    assert PSHA not in str(h) and "pv1" not in str(h)                     # nothing about private preview titles
     for url in ("/api/titles/pv1/frames/3.jpg", "/api/titles/pv1/video", "/api/titles/pv1/gate?p=10"):
         r = client.get(url, follow_redirects=False)
         assert r.status_code == 404 and r.json() == {"detail": "unknown title"}, url

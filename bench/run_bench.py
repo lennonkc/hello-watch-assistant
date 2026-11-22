@@ -38,6 +38,7 @@ TOKEN_HEADER = "X-Watch-Bench-Token"
 FLOW_HEADER = "X-Watch-Flow"                     # context | tools; honoured only together with a valid bench token
 FLOWS = ("context", "tools")
 SERVER_TOOL_PREFIX = "ctx-"
+RESUME_SAME = ("base", "flow", "commit", "revision", "packs")    # a run is only resumed against the same of each
 
 
 # ── SSE ──────────────────────────────────────────────────────────────
@@ -86,16 +87,20 @@ class Client:
 
     def health(self) -> str | None:
         """None when `GET /api/health` answers 200 with ok = true, else a one-line reason."""
+        return self.health_info()[0]
+
+    def health_info(self) -> tuple[str | None, dict]:
+        """(None or a one-line reason, the health body: titles, revision, packs served)."""
         try:
             with urllib.request.urlopen(urllib.request.Request(self.base + "/api/health",
                                                                headers={"User-Agent": "hello-watch-bench/1"}),
                                         timeout=60) as r:
                 data = _json(r.read().decode("utf-8", "replace"))
             if not (isinstance(data, dict) and data.get("ok")):
-                return f"unexpected body {str(data)[:120]}"
-            return None
+                return f"unexpected body {str(data)[:120]}", {}
+            return None, data
         except Exception as e:
-            return f"{type(e).__name__}: {e}"
+            return f"{type(e).__name__}: {e}", {}
 
     def _request(self, body: dict) -> urllib.request.Request:
         req = urllib.request.Request(self.url, data=json.dumps(body, ensure_ascii=False).encode(), method="POST")
@@ -199,6 +204,7 @@ def _partial(events: list, deltas: list, first: dict, end: str | None = None) ->
         "server_latency_ms": (ans or {}).get("latency_ms"),
         "guard_rewritten": ((ans or {}).get("guard") or {}).get("rewritten"),
         "guard_dropped": ((ans or {}).get("guard") or {}).get("dropped"),
+        "guard_fallback": ((ans or {}).get("guard") or {}).get("fallback"),
         "usage": (ans or {}).get("usage"), "timing": (ans or {}).get("timing"), "flow": (ans or {}).get("flow"),
         "gate": next((e["data"] for e in events if e["event"] == "gate"), None),
         "raw": {"events": [e for e in events if e["event"] != "answer"], "answer": ans},
@@ -272,15 +278,24 @@ def main(argv=None) -> int:
     if args.limit is not None:
         todo = todo[:args.limit]
     client = Client(args.base, token, args.token_header, args.timeout, flow=args.flow)
-    if not args.no_health_check and (why := client.health()):
-        print(f"ERROR: {args.base}/api/health failed ({why}); not starting the run", file=sys.stderr)
-        return 2
+    health: dict = {}
+    if not args.no_health_check:
+        why, health = client.health_info()
+        if why:
+            print(f"ERROR: {args.base}/api/health failed ({why}); not starting the run", file=sys.stderr)
+            return 2
     meta = {"run_id": run_id, "base": args.base, "label": args.label, "flow": args.flow, "cases": len(cases),
-            "commit": _git_commit(),
+            "commit": _git_commit(), "revision": health.get("revision"), "packs": health.get("packs"),
             "workers": args.workers, "token": bool(token), "started": dt.datetime.now().isoformat(timespec="seconds")}
     mpath = out / "run.json"
-    if mpath.exists():
+    if mpath.exists() and done:
         old = json.loads(mpath.read_text(encoding="utf-8"))
+        diff = [k for k in RESUME_SAME if (old.get(k) or None) != (meta.get(k) or None)]
+        if diff:
+            print(f"ERROR: run {run_id} has {len(done)} results made with a different "
+                  + ", ".join(f"{k} ({old.get(k)!r} → {meta.get(k)!r})" for k in diff)
+                  + "; not mixing them: use a new run id", file=sys.stderr)
+            return 2
         meta = {**old, **{k: v for k, v in meta.items() if k not in ("started",)}, "resumed": meta["started"]}
     mpath.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
 
@@ -314,6 +329,11 @@ def main(argv=None) -> int:
             if token and r.get("http_status") == 429:
                 print(f"ERROR: HTTP 429 although a bench token was sent ({r['id']}): the target does not accept the "
                       f"token (check WATCH_BENCH_TOKEN on the revision); stopping", file=sys.stderr)
+                return 2
+            if args.flow and r["status"] == "ok" and r.get("flow") != args.flow:
+                abort.set()
+                print(f"ERROR: asked for flow {args.flow!r} but {r['id']} was answered by flow {r.get('flow')!r} (the "
+                      f"flow header needs an accepted bench token); stopping, result not kept", file=sys.stderr)
                 return 2
             rows[r["id"]] = r
             if r["status"] == "ok" and i % max(1, args.progress) and i != len(todo):

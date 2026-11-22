@@ -540,7 +540,7 @@ mode_deploy_staging() {
 
 # Benchmark a URL (default: the $TAG revision) with bench/run_bench.py, grade with bench/judge.py, print the scorecard.
 mode_bench() {
-  local url sha shas run_id label compare
+  local url run_id label compare gen_dir pvt
   cloud_discover
   ensure_venv
   url=${BENCH_URL:-}
@@ -553,23 +553,37 @@ mode_bench() {
   fi
   if [ -z "${PACKS_GCS:-}" ]; then die "the service has no WATCH_PACKS_GCS env var and PACKS_PREFIX is unset"; fi
 
-  hr "master packs from $PACKS_GCS"
-  shas=$("$VENV_PY" -c "$PY_SHAS") || die "cannot read the catalog"
-  for sha in $shas; do
-    mkdir -p ".cache/packs/$sha/master"
-    gcloud storage cp "$PACKS_GCS/$sha/master/pack.db" ".cache/packs/$sha/master/pack.db" --quiet >/dev/null 2>&1 \
-      || die "download failed: $sha/master/pack.db"
-    say "  $sha  $(du -h ".cache/packs/$sha/master/pack.db" | cut -f1)"
-  done
-
-  export BENCH_RUNS_DIR="$ROOT/.cache/bench/runs"
   run_id=${BENCH_RUN_ID:-}
   if [ -z "$run_id" ]; then
     run_id="$(date -u '+%m%d-%H%M')-$TAG"
     if [ -n "${BENCH_FLOW:-}" ]; then
       run_id="$run_id-$BENCH_FLOW"
     fi
+    if [ -n "${BENCH_GENERATE:-}" ]; then
+      run_id="$run_id-gen"
+    fi
   fi
+  gen_dir=""
+  if [ -n "${BENCH_GENERATE:-}" ]; then
+    gen_dir="$ROOT/.cache/bench/generated/$run_id"
+  fi
+  pvt=$(svc_q env WATCH_PRIVATE_TITLES)
+  if [ -n "${PRIVATE_PREFIX:-}" ]; then
+    pvt="$(bucket_url PRIVATE_PREFIX "$PRIVATE_PREFIX")/titles.json" || exit 1
+  fi
+
+  # the packs this URL serves, the pack lint of the hand-written cases, generated cases (bounded output)
+  hr "packs, case lint$(if [ -n "$gen_dir" ]; then printf ', generated cases'; fi)"
+  if ! OPS_ROOT="$ROOT" PACKS_GCS="$PACKS_GCS" PRIVATE_TITLES_GCS="$pvt" BENCH_BASE="$url" \
+      BENCH_GENERATE="${BENCH_GENERATE:-}" BENCH_TITLES="${BENCH_TITLES:-}" BENCH_SEED="${BENCH_SEED:-}" \
+      BENCH_GEN_DIR="$gen_dir" BENCH_SHOW_PRIVATE="${BENCH_SHOW_PRIVATE:-}" \
+      "$VENV_PY" tools/ops/jobs.py bench-prep >"$LOGS/bench-$run_id-prep.log" 2>&1; then
+    show_head "$LOGS/bench-$run_id-prep.log" 60
+    die "bench preparation failed"
+  fi
+  show_head "$LOGS/bench-$run_id-prep.log" 60
+
+  export BENCH_RUNS_DIR="$ROOT/.cache/bench/runs"
   label="${BENCH_LABEL:-}"
   if [ -z "$label" ] && [ -f .cache/staging.txt ] && [ -z "${BENCH_URL:-}" ]; then
     label="staging: $(tr '\n' ' ' < .cache/staging.txt)"
@@ -585,6 +599,9 @@ mode_bench() {
   if [ -n "${BENCH_FLOW:-}" ]; then
     set -- "$@" --flow "$BENCH_FLOW"               # X-Watch-Flow header; honoured only with the bench token
   fi
+  if [ -n "$gen_dir" ]; then
+    set -- "$@" --cases "$gen_dir"                 # a generated set is its own run, never mixed with hand-written cases
+  fi
   # progress every 25 cases and the first 10 errors; everything in the log
   if ! "$VENV_PY" bench/run_bench.py "$@" 2>&1 | tee "$LOGS/bench-$run_id-client.log" | awk '
       /ERROR/ { e++; if (e <= 10) print; else if (e == 11) print "  (more errors in the client log)"; fflush(); next }
@@ -598,6 +615,12 @@ mode_bench() {
     compare=$BENCH_COMPARE
   fi
   set -- --packs "$ROOT/.cache/packs"
+  if [ -n "$gen_dir" ]; then
+    set -- "$@" --cases "$gen_dir"
+  fi
+  if [ "${BENCH_SHOW_PRIVATE:-}" = 1 ]; then
+    set -- "$@" --show-private                     # otherwise a private preview title's cases show ids and numbers only
+  fi
   if [ "${BENCH_LLM:-1}" = 0 ]; then
     set -- "$@" --no-llm
   elif [ -z "${CEDAR_GEMINI_KEY_FILE:-}" ] || [ ! -s "$CEDAR_GEMINI_KEY_FILE" ]; then

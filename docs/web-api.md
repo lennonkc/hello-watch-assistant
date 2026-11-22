@@ -59,7 +59,8 @@ Access code for the private preview titles, as a JSON body `{"code": "…"}` (ne
 code in the URL fragment (`/#code=…`, which browsers never send): the page reads it, POSTs it, removes it from the
 address bar and reloads `/api/titles`. Without the cookie every endpoint answers `404 unknown title` for a private
 title, the question endpoint included; with it, frames and the video redirect of a private title are
-`Cache-Control: private, no-store`.
+`Cache-Control: private, no-store`. A request carrying a valid bench token (`X-Watch-Bench-Token`, see Limits) counts
+as unlocked too, so the benchmark host can test a private preview title without any access code.
 
 ### `GET /api/titles/{id}/video`
 
@@ -137,11 +138,14 @@ Order: `gate`, then the trace (`tool` / `tool_result`, possibly `highlight`), th
 
 ### `GET /api/health` (also `/healthz` locally; Cloud Run reserves that path)
 
-`{"ok": true, "titles": 3}` (public films only).
+`{"ok": true, "titles": 3, "revision": "<Cloud Run revision>", "packs": [{"sha": "…", "dist": "master", "version": "11"}]}`
+— public films only: their count and the pack each one serves (a benchmark grades against the same packs and does
+not resume a run against another revision).
 
 ## Limits
 
 Questions are rate limited per client IP (HTTP 429, `Retry-After` header) with the body
 `{"message": "…", "limit": "per_minute" | "daily", "scope": "ip" | "total", "retry_after_s": 42}`; the UI should show a
 friendly note worded for the limit that was hit. Benchmark runs against a deployed revision skip the limiter by sending
-`X-Watch-Bench-Token: <WATCH_BENCH_TOKEN>`; such requests may also choose the flow with `X-Watch-Flow: context|tools`.
+`X-Watch-Bench-Token: <WATCH_BENCH_TOKEN>`; such requests may also choose the flow with `X-Watch-Flow: context|tools`
+and see private preview titles.

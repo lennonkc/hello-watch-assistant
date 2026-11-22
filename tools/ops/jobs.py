@@ -1053,6 +1053,10 @@ def _failing_kind(r: dict) -> str | None:
         return "declined, answer was on screen"
     if llm.get("appropriate") is False:
         return "inappropriate"
+    if r.get("fallback"):
+        return f"fallback ({r['fallback']})"
+    if r.get("suspects"):
+        return "suspect (rule gate)"
     return None
 
 
@@ -1076,7 +1080,9 @@ def bench_show(max_lines: int = 118) -> int:
         raise OpsError(f"no run {name!r} under {runs}")
     results = {r["id"]: r for r in C.read_jsonl(run / "results.jsonl")}
     judged = {r["id"]: r for r in C.read_jsonl(run / "judged.jsonl")}
-    cases = {c["id"]: c for c in C.read_cases(strict=False)}
+    gen = ROOT / ".cache" / "bench" / "generated" / name                  # a generated run's own cases
+    cases = {c["id"]: c for c in C.read_cases([gen] if gen.is_dir() else None, strict=False)}
+    show_private = env("BENCH_SHOW_PRIVATE") == "1"
     want = [x.strip() for x in env("BENCH_SHOW_CASES").split(",") if x.strip()]
     if not want:
         want = [i for i, r in judged.items() if _failing_kind(r)]
@@ -1094,6 +1100,18 @@ def bench_show(max_lines: int = 118) -> int:
             block.append(f"-- {cid}: {'not in this run' if r is None else 'unknown case id'}")
         else:
             kind = _failing_kind(j) if j else None
+            if c.get("private") and not show_private:              # ids and numbers only (BENCH_SHOW_PRIVATE=1: all)
+                block.append(f"-- {cid} · private preview title · P {c['P']} {c['lang']} · {c['category']} · expect "
+                             f"{c['expect']}" + (f" · [{kind}]" if kind else "")
+                             + f" · {len(j.get('rule_leaks') or [])} rule leak(s), {len(j.get('suspects') or [])} "
+                             f"suspect(s), judge {(j.get('llm') or {}).get('verdict')}, server "
+                             f"{r.get('server_latency_ms')} ms")
+                if lines + len(block) > max_lines:
+                    break
+                for b in block:
+                    say(b)
+                lines += len(block)
+                continue
             block.append(f"-- {cid} · {c['title']} · P {c['P']} {c['lang']} · {c['category']} · expect {c['expect']}"
                          + (f" · [{kind}]" if kind else ""))
             hist = " | ".join(h["question"] for h in c.get("history") or [])
@@ -1105,8 +1123,7 @@ def bench_show(max_lines: int = 118) -> int:
             hits = j.get("rule_hits")
             if recheck and r.get("status") == "ok":
                 try:
-                    hits = J.rule_check(c, r.get("answer") or "", r.get("evidence_text") or [],
-                                        r.get("streamed_text"))["rule_hits"]
+                    hits = J.check_channels(c, J.channels(c, r), J.time_problems(c, r))["rule_hits"]
                 except SystemExit as e:
                     block.append(f"  rule: not re-checked ({e})")
             for h in (hits or [])[:4]:
@@ -1190,8 +1207,122 @@ def logs() -> int:
     return 0
 
 
+# ── bench prep (run by `run.sh bench` before every run, not a JOB) ────
+
+def _health(base: str) -> dict:
+    import urllib.request
+    with urllib.request.urlopen(urllib.request.Request(base.rstrip("/") + "/api/health",
+                                                       headers={"User-Agent": "hello-watch-bench/1"}), timeout=90) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def _pack_version(db: pathlib.Path) -> str | None:
+    con = open_db(db)
+    try:
+        return meta(con).get("pack_version")
+    finally:
+        con.close()
+
+
+def bench_prep() -> int:
+    """The packs the benchmarked URL serves → .cache/packs/<sha>/<dist>/pack.db (refused when /api/health reports
+    other pack versions), `.cache/bench/served.json`, the hand-written cases linted against those packs (bounded),
+    and with BENCH_GENERATE=<n> generated cases (BENCH_TITLES public | private | all) in BENCH_GEN_DIR. A private
+    preview title is named only "private preview title #n"."""
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from bench import common as C
+    from bench import gen_cases as G
+    from bench import judge as J
+
+    packs_gcs = env("PACKS_GCS").rstrip("/")
+    if not packs_gcs.startswith("gs://"):
+        raise OpsError("PACKS_GCS (gs://…) is not set")
+    gen_n = env("BENCH_GENERATE")
+    which = env("BENCH_TITLES") or "public"
+    if gen_n and not gen_n.isdigit():
+        raise OpsError(f"BENCH_GENERATE must be a number of cases per film (got {gen_n!r})")
+    if which not in ("public", "private", "all"):
+        raise OpsError(f"BENCH_TITLES must be public | private | all (got {which!r})")
+    root = ROOT / ".cache" / "packs"
+    served = [{"key": f["sha"][:8], "id": f["id"], "sha": f["sha"], "title": f["title"], "dist": "master",
+               "private": False, "label": f["title"]} for f in public_films()]
+    pvt = env("PRIVATE_TITLES_GCS")
+    if gen_n and which != "public":
+        if not pvt:
+            raise OpsError("BENCH_TITLES includes private titles but the service has no WATCH_PRIVATE_TITLES")
+        local = ROOT / ".cache" / "bench" / "private-titles.json"
+        local.parent.mkdir(parents=True, exist_ok=True)
+        gcp(pvt, str(local))
+        try:
+            entries = json.loads(local.read_text(encoding="utf-8")).get("titles") or []
+        except (ValueError, AttributeError) as e:
+            raise OpsError(f"private titles file unreadable: {type(e).__name__}") from None
+        for i, e in enumerate(sorted(entries, key=lambda e: str(e.get("sha"))), 1):
+            served.append({"key": f"pv{i}", "id": e["id"], "sha": e["sha"], "title": e["title"],
+                           "dist": e.get("dist") or "device-auto", "private": True,
+                           "label": f"private preview title #{i}"})
+    say(f"packs from {packs_gcs}")
+    for t in served:
+        dest = root / t["sha"] / t["dist"]
+        dest.mkdir(parents=True, exist_ok=True)
+        gcp(f"{packs_gcs}/{t['sha']}/{t['dist']}/pack.db", str(dest / "pack.db"))
+        t["version"] = _pack_version(dest / "pack.db")
+        con = open_db(dest / "pack.db")
+        try:
+            t["duration_s"] = con.execute("SELECT duration_s FROM asset").fetchone()[0]
+        finally:
+            con.close()
+        say(f"  {t['label'][:34]:34} {t['dist']:11} v{t['version']}  {human((dest / 'pack.db').stat().st_size)}")
+    base = env("BENCH_BASE")
+    if base:
+        try:
+            h = _health(base)
+        except Exception as e:                                   # noqa: BLE001
+            raise OpsError(f"{base}/api/health: {type(e).__name__}") from None
+        reported = {x.get("sha"): str(x.get("version")) for x in h.get("packs") or []}
+        if not reported:
+            say("  WARN: the server does not report its pack versions (older revision); not compared")
+        for t in served:
+            if not t["private"] and reported and reported.get(t["sha"]) != str(t["version"]):
+                raise OpsError(f"{t['label']}: the server serves pack v{reported.get(t['sha'])}, {packs_gcs} has "
+                               f"v{t['version']}: grading would use other packs than the ones answering")
+        if reported:
+            say(f"  server {h.get('revision') or '?'} serves the same pack versions")
+    out = ROOT / ".cache" / "bench" / "served.json"
+    out.write_text(json.dumps(served, ensure_ascii=False, indent=1), encoding="utf-8")
+    J.PACKS = root
+    C._PACKS.clear()
+    say("lint: hand-written cases against these packs")
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = J.lint(C.read_cases(strict=False), with_packs=True, max_lines=20)
+    for line in buf.getvalue().splitlines()[:24]:
+        say("  " + line)
+    if rc:
+        say("  WARN: hand-written cases do not match the served packs (above); the run goes ahead")
+    if not gen_n:
+        return 0
+    gen_dir = pathlib.Path(env("BENCH_GEN_DIR") or ROOT / ".cache" / "bench" / "generated" / "latest")
+    say(f"generate: {gen_n} cases per film, titles {which}, seed {env('BENCH_SEED') or 1} → {gen_dir.name}")
+    for line in G.generate_served(served, root, gen_dir, which, int(gen_n), int(env("BENCH_SEED") or 1)):
+        say("  " + line[:300])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = J.lint(C.read_cases([gen_dir], strict=False), with_packs=True, titles=J.served_titles(served),
+                    show_private=env("BENCH_SHOW_PRIVATE") == "1", max_lines=15)
+    for line in buf.getvalue().splitlines()[:18]:
+        say("  " + line)
+    if rc:
+        raise OpsError("generated cases fail the lint (above): not running them")
+    return 0
+
+
 JOBS = {"inspect-packs": inspect_packs, "publish-public-packs": publish_public_packs,
-        "publish-private-title": publish_private_title, "bench-show": bench_show, "logs": logs}
+        "publish-private-title": publish_private_title, "bench-show": bench_show, "logs": logs,
+        "bench-prep": bench_prep}
 
 
 def main(argv: list[str]) -> int:

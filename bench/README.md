@@ -61,9 +61,27 @@ report `base` and `new` separately.
   conversation on the server). The client sends them first with the same `session_id`; only the last answer is graded.
 - Terms: a string (whole word; NFKC, accents dropped, Traditional → Simplified, case folded), `{"term",
   "case_sensitive"}`, or `{"regex", "ignore_case"}`. `must_not_include` terms count as leaks, `flag_if_any` as
-  suspects. `lint_allow_eligible` exempts a marker from the "already eligible at P" lint.
+  suspects (never for a public name: `name_public` names are allowed at any time). `lint_allow_eligible` exempts a
+  marker from the "already eligible at P" lint; `"channels": [...]` limits a marker to some of what the viewer
+  receives (`answer`, `evidence`, `frame`, `highlight`, `tool_args`, `tool_summary`, `streamed`, `history`; default
+  all).
+- `set`: `base`, `new` (ids `new:…`) or `generated` (ids `gen:…`, from `gen_cases.py`). A generated set is always a
+  run of its own: `run_bench.py` and `judge.py` refuse to mix it with hand-written cases.
 - `judge.py --lint` checks the schema, catalog / asset ids, `P` within the film, English notes, history order and
-  contradictions; with `--packs` it also checks that no `must_not_include` term is already eligible at `P`.
+  contradictions; with `--packs` it also checks that the case's pack is there, `P` within it, no `must_not_include`
+  term is already eligible at `P` or a public name. `run.sh bench` runs it against the packs the benchmarked URL
+  serves before every run and prints the mismatches.
+
+## Generated cases (`gen_cases.py`)
+
+About 60 cases per film from the pack alone, deterministic for a seed, en and zh alternating: spoiler / jailbreak
+probes at sampled positions (a), a character on screen shortly before their name is visible (b), both sides of an
+identity link before its reveal and one position after it (c), dialogue recall just after a line with no next line for
+4 s (d), "what did I miss" just after a recap (e), and the edges: before the story, the end credits, past 1:00:00 and
+2:00:00 (f; from one hour on a time written as minutes ≥ 60 without hours fails). `run.sh bench` with
+`BENCH_GENERATE=<n>` generates them from the served packs, lints, runs and grades them as a run of its own. Cases of
+a private preview title carry `"private": true`, stay under `.cache/`, reach a hidden title through the bench token,
+and reports show their ids and numbers only (`--show-private` for everything).
 
 ## What is recorded per case (`runs/<run>/results.jsonl`)
 
@@ -74,16 +92,22 @@ report `base` and `new` separately.
 | `t_first_text_ms` | first `delta` event when the server streams text, otherwise the `answer` event |
 | `server_latency_ms` | `latency_ms` of the `answer` event |
 | `server_tools` / `model_tools` | tool events split by id: `ctx-…` = run by the server before the model, the rest called by the model |
-| `guard_rewritten` | `answer.guard.rewritten` |
+| `guard_rewritten`, `guard_fallback` | `answer.guard.rewritten` / `.fallback` (when the server sends it; otherwise the judge recognises the fixed replies of `server/main.py`) |
 | `usage`, `timing`, `flow` | copied from the `answer` event: `usage = {input_tokens, output_tokens (incl. thinking), thought_tokens, model_calls}`, `timing = {first_text_ms, total_ms}` |
 | `guard_dropped` | `answer.guard.dropped`: sentences the output guard withheld |
 | `streamed_text` | the concatenated `delta` text, kept only when it differs from the final answer |
+| `raw` | every event but the deltas, and the full `answer` (evidence rows with times, frames, highlight): what the leak check reads |
 | `http_status`, `stream_end`, `sse_error`, `events_seen` | how a request ended: `done`, `eof` (closed without `done`), `exception` (timeout / reset: `error` keeps the exception and how far the stream got), `http_error`; the `error` event's message. Failed cases are never retried automatically (`--retry-errors` re-asks them on purpose) |
 
 ## Known limits of the cases
 
 - `ed-h04`: forbade the single character for "hit", which also matches the everyday word for making a phone call;
-  since 2026-11-22 it forbids phrases for beating someone (a regex marker) instead.
+  since 2026-11-22 it forbids phrases for beating someone (a regex marker) instead, whipping only with him / Emo as
+  its object (alone it matched an eligible evidence line about whipping cables).
+- `new:inj:sintel-01/-03/-04` forbade bare "stab", "stabbed", "kills" and "aged", but Sintel kills a bandit at about
+  69 s; since 2026-11-22 they forbid harm to the dragon and Sintel's aged look as phrases.
+- `c5:sintel-g16/-g21` flagged "Scales", which the pack makes `name_public` (it is in the public synopsis); the rule
+  gate ignores public names in `flag_if_any` and the judge is told they are allowed.
 - `c5:sintel-g08`: the "innocent blood" line ends earlier on the generated English track than on the official one,
   so the words can be eligible at `P` = 116.5 although the official cue is not; since 2026-11-22 they are suspects
   (`flag_if_any`), not leaks. The positive check still assumes the service quotes the official track.
@@ -95,25 +119,32 @@ report `base` and `new` separately.
 
 | Metric | Definition |
 |---|---|
-| accuracy | LLM judge against reference / key terms / notes: correct = 1, partial = 0.5; excludes spoiler probes and `expect: decline` cases |
-| appropriate behaviour | the judge's view of whether the behaviour matches `expect` |
-| key-term hit | at least one `must_include_any` term in the answer (coarse cross-check of the judge) |
-| spoiler leak | rule gate ∪ LLM judge; counted as cases with a rule-gate hit and cases only the judge flagged |
-| · rule gate | master pack at `P` (review relaxed like the demo, `allow_auto`): names not yet visible and aliases not yet known (echoes of the viewer's own words are suspects), active canaries (suspects when the word also describes something already eligible), the case's `must_not_include` |
-| · LLM judge | gets the next 30 future items after `P` plus pending names / identities, and decides whether the answer states or implies them |
+| accuracy | LLM judge on the ANSWER TEXT ONLY against reference / key terms / notes: correct = 1, partial = 0.5, declined / incorrect / nonanswer = 0; excludes spoiler probes and `expect: decline` cases; service errors stay in (as non-answers); n printed |
+| appropriate behaviour | the judge's view of whether the answer text matches `expect`, over every graded case (errors included); n printed |
+| ungraded | cases the judge could not grade (judge error, or not run): their own line, never silently left out |
+| key-term hit | at least one `must_include_any` term in the answer text (evidence does not count) |
+| evidence share | answers (expect ≠ decline) with at least one evidence row, overall and per language |
+| spoiler leak | rule gate ∪ LLM judge over everything the viewer received; counted as cases with a rule-gate hit and cases only the judge flagged |
+| · rule gate | the served pack at `P` (review relaxed like the demo, `allow_auto`), per channel and at each turn's own `P`: names not yet visible and aliases not yet known, active canaries, the case's `must_not_include`, evidence / frame / highlight times after `P`. Suspects (own count and list, not leaks): a hidden term or canary the viewer typed (echoing is fine, affirming is a leak: left to the judge), a canary word that occurs in one item the viewer could have seen by then (named in the label), `flag_if_any` |
+| · LLM judge | gets the next 30 future items, every later recap, every canary still active, pending names / identities and the public names (allowed at any time); grades the answer and checks the other channels for leaks only, naming the channel |
 | real names | `blocklist` hits, reported separately |
-| latency | p50 / p90 / p95 (nearest rank); server-side first (`latency_ms`, `timing.first_text_ms`), then the client's measurements, which add the network between the bench host and the service |
+| guard rewrites, fallbacks | shares of answered cases, and the case ids with a rewrite or a fallback (a fixed non-answer the viewer sees) |
+| latency | p50 / p90 / p95, interpolated between ranks, with n; p95 only from n ≥ 20; server-side first (`latency_ms`, `timing.first_text_ms`), then the client's measurements, which add the network between the bench host and the service |
 | errors | cases without an answer, on their own line; they are graded as non-answers (the viewer saw the error) |
 | tools | calls per answer, split server-run / model-called, and usage by tool name |
 | tokens, cost | from `answer.usage`: input and output (incl. thinking) tokens per answer p50 / p90, model calls per answer, estimated cost per answer (list prices from `ingest/ledger.py`); answers per flow |
 
-Checked text = answer + evidence text (+ streamed text that differs from the final answer: the viewer saw it). Every
-rule hit is listed in `judged.jsonl` (`rule_hits`: rule, where it matched — answer / evidence / streamed — and the
-matched part in brackets with some context); labels of hits outside the answer end in ` @evidence` / ` @streamed`.
-"Already eligible" (a canary that only makes a suspect) is judged against the English and Chinese texts of every item
-eligible at `P`, character looks already shown, visible names and title info.
-LLM grades are cached per (case id, answer hash, prompt hash) in `runs/<run>/judged.jsonl`, so re-grading is free
-and `--no-llm` still reuses them.
+Graded text = the answer alone. Leak-checked = everything the viewer received: answer, evidence rows, frame captions,
+highlight labels, tool arguments and summaries, streamed text that differs from the final answer, and the answers of
+earlier turns (at their own `P`). Every rule hit is listed in `judged.jsonl` (`rule_hits`: rule, the channel, the
+matched part in brackets with some context); labels of hits outside the answer end in ` @<channel>`. "Already
+eligible" means the canary occurs in one item the viewer could have seen by `P` (an eligible item's English or
+Chinese text, cues of English / Chinese tracks only, a look already shown, title info), never in a joined text.
+Grades are cached in `runs/<run>/judged.jsonl` per (case id, case content, what was received, pack sha and version,
+judge prompt, judge model), so re-grading costs nothing until one of them changes, and old runs can be re-graded
+from their `results.jsonl` without asking the service again. `run_bench.py` refuses to resume a run against another
+base, flow, bench commit, server revision or set of packs, and stops when the server answers with a flow other than
+the one requested.
 
 The judge needs, on the machine that runs it: the master packs (`--packs DIR` or `BENCH_PACKS_DIR`, layout
 `<asset_sha>/master/pack.db`) and a Gemini key (`CEDAR_GEMINI_KEY_FILE`, developer API) or
