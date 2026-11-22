@@ -389,3 +389,29 @@ def test_thumbnails_are_read_off_the_event_loop_and_stills_together(wired, monke
     wired.tools.script = [{"call": ("story_so_far", {})}, {"call": ("on_screen", {})}, {"text": "A wolf."}]
     wired.ask(61.2, "What did I miss?", tap=TAP_WOLF)
     assert on_loop == []
+
+
+# ── the join after a dropped sentence ────────────────────────────────
+
+def test_join_is_tidied_after_a_drop():
+    from server.answer import strip_lead, tidy_end
+    bob = lambda t: [{"kind": "name", "term": "Bob"}] if ("Bob" in t or "鲍勃" in t) else []     # noqa: E731
+    ga = GuardedAnswer(bob)
+    out = ga.feed("Alice met Bob in the meadow. Then the boy climbs a tree. ") + ga.flush()
+    assert "".join(out) == "The boy climbs a tree."
+    ga = GuardedAnswer(bob)
+    out = ga.feed("爱丽丝遇见了鲍勃。随后时间来到四十年后。") + ga.flush()
+    assert "".join(out) == "时间来到四十年后。"
+    ga = GuardedAnswer(bob)
+    out = ga.feed("那是狼；它就是鲍勃。") + ga.flush()
+    assert tidy_end("".join(out)) == "那是狼。"
+    assert tidy_end("That is the wolf,") == "That is the wolf." and tidy_end("That is the wolf.") == "That is the wolf."
+    assert strip_lead("Then.") == "Then." and strip_lead("Next to her is Alice.") == "Next to her is Alice."
+    ga = GuardedAnswer(lambda _t: [])                   # nothing dropped: nothing changed
+    assert "".join(ga.feed("Then the boy climbs a tree. ") + ga.flush()) == "Then the boy climbs a tree."
+
+
+def test_dangling_clause_mark_is_not_the_end_of_the_answer(wired):
+    wired.ctx.script = [{"text": "那是狼；它就是鲍勃。"}]
+    ev = wired.ask(59.0, "那是谁？", lang="zh")
+    assert answer(ev)["text"] == "那是狼。"

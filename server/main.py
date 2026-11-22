@@ -37,7 +37,7 @@ from server import agent as A
 from server import config, guard, prompts
 from server import context as C
 from server import evidence as E
-from server.answer import GuardedAnswer, split_ready
+from server.answer import GuardedAnswer, split_ready, tidy_end
 from server.knowledge import Moment, ts
 from server.packs import STORE
 
@@ -675,6 +675,8 @@ async def flow_context(t, body: Ask, p: float, user: str, state: dict, emit, tur
         rec["preamble_only"] = bool(sink.preamble)
         await sink.send_final((TIMEOUT_FALLBACK if rec["fallback"] == "timeout" else FALLBACK)[body.lang])
         text = sink.answer_text()
+    if answer.dropped and not rec["fallback"]:
+        text = tidy_end(text)                          # a dropped last clause leaves no dangling ；
     rec["cut_off"] = bool(rec["cut_off"] or (status in ("timeout", "error") and not rec["fallback"]))
     if body.session_id and not rec["fallback"] and not rec["cut_off"]:
         HISTORY.add(user, p, question, text)          # only whole answers; no session: no conversation to keep
