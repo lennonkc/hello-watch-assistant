@@ -440,7 +440,7 @@ PREAMBLE = re.compile(
 
 
 def looks_like_preamble(sentence: str) -> bool:
-    """"Let me look at the last scene." / "稍等，我查一下。" — words about what the model is about to do."""
+    """"Let me look at the last scene." (or its Chinese equivalent) — words about what the model is about to do."""
     return bool(PREAMBLE.search(sentence or ""))
 
 

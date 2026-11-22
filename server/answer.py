@@ -4,8 +4,8 @@ Model text arrives in chunks. `GuardedAnswer.feed` cuts it into sentences (Engli
 each finished sentence with the guard *together with everything already sent* (so a term that only appears across a
 sentence boundary is caught as well), and returns only the sentences that pass, as the exact strings to send. A
 sentence that fails is never sent; the caller logs it. `text` is always exactly the concatenation of what was sent.
-After a drop the join is tidied: the first kept sentence loses a leading connective ("Then", 随后), and the final
-answer (`tidy_end`) does not end on a clause mark such as ；.
+After a drop the join is tidied: the first kept sentence loses a leading connective ("Then", "After that"), and the
+final answer (`tidy_end`) does not end on a clause mark such as a semicolon.
 """
 from __future__ import annotations
 
@@ -53,7 +53,7 @@ _TRAIL = re.compile(r"\s*[；;，,、：:]+\s*$")
 
 
 def strip_lead(sentence: str) -> str:
-    """"Then the boy climbs a tree." → "The boy climbs a tree."; "随后时间来到四十年后。" → "时间来到四十年后。"."""
+    """"Then the boy climbs a tree." → "The boy climbs a tree." (Chinese connectives alike)."""
     for rx in (_LEAD_EN, _LEAD_ZH):
         mo = rx.match(sentence)
         rest = sentence[mo.end():] if mo else ""

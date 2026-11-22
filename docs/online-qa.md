@@ -115,17 +115,19 @@ sentence is dropped and logged. Besides spec §7 the guard applies the identity 
 
 - a *reference* to a character is a name or alias (visible or not), or its label with any determiner and adjectives
   in front of the label's head noun, plurals included: "the wolf" also gives "that wolf", "a grey wolf", "wolves";
-  in Chinese the label (without 那只 / 一个 …) and the part after its last 的;
+  in Chinese the label (without a leading demonstrative or measure word such as "that one" / "a") and, loosely, the
+  noun after its last possessive particle;
 - a *passage* is a sentence plus the following sentences that continue it with a pronoun (one among their first five
-  words, or a leading "This / That"; in Chinese 它 / 他 / 她 among the first six characters, or a leading 这 / 那):
+  words, or a leading "This / That"; in Chinese a third-person pronoun among the first six characters, or a leading
+  "this / that"; the patterns are in `server/guard.py`):
   "A grey wolf has appeared. It is Bob." is one passage;
 - no passage may contain a reference to a and one to b;
 - when the question is about a, b's specific references (names, aliases, its label: "the boy", "that boy") may not
   appear anywhere in the answer, not even in "the film hasn't said whether this is Bob"; the same the other way round
   for a question about b. The question is about a when the tap falls on a; otherwise when the question refers to a
   and not to b ("Is the wolf Bob?" names both, so only the passage rule applies); otherwise when it points at the
-  screen ("who is this?", "她是谁") while a is on screen and b is not. An a that is merely on screen ("What did I
-  miss?") bars b only per passage, so story lines about b still get through.
+  screen ("who is this?", or its Chinese equivalents) while a is on screen and b is not. An a that is merely on
+  screen ("What did I miss?") bars b only per passage, so story lines about b still get through.
 
 The tool arguments the step trace shows go through the same check, whole, before they are shortened for display
 (names not visible yet become labels; anything else the guard objects to is not shown). Regex canaries use the same
@@ -141,21 +143,22 @@ answer uses it, so it is not the evidence list. The lookups and tools only offer
 sentence, story items, lines, the tapped entity's facts, search hits); once the answer is final the server keeps those
 that share content words with the answer's *assertive* sentences (two, or one for a fact about the tapped entity the
 answer talks about), at most four, with one frame each, the tapped entity's reference stills and the paused frame. A
-sentence that only says the film has not shown, said or made clear something yet ("We don't know yet why…", "影片还没有
-交代") rests on nothing, so "Alice met Bob in a meadow. The film hasn't said why." keeps the sources of its first
-sentence and a pure refusal or a fallback shows none and no frames. For a Chinese answer, each character it names in
-Chinese counts as that character's English label / name, and a candidate also matches through its own Chinese text
-when the pack has one (shown to the Chinese viewer instead of the English). Every line, frame caption and the highlight
-label passes the guard relative to the answer's subject, with the same references as above: next to an answer about
-a (asked about, referred to, or on screen while the answer does not refer to b) nothing may refer to b, and the
-reverse. The sources run after the answer with their own budget (`WATCH_SOURCES_TIMEOUT_S`, 0.8 s): slow frames or an
-error cost the sources, never the answer.
+sentence that only says the film has not shown, said or made clear something yet ("We don't know yet why…", and the
+Chinese equivalents in `server/evidence.py`) rests on nothing, so "Alice met Bob in a meadow. The film hasn't said
+why." keeps the sources of its first sentence and a pure refusal or a fallback shows none and no frames. For a
+Chinese answer, each character it names in Chinese counts as that character's English label / name, and a candidate
+also matches through its own Chinese text when the pack has one (shown to the Chinese viewer instead of the English).
+Every line, frame caption and the highlight label passes the guard relative to the answer's subject, with the same
+references as above: next to an answer about a (asked about, referred to, or on screen while the answer does not refer
+to b) nothing may refer to b, and the reverse. The sources run after the answer with their own budget
+(`WATCH_SOURCES_TIMEOUT_S`, 0.8 s): slow frames or an error cost the sources, never the answer.
 
 The prompt forbids text before a tool call. The hold rule (`server/main.py`, `Streamer`): a model call's text is held
 until its first sentence is complete and a second one has started, or the call ends without a function call; if that
-first sentence looks like a preamble ("Let me look at the last scene.", "稍等，我查一下。"), the whole call's text is held
-until the call ends — sent if no function call follows, dropped if one does (`held_preamble`). If the run stops early
-(deadline, stall, error), held text is sent only when it is a complete sentence that does not look like a preamble, so
+first sentence looks like a preamble ("Let me look at the last scene.", or a Chinese "one moment, let me check"), the
+whole call's text is held until the call ends — sent if no function call follows, dropped if one does
+(`held_preamble`). If the run stops early (deadline, stall, error), held text is sent only when it is a complete
+sentence that does not look like a preamble, so
 a stall between "Let me look…" and the function call ends in the "took too long" reply, not in the preamble. Text that
 did go out in a call that then called a tool (`leaked_preamble`: a first sentence that did not look like a preamble)
 is guarded, but never counts as the answer: the final `answer` event leaves it out (the browser replaces what was

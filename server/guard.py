@@ -104,7 +104,7 @@ def _label_refs(label: str | None) -> tuple[list, list]:
     """(specific, loose) references for one label. Specific: the label, the label without its article when that is
     still two words or more ("cave dragon"), and "the / that / this … <head>" with up to two words in between. Loose
     adds the bare head noun and its plural under any determiner ("a wolf", "wolves"). Chinese: the label, without a
-    leading "那只 / 一个 …", and loosely the part after the last 的."""
+    leading demonstrative or measure word ("that one", "a"), and loosely the noun after its last possessive particle."""
     label = (label or "").strip()
     if not label:
         return [], []
@@ -154,7 +154,7 @@ _NOT_POINTING = re.compile(r"(?<![A-Za-z])(?:this|that)\s+(?:film|movie|story|sc
 
 
 def points_at_screen(question: str) -> bool:
-    """"Who is this?", "What is he doing?", "她是谁" — but not "what is this film about"."""
+    """"Who is this?", "What is he doing?" (and the Chinese equivalents) — but not "what is this film about"."""
     return bool(_POINTING.search(_NOT_POINTING.sub(" ", question or "")))
 
 
@@ -222,7 +222,8 @@ def _sentences(text: str) -> list[str]:
 
 def passages(text: str) -> list[str]:
     """Sentences, each joined with the ones after it that continue it with a pronoun (one among their first five
-    words, or a leading "this / that"; in Chinese 它 / 他 / 她 among the first six characters or a leading 这 / 那)."""
+    words, or a leading "this / that"; in Chinese a third-person pronoun among the first six characters or a leading
+    "this / that")."""
     out: list[str] = []
     for s in _sentences(text):
         if out and _CONTINUES.search(s.strip()):
