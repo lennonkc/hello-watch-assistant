@@ -184,7 +184,7 @@ def test_429_names_the_limit_and_bench_token_skips_it(title, monkeypatch):
     assert c.post("/api/ask", json=body, headers={main.BENCH_HEADER: "wrong"}).status_code == 429
     r = c.post("/api/ask", json=body, headers={main.BENCH_HEADER: "s3cret"})
     assert r.status_code == 200 and "event: answer" in r.text
-    # bench requests may pick the flow
-    w.tools.script = [{"text": "Alice, in her red coat."}]
+    # an older bench run asking for the removed tools flow still gets an answer (the header is ignored)
+    w.ctx.script = [{"text": "Alice, in her red coat."}]
     r = c.post("/api/ask", json=body, headers={main.BENCH_HEADER: "s3cret", "x-watch-flow": "tools"})
-    assert '"flow": "tools"' in r.text and not w.tools.script
+    assert r.status_code == 200 and '"flow": "context"' in r.text and not w.ctx.script

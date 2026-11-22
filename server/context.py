@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import io
+import re
 
 from google.genai import types
 
@@ -164,19 +165,55 @@ def mentions(text: str, terms: list[str]) -> bool:
     return any(term_matches(t, text, "phrase", False) for t in terms)
 
 
-def build(m: Moment, tap: dict | None, turn: A.Turn) -> Context:
-    """Run the three lookups (bookkeeping into `turn` exactly as the tools do) and render the context. Blocking (pack
-    reads, thumbnails that may come from Cloud Storage): the server calls it in a worker thread."""
+_PROBE_EN = re.compile(
+    r"\b(?:endings?|finale|final scene|(?:in|at) the end(?! of)|how (?:does|will|did) [\w ]{1,30}? end|"
+    r"what(?:'s| is| will)? (?:happen|happens|going to happen|gonna happen|comes?)(?: \w+)? (?:next|later|after|then)|"
+    r"what happens to|happen(?:s)? (?:next|later|in the end)|later (?:on|in the (?:film|movie|story))|"
+    r"who (?:dies|will die|survives|wins|is the (?:killer|murderer|traitor|villain|mole|spy|culprit))|"
+    r"(?:die|dies|survive|survives|killed|escape|escapes|win|wins|come back|comes back|end up|get together)\s*\?|"
+    r"turns? out|twist|real identity|true identity|secretly|spoil(?:er|ers)?)\b"
+    r"|^\s*(?:(?:is|are|was)(?: \w+){1,3} (?:really|actually|secretly)|will|is \w+(?: \w+)? going to|are \w+(?: \w+)? going to|does \w+(?: \w+)? (?:die|survive|win|escape|"
+    r"find|come back|get))\b", re.IGNORECASE)
+_PROBE_ZH = re.compile(r"结局|结尾|最后(?:会|怎么|是|谁|的)|接下来(?:会|发生|怎么)|后来(?:会|怎么|发生)|以后(?:会|怎么)|后面(?:会|怎么)|"
+                       r"将来|会不会死|会死|谁(?:会)?死|死了吗|活下来|活到最后|凶手|叛徒|卧底|内鬼|真实身份|真正的身份|真身|"
+                       r"其实是|原来是|反转|剧透|会怎样|会发生什么|最终")
+
+
+def spoiler_probe(question: str | None) -> bool:
+    """The question asks about what has not been shown yet: the ending, what happens next, who dies, a secret
+    identity, a twist. Such a question gets a decline, never an answer."""
+    q = question or ""
+    return bool(_PROBE_EN.search(q) or _PROBE_ZH.search(q))
+
+
+PROBE_NOTE = ("ABOUT THIS QUESTION: it asks about something the viewer has not seen yet (what happens later, how it ends, "
+              "who someone really is, who dies). Your whole reply is one short, friendly sentence saying that hasn't been "
+              "shown yet; you may add one sentence about what is on screen right now. Do not name, describe or hint at "
+              "any person, place, event or object in connection with what comes later, and do not repeat the viewer's "
+              "guess.")
+
+
+def build(m: Moment, tap: dict | None, turn: A.Turn, frame: bytes | None | type(...) = ..., question: str = "") -> Context:
+    """Run the three lookups (bookkeeping into `turn` exactly as the tools do) and render the context. `frame`: the
+    paused frame's bytes as the caller read them under its own time bound (None = not available); left out, it is
+    read here. Blocking (pack reads, thumbnails that may come from Cloud Storage): the server calls it in a worker
+    thread."""
     pos = ts(m.P)
     sections = [f"SERVER CONTEXT for this question. It covers only what the viewer has seen up to {pos} ({m.phase_words}); "
                 f"nothing after {pos} exists for you."]
+    if spoiler_probe(question):
+        sections.append(PROBE_NOTE)
 
     screen = m.on_screen(tap, refs=True)
     ents = screen.get("entities", [])
     clean = {**screen, "entities": [{k: v for k, v in e.items() if k != "ref"} for e in ents]}
-    lookups = [Lookup("ctx-1", "on_screen", A.TOOL_LABELS["on_screen"], A.note_on_screen(turn, m, clean))]
-    frame, ringed, note = None, False, ""
-    if m.phase == "story" and (frame := A.read_thumb(m.title, m.fp)) is not None:
+    lookups = [Lookup("ctx-1", "on_screen", A.tool_label("on_screen", m.lang), A.note_on_screen(turn, m, clean))]
+    ringed, note = False, ""
+    if m.phase != "story":
+        frame = None
+    elif frame is ...:
+        frame = A.read_thumb(m.title, m.fp)
+    if frame is not None:
         if tap and (marked := mark_tap(frame, tap)):
             frame, ringed = marked, True
         note = (f"PAUSED FRAME at {pos} (exactly what the viewer sees now)"
@@ -204,11 +241,11 @@ def build(m: Moment, tap: dict | None, turn: A.Turn) -> Context:
 
     lines, dialogue = _dialogue(m)
     sections.append(dialogue)
-    lookups.append(Lookup("ctx-2", "recent_dialogue", A.TOOL_LABELS["recent_dialogue"], A.note_dialogue(turn, lines)))
+    lookups.append(Lookup("ctx-2", "recent_dialogue", A.tool_label("recent_dialogue", m.lang), A.note_dialogue(turn, lines, m.lang)))
 
     story = m.story_so_far(limit=STORY_ITEMS, refs=True)
     sections.append(_story(story))
-    lookups.append(Lookup("ctx-3", "story_so_far", A.TOOL_LABELS["story_so_far"], A.note_story(turn, m, story)))
+    lookups.append(Lookup("ctx-3", "story_so_far", A.tool_label("story_so_far", m.lang), A.note_story(turn, m, story)))
 
     tapped, on = focus(screen)
     return Context(text="\n\n".join(sections), frame=frame, frame_note=note, lookups=lookups,

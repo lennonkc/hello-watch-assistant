@@ -65,8 +65,8 @@ def framed_title(title):
 
 
 class Wired:
-    def __init__(self, client, ctx: FakeLlm, tools: FakeLlm):
-        self.client, self.ctx, self.tools = client, ctx, tools
+    def __init__(self, client, ctx: FakeLlm):
+        self.client, self.ctx = client, ctx
 
     def ask(self, p, question="Who is that?", **kw):
         from server.tests.fakes import sse_events
@@ -84,14 +84,11 @@ def wire(monkeypatch, title) -> Wired:
     monkeypatch.setattr(config, "ASK_PER_MINUTE", 10_000)
     monkeypatch.setattr(main, "LIMITER", main.Limiter())
     monkeypatch.setattr(main, "HISTORY", main.History())
-    monkeypatch.setattr(main, "CONVERSATIONS", main.Conversations())
     A._moment.cache_clear()
-    ctx, tools = FakeLlm(), FakeLlm()
+    ctx = FakeLlm()
     monkeypatch.setitem(main.RUNNERS, "context", Runner(app_name=main.APP_NAME, agent=A.build_context_agent(model=ctx),
                                                         session_service=main.session_service))
-    monkeypatch.setitem(main.RUNNERS, "tools", Runner(app_name=main.APP_NAME, agent=A.build_agent(model=tools),
-                                                      session_service=main.session_service))
-    return Wired(TestClient(main.app), ctx, tools)
+    return Wired(TestClient(main.app), ctx)
 
 
 @pytest.fixture

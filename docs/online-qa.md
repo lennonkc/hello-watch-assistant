@@ -85,7 +85,7 @@ over `server/knowledge.py` (gate-first views at P). P, title, language and tap c
 server; tools read them from `ToolContext.state`, so the model has no parameter that could move P. HTTP contract:
 [web-api.md](web-api.md).
 
-**Context first, tools second** (`WATCH_FLOW=context`, the default). Measured on the live demo, most tool calls were
+**Context first, tools second.** Measured on the live demo, most tool calls were
 local lookups that cost nothing to compute but one model round trip (≈1.5 s) each. So the server runs them itself for
 every question, `server/context.py`:
 
@@ -115,17 +115,19 @@ sentence is dropped and logged. Besides spec §7 the guard applies the identity 
 
 - a *reference* to a character is a name or alias (visible or not), or its label with any determiner and adjectives
   in front of the label's head noun, plurals included: "the wolf" also gives "that wolf", "a grey wolf", "wolves";
-  in Chinese the label (without 那只 / 一个 …) and the part after its last 的;
+  in Chinese the label (without a leading demonstrative or measure word such as "that one" / "a") and, loosely, the
+  noun after its last possessive particle;
 - a *passage* is a sentence plus the following sentences that continue it with a pronoun (one among their first five
-  words, or a leading "This / That"; in Chinese 它 / 他 / 她 among the first six characters, or a leading 这 / 那):
+  words, or a leading "This / That"; in Chinese a third-person pronoun among the first six characters, or a leading
+  "this / that"; the patterns are in `server/guard.py`):
   "A grey wolf has appeared. It is Bob." is one passage;
 - no passage may contain a reference to a and one to b;
 - when the question is about a, b's specific references (names, aliases, its label: "the boy", "that boy") may not
   appear anywhere in the answer, not even in "the film hasn't said whether this is Bob"; the same the other way round
   for a question about b. The question is about a when the tap falls on a; otherwise when the question refers to a
   and not to b ("Is the wolf Bob?" names both, so only the passage rule applies); otherwise when it points at the
-  screen ("who is this?", "她是谁") while a is on screen and b is not. An a that is merely on screen ("What did I
-  miss?") bars b only per passage, so story lines about b still get through.
+  screen ("who is this?", or its Chinese equivalents) while a is on screen and b is not. An a that is merely on
+  screen ("What did I miss?") bars b only per passage, so story lines about b still get through.
 
 The tool arguments the step trace shows go through the same check, whole, before they are shortened for display
 (names not visible yet become labels; anything else the guard objects to is not shown). Regex canaries use the same
@@ -136,65 +138,87 @@ has seen Bob since then." after a passage about the wolf) when the answer's subj
 question. The time gate keeps the reveal out of the model's context, and the judge-measured leak rate of the
 benchmark covers what is left.
 
-**Sources shown with the answer** (`server/evidence.py`, both flows). The context is attached whether or not the
+**Sources shown with the answer** (`server/evidence.py`). The context is attached whether or not the
 answer uses it, so it is not the evidence list. The lookups and tools only offer candidates (recaps sentence by
 sentence, story items, lines, the tapped entity's facts, search hits); once the answer is final the server keeps those
 that share content words with the answer's *assertive* sentences (two, or one for a fact about the tapped entity the
 answer talks about), at most four, with one frame each, the tapped entity's reference stills and the paused frame. A
-sentence that only says the film has not shown, said or made clear something yet ("We don't know yet why…", "影片还没有
-交代") rests on nothing, so "Alice met Bob in a meadow. The film hasn't said why." keeps the sources of its first
-sentence and a pure refusal or a fallback shows none and no frames. For a Chinese answer, each character it names in
-Chinese counts as that character's English label / name, and a candidate also matches through its own Chinese text
-when the pack has one (shown to the Chinese viewer instead of the English). Every line, frame caption and the highlight
-label passes the guard relative to the answer's subject, with the same references as above: next to an answer about
-a (asked about, referred to, or on screen while the answer does not refer to b) nothing may refer to b, and the
-reverse. The sources run after the answer with their own budget (`WATCH_SOURCES_TIMEOUT_S`, 0.8 s): slow frames or an
-error cost the sources, never the answer.
+sentence that only says the film has not shown, said or made clear something yet ("We don't know yet why…", and the
+Chinese equivalents in `server/evidence.py`) rests on nothing, so "Alice met Bob in a meadow. The film hasn't said
+why." keeps the sources of its first sentence and a pure refusal or a fallback shows none and no frames. For a
+Chinese answer, each character it names in Chinese counts as that character's English label / name, and a candidate
+also matches through its own Chinese text when the pack has one (shown to the Chinese viewer instead of the English).
+Every line, frame caption and the highlight label passes the guard relative to the answer's subject, with the same
+references as above: next to an answer about a (asked about, referred to, or on screen while the answer does not refer
+to b) nothing may refer to b, and the reverse. The sources run after the answer with their own budget
+(`WATCH_SOURCES_TIMEOUT_S`, 0.8 s): slow frames or an error cost the sources, never the answer.
 
 The prompt forbids text before a tool call. The hold rule (`server/main.py`, `Streamer`): a model call's text is held
 until its first sentence is complete and a second one has started, or the call ends without a function call; if that
-first sentence looks like a preamble ("Let me look at the last scene.", "稍等，我查一下。"), the whole call's text is held
-until the call ends — sent if no function call follows, dropped if one does (`held_preamble`). If the run stops early
-(deadline, stall, error), held text is sent only when it is a complete sentence that does not look like a preamble, so
+first sentence looks like a preamble ("Let me look at the last scene.", or a Chinese "one moment, let me check"), the
+whole call's text is held until the call ends — sent if no function call follows, dropped if one does
+(`held_preamble`). If the run stops early (deadline, stall, error), held text is sent only when it is a complete
+sentence that does not look like a preamble, so
 a stall between "Let me look…" and the function call ends in the "took too long" reply, not in the preamble. Text that
 did go out in a call that then called a tool (`leaked_preamble`: a first sentence that did not look like a preamble)
 is guarded, but never counts as the answer: the final `answer` event leaves it out (the browser replaces what was
 streamed), it is not stored in the conversation memory, and if nothing else was written the question gets a fallback
 (`preamble_only` in the log line). An answer cut short (`cut_off`) is not stored either. If nothing survives the guard,
-the question is asked once more, not streamed, with a note listing the terms to avoid; if that fails too, a fixed reply
-is sent — the "can't answer without giving something away" wording only when the guard held something back, the
-neutral "took too long" one otherwise (deadline, tool rounds used up, nothing written). No unguarded text leaves the
-server.
+the question is asked once more, not streamed and without tools, with a note listing the terms to avoid, inside its own
+budget; if that fails too, a fixed reply is sent — the "can't answer without giving something away" wording only when
+the guard held something back, the neutral "took too long" one otherwise (deadline, tool rounds used up, nothing
+written). There is no retry when less than 1.5 s is left, and none for a *spoiler probe* whose draft tripped the guard
+(`declined` in the log line): a second draft of a decline would only arrive later, so the short decline goes out at
+once. No unguarded text leaves the server.
+
+**Spoiler probes** (`context.spoiler_probe`): questions about the ending, what happens next or later, who dies or
+survives, who someone really is, a twist (English and Chinese patterns). The context of such a question carries a note
+that the whole reply is one short sentence saying it hasn't been shown yet (optionally one about what is on screen),
+with nothing connected to the future in it; prompt rule 4 says the same for every question. The log line marks them
+(`probe`), so the rewrite rate of probes can be followed separately.
 
 **Budgets and deadlines** (`server/config.py`, all overridable):
 
 | What | Default | On expiry |
 |---|---|---|
 | Query embedding (`search_moments`) | 1.5 s, one attempt, no retry loop | full-text ranking; embeddings paused for 60 s |
-| `look_closer` nested call | 6 s, the paused frame + at most 8 stills (read concurrently) | the tool returns a note; the model answers without it |
-| Model-called tool rounds per question | 1 (3 in the `tools` flow) | function calls are switched off (`FunctionCallingConfig` `NONE`) and the model is told to answer now |
+| `look_closer` (stills + nested call) | 6 s, the paused frame + at most 8 stills (read concurrently, at most half the budget), and never more than what is left of the question minus 3 s for the answer step (`WATCH_ANSWER_RESERVE_S`); with less than 1 s it does not start | the tool returns a note; the model answers without it (slow stills: only the paused frame is looked at) |
+| Paused frame for the context | 1.5 s (`WATCH_FRAME_WAIT_S`; on-demand titles fetch it from the bucket) | the context goes without the image |
+| Model-called tool rounds per question | 1 | function calls switched off (`FunctionCallingConfig` `NONE`), the model is told to answer now |
 | Soft deadline | 6 s | same as above |
 | Silence from the agent run | 8 s | the run is stopped |
 | Whole question | 10 s, retry included | the run is stopped; complete sentences stand (a last one that ends with sentence punctuation counts, unless it looks like a preamble), else a "took too long" reply |
+| Guard retry | 4 s (`WATCH_RETRY_TIMEOUT_S`) inside what is left; skipped below 1.5 s (`WATCH_RETRY_MIN_S`) or for a spoiler probe | the fixed reply |
 | Sources after the answer | 0.8 s (`WATCH_SOURCES_TIMEOUT_S`) | the answer is sent without frames, or without sources |
 
-**Observability.** The `answer` event carries `usage` (input / output / thought tokens, model calls) and `timing`
-(time to first text, total). Each question also writes one JSON log line (`ask {…}`) with the flow, P, tools called,
-search mode, usage, timing, sentences dropped and their guard kinds, held preambles, retry, fallback and whether the
-highlight was kept. The log line never contains the question text or the bench token.
+**Observability.** The `answer` event carries `usage` (input / output / thought tokens, model calls), `timing`
+(time to first text, total) and a `request_id` (8 hex characters; also in `error`). Each question also writes one JSON
+log line (`ask {…}`, with the same id as `rid`) with the flow, P, whether it reads as a spoiler probe, tools called,
+search mode, usage, timing, sentences dropped and their guard kinds, held preambles, retry or decline, fallback and
+whether the highlight was kept; every other line written while answering it (guard drops with the dropped draft
+sentence, timeouts, skipped frames or sources) ends in `[rid=…]`. The log never contains the question text or the
+bench token.
 
 **Long films.** Timestamps are `mm:ss`, and `h:mm:ss` from one hour on. Everything about a pack that does not depend on
 P (the gate's candidate list and lookups, dialogue tracks, shots, speakers) is built once per pack and reused, and the
 per-question build runs in a worker thread: on a synthetic 10,000-cue / 3,000-shot pack it takes 30–50 ms (about 120 ms
 for the first question, which builds the indexes).
 
-**The earlier flow** (`WATCH_FLOW=tools`) stays available for benchmarking: five tools (`story_so_far`,
-`search_moments`, `recent_dialogue`, `on_screen`, `look_closer`) and a routing-table instruction. To be precise about
-the comparison: it is the earlier routing on the new plumbing — it shares the budget callback, the deadlines, the
-guard (identity co-occurrence included), the step labels and the source selection, so a difference between the flows
-measures the server-built context and the one-round tool cap, not those. Its ADK session
-carries the conversation and is replaced after a seek backwards or a guard rewrite. The whole answer is guarded at
-once and sent as a single `delta`.
+**The earlier flow, removed.** Until round 3 the service could also answer the earlier way (`WATCH_FLOW=tools`): one
+agent choosing among five tools (`story_so_far`, `search_moments`, `recent_dialogue`, `on_screen`, `look_closer`) by a
+routing-table instruction, the whole answer guarded at once and sent as a single `delta`. It ran on the same plumbing
+(budget callback, deadlines, guard, source selection), so the comparison measured the server-built context and the
+one-round tool cap. Three benchmark rounds in a row gave the same picture, so it was deleted; `X-Watch-Flow` is
+ignored since. Last comparison, hand-written set (97 cases), staged revision 00010 = finale `646e7ad`:
+
+| | context flow | tools flow (removed) |
+|---|---|---|
+| Accuracy | 91.9 % | 89.5 % |
+| Fallback replies | 1.0 % | 8.2 % |
+| Guard rewrites | 2.1 % | 9.3 % |
+| Server time p50 / p90 | 2.2 s / 3.9 s | 4.1 s / 8.2 s |
+| Model calls per answer | 1.15 | 2.42 |
+| Rule-gate leaks | 0 | 1 (in evidence) |
 
 `look_closer` sends the current frame plus stills from the 30 s before P (every 3 s, all `≤ floor(P)`). The `gs://` clip
 mode is optional (`WATCH_LOOK_VIDEO=1`) because clipping a whole-film URI adds tens of seconds.

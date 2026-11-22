@@ -113,12 +113,12 @@ The response is `text/event-stream` (read it with `fetch` + a stream reader; `Ev
 | `highlight` | `{"bbox": [210, 380, 760, 560], "label": "the young woman", "frame_t": 430}` | The tap matched an entity whose box was measured within 1 s of the paused frame; draw it right away |
 | `delta` | `{"text": " She is looking for her dragon."}` | Next piece of the answer: one sentence that already passed the output guard, with its leading space if any. Append as is |
 | `answer` | see below | Final, guarded answer. Normally `text` equals the concatenation of all `delta` texts; when it differs (text written before a tool call, a fallback) it replaces what was streamed |
-| `error` | `{"message": "…"}` | Something failed before any answer text; show it politely |
+| `error` | `{"message": "…", "request_id": "3f9c0a1b"}` | Something failed before any answer text; show it politely |
 | `done` | `{}` | Stream finished |
 
 Order: `gate`, then the trace (`tool` / `tool_result`, possibly `highlight`), then `delta`s interleaved with further
-`tool` / `tool_result` pairs, then `answer` (or `error`), then `done`. With `WATCH_FLOW=tools` there is exactly one
-`delta`, holding the whole answer, just before `answer`.
+`tool` / `tool_result` pairs, then `answer` (or `error`), then `done`. Step labels, step summaries and frame captions
+are written in the question's `lang`.
 
 `answer` payload:
 
@@ -132,14 +132,14 @@ Order: `gate`, then the trace (`tool` / `tool_result`, possibly `highlight`), th
  "latency_ms": 4210,
  "usage": {"input_tokens": 2950, "output_tokens": 84, "thought_tokens": 40, "model_calls": 1},
  "timing": {"first_text_ms": 1380, "total_ms": 2210},
- "flow": "context"}
+ "flow": "context", "request_id": "3f9c0a1b"}
 ```
 
 - `highlight.bbox` is `[ymin, xmin, ymax, xmax]` normalised to 0–1000 on frame `frame_t` (≤ `P`, from the shot's
   keyframe). In `answer` it is `null` unless the answer text mentions the tapped entity, so the box never contradicts
   the text, and `null` right after a cut (the boxes still come from the shot before); the early `highlight` event is
   sent only when the box is fresh (within 1 s of `floor(P)`, in the current shot).
-- `evidence` (both flows): only what the answer rests on — rows sharing content words with the sentences of the answer
+- `evidence`: only what the answer rests on — rows sharing content words with the sentences of the answer
   that assert something, at most four, a recap as the matching sentence — each checked by the output guard; empty for
   a pure refusal or a fallback. For `lang: "zh"` a row is shown in Chinese when the pack has that row in Chinese.
 - `frames[].t` → `/api/titles/{id}/frames/{t}.jpg`; every frame is at or before `P`. Sources have their own short
@@ -149,6 +149,7 @@ Order: `gate`, then the trace (`tool` / `tool_result`, possibly `highlight`), th
   answer was regenerated (one retry) or replaced by a fixed reply.
 - `cut_off: true`: the answer ran out of time (or the model failed) partway; the sentences sent are complete and
   guarded, but the answer may be unfinished. The page says so, and the turn is not kept in the conversation.
+- `request_id`: 8 hex characters naming this answer in the server log (every log line of the request carries it).
 - `usage` counts every model call of the question (the nested `look_closer` call included); `output_tokens` includes
   `thought_tokens`. `timing.first_text_ms` is the time to the first `delta`.
 
@@ -166,5 +167,5 @@ friendly note worded for the limit that was hit. The client IP is the `X-Forward
 trusted proxy: the last one with Google's front end alone (`WATCH_TRUSTED_PROXY_HOPS=1`); set it to 2 with one load
 balancer in front. Entries the client wrote itself are never used.
 Benchmark runs against a deployed revision skip the limiter by sending
-`X-Watch-Bench-Token: <WATCH_BENCH_TOKEN>`; such requests may also choose the flow with `X-Watch-Flow: context|tools`
-and see private preview titles.
+`X-Watch-Bench-Token: <WATCH_BENCH_TOKEN>`; such requests also see private preview titles. There is one answer flow;
+an `X-Watch-Flow` header (older benchmark runs) is accepted and ignored, and `answer.flow` is always `"context"`.

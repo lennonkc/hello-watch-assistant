@@ -67,11 +67,9 @@ EMBED_COOLDOWN_S = float(os.environ.get("WATCH_EMBED_COOLDOWN_S", "60"))    # af
 # Benchmark runs against a deployed revision: requests with this value in `X-Watch-Bench-Token` skip the limiter
 BENCH_TOKEN = os.environ.get("WATCH_BENCH_TOKEN", "")
 
-# Answer flow: `context` (server-built context + two tools, streamed) or `tools` (five tools, one answer event).
-# Bench-token requests may pick one per request with `X-Watch-Flow`.
-FLOW = os.environ.get("WATCH_FLOW", "context")
+# The answer path: a server-built context, one streamed model call, two tools for what the context does not cover.
 THINKING_LEVEL = os.environ.get("WATCH_THINKING_LEVEL", "LOW")
-TOOL_ROUNDS = int(os.environ.get("WATCH_TOOL_ROUNDS", "1"))                  # context flow; the tools flow allows 3
+TOOL_ROUNDS = int(os.environ.get("WATCH_TOOL_ROUNDS", "1"))                  # model-called tool rounds per question
 SOFT_DEADLINE_S = float(os.environ.get("WATCH_SOFT_DEADLINE_S", "6"))        # after it: no more tool calls
 STEP_TIMEOUT_S = float(os.environ.get("WATCH_STEP_TIMEOUT_S", "8"))          # longest silence from the agent run
 ASK_DEADLINE_S = float(os.environ.get("WATCH_ASK_DEADLINE_S", "10"))         # whole question, retry included
@@ -79,5 +77,9 @@ LOOK_TIMEOUT_S = float(os.environ.get("WATCH_LOOK_TIMEOUT_S", "6"))          # n
 LOOK_STILLS = int(os.environ.get("WATCH_LOOK_STILLS", "8"))                  # look_closer: stills from the window, at most
 HISTORY_TURNS = int(os.environ.get("WATCH_HISTORY_TURNS", "6"))              # earlier turns sent with a question
 SOURCES_TIMEOUT_S = float(os.environ.get("WATCH_SOURCES_TIMEOUT_S", "0.8"))  # evidence + frames after the answer
+RETRY_TIMEOUT_S = float(os.environ.get("WATCH_RETRY_TIMEOUT_S", "4"))        # the one guard retry, no tools
+RETRY_MIN_S = float(os.environ.get("WATCH_RETRY_MIN_S", "1.5"))              # less left than this: no retry
+ANSWER_RESERVE_S = float(os.environ.get("WATCH_ANSWER_RESERVE_S", "3"))      # kept free for the answer after a tool
+FRAME_WAIT_S = float(os.environ.get("WATCH_FRAME_WAIT_S", "1.5"))            # the paused frame for the context
 # X-Forwarded-For entries appended by proxies we trust (Google's front end = 1; add one per load balancer in front)
 TRUSTED_PROXY_HOPS = max(1, int(os.environ.get("WATCH_TRUSTED_PROXY_HOPS", "1")))

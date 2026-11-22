@@ -37,12 +37,30 @@ from server import agent as A
 from server import config, guard, prompts
 from server import context as C
 from server import evidence as E
-from server.answer import GuardedAnswer, split_ready
+from server.answer import GuardedAnswer, split_ready, tidy_end
 from server.knowledge import Moment, ts
 from server.packs import STORE
 
 log = logging.getLogger("watch")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+REQUEST_ID: contextvars.ContextVar[str] = contextvars.ContextVar("request_id", default="")
+
+
+class RequestIdFilter(logging.Filter):
+    """Appends ` [rid=…]` to every log line written while a question is being answered (worker threads included:
+    they run in a copy of the request's context), so the lines of one answer can be found by the id in its `answer`
+    event. The `ask {…}` record carries it as a field instead."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        rid = REQUEST_ID.get()
+        if rid and not getattr(record, "rid", None) and not str(record.msg).startswith("ask "):
+            record.msg, record.rid = f"{record.msg} [rid={rid}]", rid
+        return True
+
+
+log.addFilter(RequestIdFilter())                     # this logger's lines, wherever they are handled …
+for _h in logging.getLogger().handlers:               # … and the other loggers' (packs, prompts) on the root handler
+    _h.addFilter(RequestIdFilter())
 
 APP_NAME = "hello_watch"
 FALLBACK = {
@@ -314,46 +332,14 @@ def is_bench(request: Request) -> bool:
     return bool(config.BENCH_TOKEN and sent) and hmac.compare_digest(sent.encode(), config.BENCH_TOKEN.encode())
 
 
-# ── agents and conversations ────────────────────────────────────────
+# ── the agent and the conversation memory ────────────────────────────
 
-RUNNERS = {"context": Runner(app_name=APP_NAME, agent=A.build_context_agent(), session_service=session_service),
-           "tools": Runner(app_name=APP_NAME, agent=A.build_agent(), session_service=session_service)}
-TOOL_ROUNDS = {"context": config.TOOL_ROUNDS, "tools": 3}
+RUNNERS = {"context": Runner(app_name=APP_NAME, agent=A.build_context_agent(), session_service=session_service)}
 TIMEOUT_FALLBACK = {
     "en": "Sorry, that took me too long to work out. Please ask again in a moment.",
     "zh": "抱歉,这个问题我想得太久了,请稍后再问一次。",
 }
 EPS = 1e-9
-
-
-class Conversations:
-    """`tools` flow: browser session → ADK session. A seek backwards (or a guard rewrite) starts a fresh ADK session,
-    because earlier turns may contain things that are not eligible at the new P."""
-    MAX_TURNS = 8
-
-    def __init__(self):
-        self.map: collections.OrderedDict = collections.OrderedDict()
-
-    async def get(self, key: str, p: float, fresh: bool = False) -> str:
-        cur = self.map.get(key)
-        if fresh or cur is None or p + 1.0 < cur["p"] or cur["turns"] >= self.MAX_TURNS:
-            s = await session_service.create_session(app_name=APP_NAME, user_id=key)
-            if cur:
-                with contextlib.suppress(Exception):
-                    await session_service.delete_session(app_name=APP_NAME, user_id=key, session_id=cur["sid"])
-            cur = {"sid": s.id, "p": p, "turns": 0}
-        cur["p"], cur["turns"] = max(cur["p"], p), cur["turns"] + 1
-        self.map[key] = cur
-        self.map.move_to_end(key)
-        while len(self.map) > 500:
-            old_key, old = self.map.popitem(last=False)
-            with contextlib.suppress(Exception):
-                await session_service.delete_session(app_name=APP_NAME, user_id=old_key, session_id=old["sid"])
-            _forget_user(old_key)
-        return cur["sid"]
-
-
-CONVERSATIONS = Conversations()
 
 
 class History:
@@ -422,7 +408,7 @@ PREAMBLE = re.compile(
 
 
 def looks_like_preamble(sentence: str) -> bool:
-    """"Let me look at the last scene." / "稍等，我查一下。" — words about what the model is about to do."""
+    """"Let me look at the last scene." (or its Chinese equivalent) — words about what the model is about to do."""
     return bool(PREAMBLE.search(sentence or ""))
 
 
@@ -508,7 +494,7 @@ class Streamer:
 
 
 async def _run(runner: Runner, user: str, sid: str, text: str, emit, turn: A.Turn, deadline: float,
-               sink: Streamer | None = None, streaming: bool = True, state_delta: dict | None = None) -> tuple[str, str]:
+               sink: Streamer | None = None, streaming: bool = True) -> tuple[str, str]:
     """One agent run → (final text, status ∈ ok / timeout / limit / error). Tool calls and results go to `emit` as
     they happen; with a `sink`, model text goes to it as it streams. The run is bounded twice: no event for
     STEP_TIMEOUT_S (a stalled model call or tool) and the question's overall deadline."""
@@ -517,7 +503,7 @@ async def _run(runner: Runner, user: str, sid: str, text: str, emit, turn: A.Tur
                    max_llm_calls=turn.max_tool_rounds + 2)
     turn.run_calls = 0
     final, status, streamed = "", "ok", False
-    agen = runner.run_async(user_id=user, session_id=sid, new_message=msg, run_config=rc, state_delta=state_delta)
+    agen = runner.run_async(user_id=user, session_id=sid, new_message=msg, run_config=rc)
     try:
         while True:
             left = deadline - time.monotonic()
@@ -541,7 +527,7 @@ async def _run(runner: Runner, user: str, sid: str, text: str, emit, turn: A.Tur
                 args = A.tool_args(fc.args)
                 if args and turn.args_filter:                  # whole arguments: a cut could hide part of a name
                     args = await asyncio.to_thread(turn.args_filter, args)
-                await emit("tool", {"id": fc.id, "name": fc.name, "label": A.TOOL_LABELS.get(fc.name, fc.name),
+                await emit("tool", {"id": fc.id, "name": fc.name, "label": A.tool_label(fc.name, turn.lang),
                                     "args": A.args_preview(args)})
             for fr in ev.get_function_responses():
                 await emit("tool_result", {"id": fr.id, "name": fr.name, "summary": turn.summaries.get(fr.id, "done")})
@@ -618,7 +604,8 @@ def _checker(t, m, p: float, tapped, screen, question: str, turn: A.Turn):
 async def flow_context(t, body: Ask, p: float, user: str, state: dict, emit, turn: A.Turn, rec: dict) -> dict:
     """Server-built context, then one streamed run; each finished sentence is guarded before it is sent."""
     m = A.moment_of(state)
-    ctx = await asyncio.to_thread(C.build, m, state["tap"], turn)
+    frame = await _paused_frame(m, rec)
+    ctx = await asyncio.to_thread(C.build, m, state["tap"], turn, frame, body.question)
     check, links = await asyncio.to_thread(_checker, t, m, p, ctx.subjects, ctx.screen, body.question, turn)
     for lk in ctx.lookups:
         turn.tools.append(f"ctx:{lk.name}")
@@ -630,19 +617,22 @@ async def flow_context(t, body: Ask, p: float, user: str, state: dict, emit, tur
     turn.history, rec["history_turns"] = HISTORY.contents(user, p)
     answer = GuardedAnswer(check)
     sink = Streamer(answer, emit, rec)
-    runner, deadline, question = RUNNERS["context"], turn.started + config.ASK_DEADLINE_S, body.question.strip()
-    _text, status = await _throwaway(runner, user, state, question, emit, turn, deadline, sink, True)
+    runner, question = RUNNERS["context"], body.question.strip()
+    _text, status = await _throwaway(runner, user, state, question, emit, turn, turn.deadline, sink, True)
     if not sink.answer_text() and status in ("ok", "limit"):
-        # nothing survived the guard (or the model wrote nothing but a preamble): one non-streamed retry with the note
-        rec["retried"] = True
-        hits = [h for d in answer.dropped for h in d]
-        note = _retry_note(hits)
-        _text, status = await _throwaway(runner, user, state, f"{question}\n\n{note}".strip(), emit, turn, deadline,
-                                         sink, False)
+        # nothing survived the guard (or the model wrote nothing but a preamble)
+        retry = _retry_deadline(turn, question, bool(answer.dropped), rec)
+        if retry is not None:                          # one non-streamed retry with the note, no tools, bounded
+            hits = [h for d in answer.dropped for h in d]
+            turn.max_tool_rounds = 0
+            _text, status = await _throwaway(runner, user, state, f"{question}\n\n{_retry_note(hits)}".strip(), emit,
+                                             turn, retry, sink, False)
     rec["status"] = status
     if answer.dropped:
         rec["dropped_kinds"] = sorted({h["kind"] for d in answer.dropped for h in d})
         log.warning("guard dropped %d sentence(s) at p=%.1f: %s", len(answer.dropped), p, rec["dropped_kinds"])
+        for hits, s in zip(answer.dropped, answer.dropped_text):
+            log.info("dropped draft sentence %s: %r", sorted({h["kind"] for h in hits}), s[:240])
     text = sink.answer_text()
     if not text:
         if status == "error" and not sink.preamble:
@@ -653,6 +643,8 @@ async def flow_context(t, body: Ask, p: float, user: str, state: dict, emit, tur
         rec["preamble_only"] = bool(sink.preamble)
         await sink.send_final((TIMEOUT_FALLBACK if rec["fallback"] == "timeout" else FALLBACK)[body.lang])
         text = sink.answer_text()
+    if answer.dropped and not rec["fallback"]:
+        text = tidy_end(text)                          # a dropped last clause leaves no dangling ；
     rec["cut_off"] = bool(rec["cut_off"] or (status in ("timeout", "error") and not rec["fallback"]))
     if body.session_id and not rec["fallback"] and not rec["cut_off"]:
         HISTORY.add(user, p, question, text)          # only whole answers; no session: no conversation to keep
@@ -661,44 +653,34 @@ async def flow_context(t, body: Ask, p: float, user: str, state: dict, emit, tur
             "rewritten": bool(answer.dropped or rec["retried"] or rec["fallback"] or sink.preamble)}
 
 
-async def flow_tools(t, body: Ask, p: float, user: str, state: dict, emit, turn: A.Turn, rec: dict) -> dict:
-    """The earlier design: the agent picks among five tools; the whole answer is guarded, then sent at once."""
-    runner, deadline, question = RUNNERS["tools"], turn.started + config.ASK_DEADLINE_S, body.question.strip()
-    m = A.moment_of(state)
-    tapped, screen = await asyncio.to_thread(lambda: C.focus(m.on_screen(state["tap"], refs=True)))
-    check, links = await asyncio.to_thread(_checker, t, m, p, tapped, screen, body.question, turn)
-    anon = not body.session_id                         # no conversation to keep: a session that is deleted after
-
-    async def run(text: str, fresh: bool = False) -> tuple[str, str]:
-        if anon:
-            return await _throwaway(runner, user, state, text, emit, turn, deadline, None, False)
-        sid = await CONVERSATIONS.get(user, p, fresh=fresh)
-        return await _run(runner, user, sid, text, emit, turn, deadline, None, False, state)
-
-    text, status = await run(question)
-    hits, rewritten = check(text), False
-    if (hits or not text) and status in ("ok", "limit"):
-        # the bad draft must not stay in the conversation: retry in a fresh session
-        rewritten, rec["retried"] = True, True
-        log.warning("guard hit at p=%.1f: %s", p, [h["kind"] for h in hits])
-        rec["dropped_kinds"] = sorted({h["kind"] for h in hits})
-        text, status = await run(f"{question}\n\n{_retry_note(hits)}".strip(), fresh=True)
-    rec["status"] = status
-    if not text and status == "error":
-        raise AskFailed
-    if not text or check(text):
-        rewritten = True
-        rec["fallback"] = "spoiler" if (text or rec["dropped_kinds"]) else "timeout"
-        text = (TIMEOUT_FALLBACK if rec["fallback"] == "timeout" else FALLBACK)[body.lang]
-        if not anon:
-            await CONVERSATIONS.get(user, p, fresh=True)
-    rec["first_text_ms"] = int((time.monotonic() - rec["t0"]) * 1000)
-    await emit("delta", {"text": text})
-    terms = await asyncio.to_thread(C.tapped_terms, A.moment_of(state), state["tap"])
-    return {"text": text, "terms": terms, "links": links, "rewritten": rewritten}
+async def _paused_frame(m: Moment, rec: dict) -> bytes | None:
+    """The paused frame for the context, waited for at most FRAME_WAIT_S (an on-demand title fetches it from the
+    bucket): a slow fetch costs the image, not the answer. The fetch goes on in its thread and lands in the cache."""
+    if m.phase != "story":
+        return None
+    job = asyncio.ensure_future(asyncio.to_thread(A.read_thumb, m.title, m.fp))
+    try:
+        return await asyncio.wait_for(asyncio.shield(job), config.FRAME_WAIT_S)
+    except Exception as e:                                       # noqa: BLE001 — timeout / read error: no image
+        rec["frame"] = f"skipped: {type(e).__name__}"
+        log.warning("paused frame skipped: %r", e)
+        return None
 
 
-FLOWS = {"context": flow_context, "tools": flow_tools}
+def _retry_deadline(turn: A.Turn, question: str, dropped: bool, rec: dict) -> float | None:
+    """When the guard retry may run, and until when (None: no retry, the fixed reply now). A spoiler probe whose
+    draft tripped the guard gets the short decline straight away — a second draft would only be another decline,
+    later. Otherwise the retry has its own budget (RETRY_TIMEOUT_S) inside what is left of the question, and none at
+    all when less than RETRY_MIN_S is left."""
+    if dropped and C.spoiler_probe(question):
+        rec["declined"] = "probe"
+        return None
+    left = turn.deadline - time.monotonic()
+    if left < config.RETRY_MIN_S:
+        rec["declined"] = "no_time"
+        return None
+    rec["retried"] = True
+    return time.monotonic() + min(left, config.RETRY_TIMEOUT_S)
 
 
 @app.post("/api/ask")
@@ -711,10 +693,10 @@ async def ask(body: Ask, request: Request):
     bench = is_bench(request)
     if not bench and (limited := LIMITER.check(client_ip(request))):
         return JSONResponse(limited, status_code=429, headers={"Retry-After": str(limited["retry_after_s"])})
-    flow = request.headers.get("x-watch-flow") if bench else None
-    flow = flow if flow in FLOWS else (config.FLOW if config.FLOW in FLOWS else "context")
+    flow = "context"                     # the only flow; an `X-Watch-Flow` header (older bench runs) is ignored
 
     user = f"{body.session_id or uuid.uuid4().hex}:{t.id}"
+    rid = uuid.uuid4().hex[:8]                         # request id: in the answer / error event and every log line
     state = {"title_id": t.id, "p": p, "lang": body.lang, "tap": body.tap.model_dump() if body.tap else None}
     queue: asyncio.Queue = asyncio.Queue()
 
@@ -722,17 +704,19 @@ async def ask(body: Ask, request: Request):
         await queue.put(sse(event, data))
 
     async def work():
-        turn = A.Turn(max_tool_rounds=TOOL_ROUNDS[flow], soft_deadline_s=config.SOFT_DEADLINE_S)
+        REQUEST_ID.set(rid)
+        turn = A.Turn(max_tool_rounds=config.TOOL_ROUNDS, soft_deadline_s=config.SOFT_DEADLINE_S)
+        turn.deadline, turn.lang = turn.started + config.ASK_DEADLINE_S, body.lang
         A.TURN.set(turn)
         rec = {"t0": turn.started, "first_text_ms": None, "held_preamble": 0, "leaked_preamble": 0, "retried": False,
-               "fallback": None, "dropped": 0, "dropped_kinds": [], "history_turns": 0, "status": "ok",
+               "fallback": None, "declined": None, "dropped": 0, "dropped_kinds": [], "history_turns": 0, "status": "ok",
                "cut_off": False, "highlight": False}
         try:
             counts = await asyncio.to_thread(lambda: A.moment_of(state).gate_counts())
             elig = sum(counts["eligible"].values())
             await emit("gate", {"p": round(p, 2), "eligible_total": elig,
                                 "locked_total": sum(counts["total"].values()) - elig})
-            out = await FLOWS[flow](t, body, p, user, state, emit, turn, rec)
+            out = await flow_context(t, body, p, user, state, emit, turn, rec)
             evidence, frames, highlight = await _sources(t, p, state, turn, out, rec)
             total = int((time.monotonic() - turn.started) * 1000)
             rec["highlight"], rec["evidence"] = highlight is not None, len(evidence)
@@ -741,13 +725,14 @@ async def ask(body: Ask, request: Request):
                                   "guard": {"checked": True, "rewritten": out["rewritten"], "dropped": rec["dropped"]},
                                   "cut_off": bool(rec["cut_off"]),
                                   "latency_ms": total, "usage": turn.usage(),
-                                  "timing": {"first_text_ms": rec["first_text_ms"], "total_ms": total}, "flow": flow})
+                                  "timing": {"first_text_ms": rec["first_text_ms"], "total_ms": total}, "flow": flow,
+                                  "request_id": rid})
         except Exception as e:                                     # noqa: BLE001 — report, never leak internals
             rec["status"] = "error"
             if not isinstance(e, AskFailed):
                 log.exception("ask failed")
             await emit("error", {"message": "The assistant hit a problem answering this. Please try again."
-                                 if not isinstance(e, HTTPException) else str(e.detail)})
+                                 if not isinstance(e, HTTPException) else str(e.detail), "request_id": rid})
         finally:
             _log_question(flow, t, p, body, bench, turn, rec)
             await emit("done", {})
@@ -768,7 +753,7 @@ async def ask(body: Ask, request: Request):
 
 
 def _pick_sources(t, p: float, state: dict, turn: A.Turn, out: dict, rec: dict):
-    """(evidence rows, frame plan, highlight, check) to show with the final answer, both flows. Only the sources the
+    """(evidence rows, frame plan, highlight, check) to show with the final answer. Only the sources the
     answer rests on (`server.evidence`); a pure refusal or a fallback lists none. Every evidence line, frame caption and
     the highlight label goes through the guard relative to the answer's subject (`guard.source_violations`). The
     highlight only when the answer is about the tapped entity, so the box never contradicts the text."""
@@ -810,10 +795,11 @@ async def _sources(t, p: float, state: dict, turn: A.Turn, out: dict, rec: dict)
 
 
 def _log_question(flow: str, t, p: float, body: Ask, bench: bool, turn: A.Turn, rec: dict) -> None:
-    """One JSON line per question (no question text, no tokens or secrets)."""
+    """One JSON line per question (no question text, no tokens or secrets). `rid` is the `request_id` of the answer;
+    `probe`: the question reads as a spoiler probe (`context.spoiler_probe`)."""
     rec = {k: v for k, v in rec.items() if k != "t0"}
     log.info("ask %s", json.dumps({
-        "flow": flow, "title": t.id, "p": round(p, 2), "lang": body.lang, "tap": body.tap is not None, "bench": bench,
+        "rid": REQUEST_ID.get(), "probe": C.spoiler_probe(body.question), "flow": flow, "title": t.id, "p": round(p, 2), "lang": body.lang, "tap": body.tap is not None, "bench": bench,
         "model": config.MODEL, "tools": turn.tools, "search_mode": turn.search_mode, "usage": turn.usage(),
         "timing": {"first_text_ms": rec.pop("first_text_ms"), "total_ms": int((time.monotonic() - turn.started) * 1000)},
         "tools_stopped": turn.tools_stopped, "embed_down": A.EMBEDDER.last_error is not None

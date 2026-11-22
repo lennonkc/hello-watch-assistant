@@ -4,6 +4,8 @@ Model text arrives in chunks. `GuardedAnswer.feed` cuts it into sentences (Engli
 each finished sentence with the guard *together with everything already sent* (so a term that only appears across a
 sentence boundary is caught as well), and returns only the sentences that pass, as the exact strings to send. A
 sentence that fails is never sent; the caller logs it. `text` is always exactly the concatenation of what was sent.
+After a drop the join is tidied: the first kept sentence loses a leading connective ("Then", "After that"), and the
+final answer (`tidy_end`) does not end on a clause mark such as a semicolon.
 """
 from __future__ import annotations
 
@@ -43,6 +45,32 @@ def split_sentences(text: str) -> list[str]:
     return [s for s in ready + [rest] if s.strip()]
 
 
+# After the guard drops a sentence, what is left must still read as an answer: a first kept sentence does not open with
+# a connective that pointed back at the dropped one, and the answer does not end on a clause mark.
+_LEAD_EN = re.compile(r"^(?:and then|then|after that|afterwards|but|and|meanwhile|however|later,)[,]?\s+", re.IGNORECASE)
+_LEAD_ZH = re.compile(r"^(?:随后|然后|之后|接着|后来|但是|不过|而且|于是|同时|此外|另外|可是)[，,]?")
+_TRAIL = re.compile(r"\s*[；;，,、：:]+\s*$")
+
+
+def strip_lead(sentence: str) -> str:
+    """"Then the boy climbs a tree." → "The boy climbs a tree." (Chinese connectives alike)."""
+    for rx in (_LEAD_EN, _LEAD_ZH):
+        mo = rx.match(sentence)
+        rest = sentence[mo.end():] if mo else ""
+        if len(rest.strip()) > 1:
+            return rest[:1].upper() + rest[1:]
+    return sentence
+
+
+def tidy_end(text: str) -> str:
+    """An answer ending on ；，、： (its next clause was dropped) ends with a full stop instead."""
+    mo = _TRAIL.search(text or "")
+    if not mo or not text[:mo.start()].strip():
+        return text
+    body = text[:mo.start()]
+    return body + ("。" if _CJKISH.match(body[-1]) else ".")
+
+
 def _tight(prev: str, nxt: str) -> bool:
     """No space between two sentences when either side is Chinese."""
     return bool(_CJKISH.match(prev) or _CJKISH.match(nxt))
@@ -56,6 +84,7 @@ class GuardedAnswer:
         self.buf = ""
         self.text = ""
         self.dropped: list[list[dict]] = []          # guard hits of each dropped sentence
+        self.dropped_text: list[str] = []            # the dropped sentences themselves (server log only)
 
     def feed(self, chunk: str) -> list[str]:
         self.buf += chunk
@@ -75,12 +104,15 @@ class GuardedAnswer:
 
     def _accept(self, sentence: str) -> str | None:
         s = " ".join(sentence.split())
+        if s and not self.text and self.dropped:          # everything before it was dropped
+            s = strip_lead(s)
         if not s:
             return None
         delta = ("" if not self.text or _tight(self.text[-1], s[0]) else " ") + s
         hits = self.check(self.text + delta)
         if hits:
             self.dropped.append(hits)
+            self.dropped_text.append(s)
             return None
         self.text += delta
         return delta

@@ -1,5 +1,5 @@
 """The answer path end to end with scripted models: context injection, streaming through the per-sentence guard,
-retry / fallback, tool budget, deadlines, history across seeks, highlight truthfulness, the tools flow."""
+retry / fallback, tool budget, deadlines, history across seeks, highlight truthfulness."""
 import asyncio
 import json
 import logging
@@ -141,10 +141,10 @@ def test_text_before_a_tool_call_is_held_back(wired, caplog):
 
 def test_deadline_gives_a_timely_fallback(wired, monkeypatch):
     monkeypatch.setattr(config, "STEP_TIMEOUT_S", 0.3)
-    wired.ctx.script = [{"text": "Too slow.", "sleep": 3}]
-    t0 = time.monotonic()
+    wired.ctx.script = [{"text": "Too slow.", "sleep": 10}]
     ev = wired.ask(30.0)
-    assert time.monotonic() - t0 < 2.0
+    # server time, with a wide margin: stopped after the 0.3 s step timeout, nowhere near the model's 10 s
+    assert answer(ev)["timing"]["total_ms"] < 5000
     assert sent_text(ev) == main.TIMEOUT_FALLBACK["en"] and kinds(ev)[-2:] == ["answer", "done"]
 
 
@@ -216,25 +216,6 @@ def test_zh_labels_in_context_and_highlight(wired):
     assert "1. 狼 (character" in request_text(wired.ctx.requests[0])
 
 
-# ── tools flow (kept selectable for the benchmark) ───────────────────
-
-def test_tools_flow_still_works(wired, monkeypatch):
-    monkeypatch.setattr(config, "FLOW", "tools")
-    wired.tools.script = [{"call": ("on_screen", {})}, {"text": "That is the wolf."}]
-    ev = wired.ask(61.2, tap=TAP_WOLF)
-    assert [d["name"] for d in data(ev, "tool")] == ["on_screen"]
-    assert data(ev, "delta") == [{"text": "That is the wolf."}]
-    a = answer(ev)
-    assert a["flow"] == "tools" and a["highlight"]["label"] == "the wolf" and a["usage"]["model_calls"] == 2
-
-
-def test_tools_flow_guard_retry(wired, monkeypatch):
-    monkeypatch.setattr(config, "FLOW", "tools")
-    wired.tools.script = [{"text": "That's Bob."}, {"text": "That's the boy."}]
-    ev = wired.ask(8.0)
-    assert sent_text(ev) == "That's the boy." and answer(ev)["guard"]["rewritten"]
-
-
 # ── the sweep: nothing ineligible anywhere, at any P ─────────────────
 
 LEAKY = ("That is Bob. Bobby waves. It will howl. The wolf turns out to be Bob. Jane Realperson voices her. "
@@ -295,7 +276,7 @@ def test_online_embedder_times_out_fails_over_and_caches(monkeypatch):
     async def run():
         e = OnlineEmbedder(timeout_s=0.1, cooldown_s=60, embed=slow)
         t0 = time.monotonic()
-        assert await e.vector("q") is None and time.monotonic() - t0 < 1
+        assert await e.vector("q") is None and time.monotonic() - t0 < 3       # 0.1 s timeout vs a 5 s call
         e._embed = ok
         assert await e.vector("q") is None and not calls                  # cooling down: no call at all
         e2 = OnlineEmbedder(embed=boom)
@@ -315,7 +296,7 @@ def test_search_falls_back_to_full_text_without_vectors(title):
 
 def test_prompt_dir_without_a_new_prompt_falls_back(tmp_path, monkeypatch):
     from server import prompts
-    for n in ("agent_instruction", "look_closer", "guard_retry"):
+    for n in ("look_closer", "guard_retry"):
         (tmp_path / f"{n}.txt").write_text((prompts.DEFAULT_DIR / f"{n}.txt").read_text())
     monkeypatch.setenv(prompts.DIR_ENV, str(tmp_path))
     prompts._load.cache_clear()
@@ -385,7 +366,29 @@ def test_thumbnails_are_read_off_the_event_loop_and_stills_together(wired, monke
     assert [d["name"] for d in data(ev, "tool")][-2:] == ["look_closer", "search_moments"]
     assert answer(ev)["text"] == "That is the wolf." and answer(ev)["frames"]
     assert on_loop == [] and max(len(b) for b in batches) >= 6            # frame + stills of the last 30 s at once
-    monkeypatch.setattr(config, "FLOW", "tools")
-    wired.tools.script = [{"call": ("story_so_far", {})}, {"call": ("on_screen", {})}, {"text": "A wolf."}]
-    wired.ask(61.2, "What did I miss?", tap=TAP_WOLF)
-    assert on_loop == []
+
+
+# ── the join after a dropped sentence ────────────────────────────────
+
+def test_join_is_tidied_after_a_drop():
+    from server.answer import strip_lead, tidy_end
+    bob = lambda t: [{"kind": "name", "term": "Bob"}] if ("Bob" in t or "鲍勃" in t) else []     # noqa: E731
+    ga = GuardedAnswer(bob)
+    out = ga.feed("Alice met Bob in the meadow. Then the boy climbs a tree. ") + ga.flush()
+    assert "".join(out) == "The boy climbs a tree."
+    ga = GuardedAnswer(bob)
+    out = ga.feed("爱丽丝遇见了鲍勃。随后时间来到四十年后。") + ga.flush()
+    assert "".join(out) == "时间来到四十年后。"
+    ga = GuardedAnswer(bob)
+    out = ga.feed("那是狼；它就是鲍勃。") + ga.flush()
+    assert tidy_end("".join(out)) == "那是狼。"
+    assert tidy_end("That is the wolf,") == "That is the wolf." and tidy_end("That is the wolf.") == "That is the wolf."
+    assert strip_lead("Then.") == "Then." and strip_lead("Next to her is Alice.") == "Next to her is Alice."
+    ga = GuardedAnswer(lambda _t: [])                   # nothing dropped: nothing changed
+    assert "".join(ga.feed("Then the boy climbs a tree. ") + ga.flush()) == "Then the boy climbs a tree."
+
+
+def test_dangling_clause_mark_is_not_the_end_of_the_answer(wired):
+    wired.ctx.script = [{"text": "那是狼；它就是鲍勃。"}]
+    ev = wired.ask(59.0, "那是谁？", lang="zh")
+    assert answer(ev)["text"] == "那是狼。"

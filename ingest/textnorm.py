@@ -13,7 +13,7 @@ from ingest.util import REPO
 WORDLISTS_DIR = REPO / "schema" / "wordlists"
 CJK = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
 # Characters that continue a Latin-script word. Only these bound a Latin term: CJK characters are \w in Python's
-# regex, so a `\b`-style boundary would miss "Bob" in "那是Bob。".
+# regex, so a `\b`-style boundary would miss "Bob" glued to Chinese characters.
 LATIN_WORD = "0-9A-Za-z_\u00c0-\u024f"
 
 
@@ -54,7 +54,8 @@ def has_cjk(s: str) -> bool:
 def word_pattern(t: str, prefix: bool = False) -> str:
     """Regex for a normalised term: CJK terms match as substrings; a Latin-script term must not be glued to another
     Latin letter, digit or underscore on either side (on the left only, for a `prefix` match). Anything else —
-    spaces, punctuation, CJK — is a boundary, so "Bob" matches in "那是Bob。" and possessive "Bob's" matches too."""
+    spaces, punctuation, CJK — is a boundary, so "Bob" matches right after a Chinese character and possessive "Bob's"
+    matches too."""
     if has_cjk(t):
         return re.escape(t)
     return rf"(?<![{LATIN_WORD}])" + re.escape(t) + ("" if prefix else rf"(?![{LATIN_WORD}])")
@@ -66,7 +67,7 @@ _REGEX_B = {"b": rf"(?:(?<={_L})(?!{_L})|(?<!{_L})(?={_L}))", "B": rf"(?:(?<={_L
 
 def latin_boundaries(pattern: str) -> str:
     """A regex term's `\\b` / `\\B` on the same Latin word class as `word_pattern`: Python's `\\b` counts CJK
-    characters as word characters, so `\\bolder\\b` would miss "他变older了"."""
+    characters as word characters, so `\\bolder\\b` would miss "older" between two Chinese characters."""
     return re.sub(r"(?<!\\)((?:\\\\)*)\\([bB])", lambda mo: mo.group(1) + _REGEX_B[mo.group(2)], pattern)
 
 
