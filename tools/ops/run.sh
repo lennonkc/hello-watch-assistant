@@ -223,6 +223,8 @@ elif what == "traffic":
     for t in svc.get("status", {}).get("traffic", [])[:15]:
         rev = t.get("revisionName") or ("LATEST" if t.get("latestRevision") else "?")
         print("  %-40s %4s%%  tag=%-8s %s" % (rev, t.get("percent", 0), t.get("tag", "-"), t.get("url", "")))
+elif what == "sa":
+    print(svc.get("spec", {}).get("template", {}).get("spec", {}).get("serviceAccountName", ""))
 elif what == "tag-url":
     for t in svc.get("status", {}).get("traffic", []):
         if t.get("tag") == sys.argv[2]:
@@ -623,10 +625,13 @@ mode_promote() {
 mode_job() {
   if [ ! -f tools/ops/job.sh ]; then die "this commit has no tools/ops/job.sh"; fi
   ensure_venv
+  hr "cloud"
+  cloud_discover 1
   export OPS_ROOT="$ROOT" OPS_VENV_PY="$VENV_PY" REGION SERVICE TAG
   export HELLO_WATCH_GEMINI_KEY_FILE="${HELLO_WATCH_GEMINI_KEY_FILE:-}" HELLO_WATCH_MOVIES_DIR="${HELLO_WATCH_MOVIES_DIR:-}"
   export HELLO_WATCH_DEVICE_PACKS_DIR="${HELLO_WATCH_DEVICE_PACKS_DIR:-}" HELLO_WATCH_INGEST_CACHE="${HELLO_WATCH_INGEST_CACHE:-}"
-  if [ -n "${PROJECT:-}" ]; then export PROJECT; fi
+  export PROJECT="${PROJECT:-}" BUCKET="${BUCKET:-}" SERVICE_ACCOUNT="$(svc_q sa)"
+  say "project: ${PROJECT:-?} · bucket: ${BUCKET:-?} · service account: ${SERVICE_ACCOUNT:-?}"
   hr "tools/ops/job.sh"
   /bin/bash tools/ops/job.sh
 }
