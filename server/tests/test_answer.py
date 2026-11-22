@@ -11,7 +11,7 @@ from ingest.retrieval import Gate, OnlineEmbedder
 from server import config, guard, main
 from server.answer import GuardedAnswer, split_ready, split_sentences
 from server.knowledge import Moment
-from server.tests.fakes import request_images, request_text, tools_off
+from server.tests.fakes import oracle_leaks, request_images, request_text, tools_off
 
 TAP_WOLF = {"x": 0.2, "y": 0.3}          # inside the wolf's box [100, 50, 600, 400] (keyframe 60 s)
 
@@ -121,10 +121,9 @@ def test_tool_rounds_are_capped(wired):
         return {"text": "Done looking."} if tools_off(req) else {"call": ("search_moments", {"query": "meadow"})}
     wired.ctx.script = [step, step, step, step]
     ev = wired.ask(70.0, "What happened in the meadow?")
-    assert [d["name"] for d in data(ev, "tool")] == ["on_screen", "recent_dialogue", "story_so_far",
-                                                     "search_moments", "search_moments"]
-    assert [tools_off(r) for r in wired.ctx.requests] == [False, False, True]
-    assert answer(ev)["usage"]["model_calls"] == 3 and sent_text(ev) == "Done looking."
+    assert [d["name"] for d in data(ev, "tool")] == ["on_screen", "recent_dialogue", "story_so_far", "search_moments"]
+    assert [tools_off(r) for r in wired.ctx.requests] == [False, True]     # one model-called round, then answer now
+    assert answer(ev)["usage"]["model_calls"] == 2 and sent_text(ev) == "Done looking."
     assert "matches" in data(ev, "tool_result")[-1]["summary"]
 
 
@@ -239,7 +238,7 @@ def test_tools_flow_guard_retry(wired, monkeypatch):
 # ── the sweep: nothing ineligible anywhere, at any P ─────────────────
 
 LEAKY = ("That is Bob. Bobby waves. It will howl. The wolf turns out to be Bob. Jane Realperson voices her. "
-         "原来狼就是鲍勃。")
+         "原来狼就是鲍勃。那是Bob。它会howl的。由Jane Realperson配音。The wolf, and Bob.")
 
 
 @pytest.mark.parametrize("lang", ["en", "zh"])
@@ -255,7 +254,7 @@ def test_sweep_context_evidence_and_deltas(wired, lang):
         shown = [sent_text(ev), a["text"], json.dumps(a["evidence"], ensure_ascii=False),
                  json.dumps(data(ev, "tool_result"), ensure_ascii=False), ctx_text]
         for text in shown:
-            assert guard.violations(title_pack, text, P) == [], (P, text[:300])
+            assert oracle_leaks(title_pack, text, P) == [], (P, text[:300])
         # no text of an ineligible row reaches the model
         g = Gate(title_pack, P, allow_auto=True)
         ok = {it.text for it in g.eligible() if it.text}
@@ -331,3 +330,50 @@ def test_blank_cues_never_count(wired):
         assert '[00:40]' not in request_text(wired.ctx.requests[0])
     finally:
         pack["cues"].remove(blank)
+
+
+def test_thumbnails_are_read_off_the_event_loop_and_stills_together(wired, monkeypatch):
+    """`Title.thumb()` may block (on-demand fetch from Cloud Storage): no call on the ask path runs on the event loop,
+    and look_closer asks for the paused frame and all its stills in one `Title.prefetch` (concurrent downloads)."""
+    from server import agent as A
+    from server.packs import Title
+    real, real_prefetch, on_loop, batches = Title.thumb, Title.prefetch, [], []
+
+    def on_the_loop() -> bool:
+        try:
+            asyncio.get_running_loop()
+            return True
+        except RuntimeError:
+            return False
+
+    def slow_thumb(self, t):
+        if on_the_loop():
+            on_loop.append(t)
+        time.sleep(0.005)
+        return real(self, t)
+
+    def prefetch(self, ts_):
+        if on_the_loop():
+            on_loop.append(tuple(ts_))
+        batches.append(list(ts_))
+        return real_prefetch(self, ts_)
+
+    class Seen:
+        text, usage_metadata = "A wolf in the snow.", None
+
+    async def vision(parts):
+        return Seen()
+
+    monkeypatch.setattr(Title, "thumb", slow_thumb)
+    monkeypatch.setattr(Title, "prefetch", prefetch)
+    monkeypatch.setattr(A, "vision_generate", vision)
+    wired.ctx.script = [{"call": ("look_closer", {"question": "what is that"})},
+                        {"call": ("search_moments", {"query": "wolf"})}, {"text": "That is the wolf."}]
+    ev = wired.ask(61.2, "What is that?", tap=TAP_WOLF)
+    assert [d["name"] for d in data(ev, "tool")][-2:] == ["look_closer", "search_moments"]
+    assert answer(ev)["text"] == "That is the wolf." and answer(ev)["frames"]
+    assert on_loop == [] and max(len(b) for b in batches) >= 6            # frame + stills of the last 30 s at once
+    monkeypatch.setattr(config, "FLOW", "tools")
+    wired.tools.script = [{"call": ("story_so_far", {})}, {"call": ("on_screen", {})}, {"text": "A wolf."}]
+    wired.ask(61.2, "What did I miss?", tap=TAP_WOLF)
+    assert on_loop == []

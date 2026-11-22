@@ -14,6 +14,8 @@ prereviewed+ and `reveal_at_s + gate_margin_scene_snapped_s ≤ P`; `video_windo
 """
 from __future__ import annotations
 
+import bisect
+import collections
 import dataclasses
 import functools
 import math
@@ -21,6 +23,7 @@ import os
 import pathlib
 import re
 import sqlite3
+import threading
 
 import numpy as np
 
@@ -77,6 +80,31 @@ def margins(pack: dict, floor: dict | None = None) -> dict:
     return {k: max(float(meta.get(k, v)), float(floor.get(k, 0.0))) for k, v in MARGINS.items()}
 
 
+# ── per-pack indexes ──────────────────────────────────────────────────
+
+_PER_PACK: collections.OrderedDict = collections.OrderedDict()
+_PER_PACK_LOCK = threading.Lock()
+
+
+def per_pack(pack: dict, key, build):
+    """Memoise `build(pack)` for one pack object: P-independent indexes, so a question at a new position does not
+    re-read and re-sort a long film's tables. The entry holds the pack, so its id cannot be reused while cached, and
+    adding or removing rows in any table rebuilds it. (Editing rows in place is not detected: build a new pack.)"""
+    fp = tuple((k, len(v)) for k, v in pack.items() if isinstance(v, list))
+    ck = (id(pack), key)
+    with _PER_PACK_LOCK:
+        hit = _PER_PACK.get(ck)
+        if hit is not None and hit[0] is pack and hit[1] == fp:
+            _PER_PACK.move_to_end(ck)
+            return hit[2]
+    val = build(pack)
+    with _PER_PACK_LOCK:
+        _PER_PACK[ck] = (pack, fp, val)
+        while len(_PER_PACK) > 64:
+            _PER_PACK.popitem(last=False)
+    return val
+
+
 # ── Gate (spec §5) ───────────────────────────────────────────────────
 
 class Gate:
@@ -92,30 +120,25 @@ class Gate:
     - identity isolation (§5.3), judged over the item's whole interval (`Item.span`), see `isolated`.
     """
 
-    def __init__(self, pack: dict, P: float, allow_auto: bool = False, margin_floor: dict | None = None):
+    def __init__(self, pack: dict, P: float, allow_auto: bool = False, margin_floor: dict | None = None,
+                 cached: bool = False):
+        """`cached=True` reuses the P-independent part (lookups, the candidate list) built once per pack object, for
+        the online service, whose packs do not change. Without it everything is built from the pack as it is now."""
         self.pack, self.P, self.allow_auto = pack, float(P), allow_auto
-        self.m = margins(pack, margin_floor)
-        self.chars = {c["character_id"]: c for c in pack.get("characters", [])}
-        self.item_chars: dict = {}
-        for r in pack.get("item_characters", []):
-            self.item_chars.setdefault((r["item_type"], r["item_id"]), set()).add(r["character_id"])
-        for f in pack.get("character_facts", []):
-            self.item_chars.setdefault(("character_fact", f["fact_id"]), set()).add(f["character_id"])
-        for r in pack.get("shot_entities", []):
-            if r.get("character_id"):
-                self.item_chars.setdefault(("shot_caption", r["shot_caption_id"]), set()).add(r["character_id"])
-        self.item_cues: dict = {}
-        for r in pack.get("item_cues", []):
-            self.item_cues.setdefault((r["item_type"], r["item_id"]), set()).add(r["cue_id"])
-        self.cue_end = {c["cue_id"]: c["end_s"] for c in pack.get("cues", [])}
+        if cached:
+            key = ("gate", allow_auto, None if margin_floor is None else tuple(sorted(margin_floor.items())))
+            ix = per_pack(pack, key, lambda _p: self._index(margin_floor))
+        else:
+            ix = self._index(margin_floor)
+        self._ix = ix
+        self.m, self.chars, self.item_chars = ix["m"], ix["chars"], ix["item_chars"]
+        self.item_cues, self.cue_end = ix["item_cues"], ix["cue_end"]
         links = pack.get("identity_links", [])
-        linked = {lk[k] for lk in links for k in ("a_character_id", "b_character_id")}
         # §5.2 appearances: prereviewed+ (reviewed for characters in identity links), start ≤ P, truncated at P
         self.appear: dict = {}
-        for a in pack.get("appearances", []):
-            ok = self.reviewed(a["review_state"]) if a["character_id"] in linked else self.pre(a["review_state"])
-            if ok and a["character_id"] in self.chars and self.le(a["start_s"]):
-                self.appear.setdefault(a["character_id"], []).append((a["start_s"], max(a["start_s"], min(a["end_s"], self.P))))
+        for cid, start, end in ix["appear"]:
+            if self.le(start):
+                self.appear.setdefault(cid, []).append((start, max(start, min(end, self.P))))
         # a link is pending until it is reviewed, revealed (+ margin) and both of its characters are eligible
         self.pending = []
         for lk in links:
@@ -124,6 +147,32 @@ class Gate:
                 fa = (self.chars.get(lk["a_character_id"]) or {}).get("first_appears_s")
                 self.pending.append({"a": lk["a_character_id"], "b": lk["b_character_id"], "reveal_at_s": lk["reveal_at_s"],
                                      "window_start": max(0.0, fa) if fa is not None else 0.0})
+
+    def _index(self, margin_floor: dict | None) -> dict:
+        """Everything about the pack that does not depend on P."""
+        pack = self.pack
+        self.m = margins(pack, margin_floor)
+        item_chars: dict = {}
+        for r in pack.get("item_characters", []):
+            item_chars.setdefault((r["item_type"], r["item_id"]), set()).add(r["character_id"])
+        for f in pack.get("character_facts", []):
+            item_chars.setdefault(("character_fact", f["fact_id"]), set()).add(f["character_id"])
+        for r in pack.get("shot_entities", []):
+            if r.get("character_id"):
+                item_chars.setdefault(("shot_caption", r["shot_caption_id"]), set()).add(r["character_id"])
+        item_cues: dict = {}
+        for r in pack.get("item_cues", []):
+            item_cues.setdefault((r["item_type"], r["item_id"]), set()).add(r["cue_id"])
+        chars = self.chars = {c["character_id"]: c for c in pack.get("characters", [])}
+        linked = {lk[k] for lk in pack.get("identity_links", []) for k in ("a_character_id", "b_character_id")}
+        appear = sorted((a["character_id"], a["start_s"], a["end_s"]) for a in pack.get("appearances", [])
+                        if a["character_id"] in chars
+                        and (self.reviewed(a["review_state"]) if a["character_id"] in linked else self.pre(a["review_state"])))
+        cands = self._candidates()
+        order = sorted(range(len(cands)), key=lambda i: cands[i].eligible_from)
+        return {"m": self.m, "chars": chars, "item_chars": item_chars, "item_cues": item_cues,
+                "cue_end": {c["cue_id"]: c["end_s"] for c in pack.get("cues", [])}, "appear": appear,
+                "candidates": cands, "by_from": order, "froms": [cands[i].eligible_from for i in order]}
 
     def le(self, t: float) -> bool:
         return t <= self.P + EPS
@@ -170,6 +219,9 @@ class Gate:
         """Every retrievable item with its earliest eligible time by time and review state; inf if it can never be
         eligible (fails review, or credits material). Relations and isolation depend on P and are checked in
         `eligible`."""
+        return list(self._ix["candidates"])
+
+    def _candidates(self) -> list[Item]:
         p, m, inf = self.pack, self.m, math.inf
         story_end = (p.get("asset") or {}).get("story_end_s")
         story_end = inf if story_end is None else story_end
@@ -227,8 +279,11 @@ class Gate:
         a = self.pack.get("asset") or {}
         if a.get("story_start_s") is not None and self.P + EPS < a["story_start_s"]:
             return []                                    # §5.4: no content answers before the story starts
-        return [it for it in self.candidates()
-                if (types is None or it.item_type in types) and self.le(it.eligible_from) and self.relations_ok(it)]
+        ix = self._ix
+        cut = bisect.bisect_right(ix["froms"], self.P + EPS)          # time and review first, in candidate order
+        cands = ix["candidates"]
+        return [cands[i] for i in sorted(ix["by_from"][:cut])
+                if (types is None or cands[i].item_type in types) and self.relations_ok(cands[i])]
 
 
 # ── Ranking (within the eligible set only) ───────────────────────────
@@ -290,7 +345,7 @@ def search(db_path, P: float, query: str, k: int = 5, *, mode: str = "vector", a
     `keep(item) -> bool` narrows the eligible set before ranking (e.g. one subtitle track, no very short lines), so the
     top k are taken from what the caller can actually use."""
     pack = load_pack(db_path)
-    items = Gate(pack, P, allow_auto, margin_floor).eligible(types)      # ① gate first
+    items = Gate(pack, P, allow_auto, margin_floor, cached=True).eligible(types)      # ① gate first (pack: cached, unchanging)
     if keep is not None:
         items = [it for it in items if keep(it)]
     vec, fts = [], []

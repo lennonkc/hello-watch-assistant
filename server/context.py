@@ -25,7 +25,7 @@ DIALOGUE_S = 60.0               # "what did they just say": the last minute of l
 DIALOGUE_FALLBACK = 4           # … or, if nothing was said in it, the last few lines before P
 DIALOGUE_MAX = 12
 STORY_ITEMS = 12
-FRESH_BOX_S = 1                 # a box measured within 1 s of floor(P) is treated as matching the paused frame
+FRESH_BOX_S = 1                 # a box measured within 1 s of floor(P), in the shot P is in, matches the paused frame
 
 
 @dataclasses.dataclass
@@ -45,6 +45,7 @@ class Context:
     lookups: list[Lookup]
     tapped_terms: list[str]               # words by which an answer refers to the tapped entity
     highlight_fresh: bool                 # the tapped entity's box was measured on (about) the paused frame
+    subjects: frozenset = frozenset()     # characters the answer is about (identity co-occurrence, server/guard.py)
 
     def parts(self) -> list[types.Part]:
         out = [types.Part.from_text(text=self.text)]
@@ -89,6 +90,24 @@ def _entity_line(i: int, e: dict) -> str:
     return " ".join(bits)
 
 
+def fresh(m: Moment, screen: dict, e: dict) -> bool:
+    """The entity's box matches the paused frame: measured within FRESH_BOX_S of floor(P), in the shot P is in (right
+    after a cut the boxes still come from the shot before, which shows something else)."""
+    return bool(screen.get("current_shot")) and m.fp - int(e["frame_t"]) <= FRESH_BOX_S
+
+
+def focus(m: Moment, screen: dict) -> frozenset:
+    """Who the answer is about, for the identity co-occurrence guard: the tapped character; without a tap, every
+    on-screen character that is the a-side of a pending identity link whose b-side is not on screen too."""
+    ents = screen.get("entities", [])
+    refs = [e.get("ref") for e in ents]
+    if "tapped" in screen:
+        ref = refs[screen["tapped"]]
+        return frozenset([ref[1]]) if ref and ref[0] == "character" else frozenset()
+    on = {r[1] for r in refs if r and r[0] == "character"}
+    return frozenset(lk["a"] for lk in m.gate.pending if lk["a"] in on and lk["b"] not in on)
+
+
 def _tap_text(m: Moment, tap: dict, out: dict, ents: list[dict], ringed: bool) -> str:
     y, x = round(float(tap["y"]) * 1000), round(float(tap["x"]) * 1000)
     where = (f"The viewer tapped the paused frame at y={y}, x={x} on the 0–1000 grid"
@@ -97,12 +116,13 @@ def _tap_text(m: Moment, tap: dict, out: dict, ents: list[dict], ringed: bool) -
     if "tapped" in out:
         e = ents[out["tapped"]]
         age = m.fp - int(e["frame_t"])
-        if age <= FRESH_BOX_S:
+        if fresh(m, out, e):
             return (f"{where} By box geometry the tap falls on entity {out['tapped'] + 1} ({e['label']}), whose box was "
                     f"measured on this frame. Answer about what is under {spot}.")
+        when = (f"measured {age} s before the pause" if out.get("current_shot")
+                else "measured in the shot before this one")
         return (f"{where} By box geometry the tap falls on entity {out['tapped'] + 1} ({e['label']}), but that box was "
-                f"measured {age} s before the pause and things may have moved: check what is actually under {spot} "
-                f"and answer about that.")
+                f"{when} and things may have moved: check what is actually under {spot} and answer about that.")
     if ents:
         return f"{where} No identified entity's box contains that point; answer about what is under {spot}."
     return f"{where} Nothing in this frame has been identified; describe what is under {spot}."
@@ -145,7 +165,8 @@ def mentions(text: str, terms: list[str]) -> bool:
 
 
 def build(m: Moment, tap: dict | None, turn: A.Turn) -> Context:
-    """Run the three lookups (bookkeeping into `turn` exactly as the tools do) and render the context."""
+    """Run the three lookups (bookkeeping into `turn` exactly as the tools do) and render the context. Blocking (pack
+    reads, thumbnails that may come from Cloud Storage): the server calls it in a worker thread."""
     pos = ts(m.P)
     phase = {"story": "during the story", "before_story": "before the story has started",
              "credits": "the end credits are rolling; the story is over"}[m.phase]
@@ -157,8 +178,7 @@ def build(m: Moment, tap: dict | None, turn: A.Turn) -> Context:
     clean = {**screen, "entities": [{k: v for k, v in e.items() if k != "ref"} for e in ents]}
     lookups = [Lookup("ctx-1", "on_screen", A.TOOL_LABELS["on_screen"], A.note_on_screen(turn, m, clean))]
     frame, ringed, note = None, False, ""
-    if m.phase == "story" and m.title.thumb(m.fp).exists():
-        frame = m.title.thumb(m.fp).read_bytes()
+    if m.phase == "story" and (frame := A.read_thumb(m.title, m.fp)) is not None:
         if tap and (marked := mark_tap(frame, tap)):
             frame, ringed = marked, True
         note = (f"PAUSED FRAME at {pos} (exactly what the viewer sees now)"
@@ -172,12 +192,12 @@ def build(m: Moment, tap: dict | None, turn: A.Turn) -> Context:
         sections.append("ON SCREEN: " + (screen.get("note") or "nothing identified.")
                         .replace("use look_closer to inspect it", "rely on the attached frame"))
     terms = []
-    fresh = False
+    box_fresh = False
     if tap and m.phase == "story":
         sections.append("TAP: " + _tap_text(m, tap, screen, ents, ringed=ringed))
         if "tapped" in screen:
             e = ents[screen["tapped"]]
-            terms, fresh = m.mention_terms(e["ref"]), m.fp - int(e["frame_t"]) <= FRESH_BOX_S
+            terms, box_fresh = m.mention_terms(e["ref"]), fresh(m, screen, e)
 
     lines, dialogue = _dialogue(m)
     sections.append(dialogue)
@@ -185,7 +205,7 @@ def build(m: Moment, tap: dict | None, turn: A.Turn) -> Context:
 
     story = m.story_so_far(limit=STORY_ITEMS)
     sections.append(_story(story))
-    lookups.append(Lookup("ctx-3", "story_so_far", A.TOOL_LABELS["story_so_far"], A.note_story(turn, m, story)))
+    lookups.append(Lookup("ctx-3", "story_so_far", A.TOOL_LABELS["story_so_far"], A.note_story(turn, m, story, frames=False)))
 
     return Context(text="\n\n".join(sections), frame=frame, frame_note=note, lookups=lookups,
-                   tapped_terms=terms, highlight_fresh=fresh)
+                   tapped_terms=terms, highlight_fresh=box_fresh, subjects=focus(m, screen))

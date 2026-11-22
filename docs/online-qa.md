@@ -100,7 +100,7 @@ every question, `server/context.py`:
 An ADK `before_model_callback` puts this context, plus the conversation so far, in front of the question in every
 model request of the question. Nothing of it is written to the ADK session (each question runs in a throwaway session),
 so stale context cannot pile up. Only `search_moments` (anything earlier the summary does not cover) and `look_closer`
-(movement across the last 30 s) stay callable. The step trace still shows the server-run lookups (`ctx-1`…`ctx-3`).
+(movement across the last 30 s) stay callable, for one round. The step trace still shows the server-run lookups (`ctx-1`…`ctx-3`).
 
 **Conversation memory.** Per browser session the server keeps (P, question, answer exactly as sent). A question at P gets
 only the turns asked at or before P (at most `WATCH_HISTORY_TURNS`): eligibility is monotone in P, so all of it is still
@@ -110,26 +110,48 @@ A dropped sentence or a tool payload never enters this memory.
 **Streaming through the guard.** The run streams (`StreamingMode.SSE`). Model text is cut into sentences (English and
 Chinese punctuation, `server/answer.py`). Each finished sentence is checked by the §7 guards together with everything
 already sent, so terms spanning a sentence boundary are caught too. It is sent as a `delta` only if it passes; a failing
-sentence is dropped and logged. A model call's first sentence is held back until a second one starts or the call ends
-without a function call, so a "let me check" written before a tool call never reaches the viewer (counted as
-`held_preamble`). If nothing survives, the question is asked once more, not streamed, with a note listing the terms to
-avoid; if that fails too, a fixed reply is sent. No unguarded text leaves the server.
+sentence is dropped and logged. Besides spec §7 the guard applies the identity co-occurrence rule: while an identity
+link a = b is pending, no sentence may name both sides, and when the answer is about a (the tapped character, an
+on-screen a without b, or an a the question mentions) b's names may not appear at all. The tool arguments the step
+trace shows go through the same check (names not visible yet become labels; anything else the guard objects to is not
+shown).
+
+**Sources shown with the answer** (`server/evidence.py`). The context is attached whether or not the answer uses it, so
+it is not the evidence list. The lookups and tools only offer candidates (recaps sentence by sentence, story items,
+lines, the tapped entity's facts, search hits); once the answer is final the server keeps those that share content
+words with it (two, or one for a fact about the tapped entity the answer talks about), at most four, with one frame
+each, the tapped entity's reference stills and the paused frame. Every line, frame caption and the highlight label
+passes the guard relative to the answer's subject: next to an answer about a (or naming a), nothing may name b, and the
+reverse. A refusal or a fallback shows no sources and no frames.
+
+The prompt forbids text before a tool call. A model call's first sentence is held back until a second one starts or the
+call ends without a function call, so a one-sentence "let me check" is never sent (`held_preamble`). A longer preamble
+can get its first sentence out before the call arrives (`leaked_preamble`): it is guarded, but it never counts as the
+answer. The final `answer` event leaves it out (the browser replaces what was streamed), it is not stored in the
+conversation memory, and if nothing else was written the question gets a fallback (`preamble_only` in the log line).
+If nothing survives the guard, the question is asked once more, not streamed, with a note listing the terms to avoid;
+if that fails too, a fixed reply is sent. No unguarded text leaves the server.
 
 **Budgets and deadlines** (`server/config.py`, all overridable):
 
 | What | Default | On expiry |
 |---|---|---|
 | Query embedding (`search_moments`) | 1.5 s, one attempt, no retry loop | full-text ranking; embeddings paused for 60 s |
-| `look_closer` nested call | 10 s | the tool returns a note; the model answers without it |
-| Tool rounds per question | 2 (3 in the `tools` flow) | function calls are switched off (`FunctionCallingConfig` `NONE`) and the model is told to answer |
-| Soft deadline | 9 s | same as above |
-| Silence from the agent run | 12 s | the run is stopped |
-| Whole question | 25 s | the run is stopped; complete sentences already sent stand, else a "took too long" reply |
+| `look_closer` nested call | 6 s, the paused frame + at most 8 stills (read concurrently) | the tool returns a note; the model answers without it |
+| Model-called tool rounds per question | 1 (3 in the `tools` flow) | function calls are switched off (`FunctionCallingConfig` `NONE`) and the model is told to answer now |
+| Soft deadline | 6 s | same as above |
+| Silence from the agent run | 8 s | the run is stopped |
+| Whole question | 10 s, retry included | the run is stopped; complete sentences stand (a last one that ends with sentence punctuation counts), else a "took too long" reply |
 
 **Observability.** The `answer` event carries `usage` (input / output / thought tokens, model calls) and `timing`
 (time to first text, total). Each question also writes one JSON log line (`ask {…}`) with the flow, P, tools called,
 search mode, usage, timing, sentences dropped and their guard kinds, held preambles, retry, fallback and whether the
 highlight was kept. The log line never contains the question text or the bench token.
+
+**Long films.** Timestamps are `mm:ss`, and `h:mm:ss` from one hour on. Everything about a pack that does not depend on
+P (the gate's candidate list and lookups, dialogue tracks, shots, speakers) is built once per pack and reused, and the
+per-question build runs in a worker thread: on a synthetic 10,000-cue / 3,000-shot pack it takes 30–50 ms (about 120 ms
+for the first question, which builds the indexes).
 
 **The earlier flow** (`WATCH_FLOW=tools`) stays available for benchmarking: five tools (`story_so_far`,
 `search_moments`, `recent_dialogue`, `on_screen`, `look_closer`) and a routing-table instruction. Its ADK session

@@ -10,6 +10,8 @@ make this a no-op; it is here so that one mislabelled row cannot put a name in f
 """
 from __future__ import annotations
 
+import bisect
+import collections
 import dataclasses
 import functools
 import json
@@ -19,8 +21,7 @@ import re
 from ingest import retrieval
 from ingest.checks import name_terms
 from ingest.retrieval import EPS
-from ingest.textnorm import has_cjk, normalize, term_matches
-from ingest.util import mmss
+from ingest.textnorm import has_cjk, normalize, term_matches, word_pattern
 from server.packs import Title
 
 BAD = {"flagged", "rejected"}
@@ -34,7 +35,18 @@ _SENTENCE_START = re.compile(r"(?:^|[.!?。！？]\s*)$")
 
 
 def ts(t: float) -> str:
-    return mmss(t)[:5]
+    """Film time for people and prompts: mm:ss, or h:mm:ss from one hour on (whole seconds, rounded down)."""
+    s = max(0, int(math.floor(float(t) + EPS)))
+    h, rest = divmod(s, 3600)
+    return f"{h}:{rest // 60:02d}:{rest % 60:02d}" if h else f"{rest // 60:02d}:{rest % 60:02d}"
+
+
+def secs(stamp: str) -> float:
+    """Inverse of `ts`: "mm:ss" or "h:mm:ss" → seconds."""
+    out = 0.0
+    for part in stamp.split(":"):
+        out = out * 60 + float(part)
+    return out
 
 
 def long_enough(text: str | None) -> bool:
@@ -45,12 +57,40 @@ def long_enough(text: str | None) -> bool:
     return len(text.split()) >= MIN_CUE_WORDS
 
 
+def _index(pack: dict) -> dict:
+    """P-independent lookups for one pack, built once (`retrieval.per_pack`): a 169-minute film has ~10,000 cues and
+    ~3,000 shots, and a question must not re-sort them."""
+    tracks = sorted(pack["subtitle_tracks"], key=lambda t: (not t["lang"].startswith("en"), t["priority"]))
+    track = tracks[0]["track"] if tracks else None
+    shots = sorted(pack.get("shot_captions", []), key=lambda s: s["start_s"])
+    ents: dict = {}
+    for e in pack.get("shot_entities", []):
+        ents.setdefault(e["shot_caption_id"], []).append(e)
+    aliases: dict = {}
+    for a in pack.get("character_aliases", []):
+        aliases.setdefault(a["character_id"], []).append(a)
+    return {
+        "track": track,
+        "cues": {c["cue_id"]: c for c in pack["cues"]},
+        "lines": sorted((c for c in pack["cues"] if c["track"] == track and c["kind"] == "dialogue"
+                         and (c["text"] or "").strip()), key=lambda c: c["start_s"]),
+        "speakers": {s["cue_id"]: s for s in pack.get("cue_speakers", [])
+                     if s["review_state"] not in BAD and s.get("character_id")},
+        "shots": shots, "shot_starts": [s["start_s"] for s in shots], "entities": ents,
+        "fact_owner": {f["fact_id"]: f["character_id"] for f in pack["character_facts"]},
+        "objects": {o["object_id"]: o for o in pack.get("objects", [])},
+        "recaps": {r["recap_id"]: r for r in pack.get("recaps", [])},
+        "aliases": aliases,
+    }
+
+
 class Moment:
     def __init__(self, title: Title, P: float, lang: str = "en"):
         self.title, self.P, self.lang = title, float(P), lang
         self.fp = int(math.floor(self.P + EPS))
         self.pack = title.pack
-        self.gate = retrieval.Gate(self.pack, self.P, allow_auto=True)
+        self.gate = retrieval.Gate(self.pack, self.P, allow_auto=True, cached=True)
+        self.ix = retrieval.per_pack(self.pack, "moment", _index)
         self.m = self.gate.m
         self.asset = self.pack["asset"]
         self.chars = self.gate.chars
@@ -94,20 +134,19 @@ class Moment:
     # ── name sanitising (defence in depth, spec §6) ─────────────────
 
     @functools.cached_property
-    def _hidden_names(self) -> list[tuple[str, bool, re.Pattern, str]]:
-        """(term, case_sensitive, pattern on case-preserving normalised text, replacement label) for every name / alias
-        that is not visible at P; longest first so "Bob Smith" is replaced before "Bob"."""
+    def _hidden_names(self) -> list[tuple[str, bool, re.Pattern, str, str]]:
+        """(term, case_sensitive, pattern on case-preserving normalised text, label en, label zh) for every name /
+        alias that is not visible at P; longest first so "Bob Smith" is replaced before "Bob"."""
         mr = self.m["gate_margin_reviewed_reveal_s"]
         out = []
         for cid, term, known_at, cs in name_terms(self.pack):
             if cid not in self.chars or self.P + EPS >= known_at + mr:
                 continue
-            label = self.label(cid, "zh" if has_cjk(term) else "en")
+            en, zh = self.label(cid, "en"), self.label(cid, "zh")
             t = normalize(term, True)
-            if not t or normalize(t) == normalize(label):
+            if not t or normalize(t) in (normalize(en), normalize(zh)):
                 continue
-            body = re.escape(t) if has_cjk(t) else r"(?<!\w)" + re.escape(t) + r"(?!\w)"
-            out.append((term, bool(cs), re.compile(body, 0 if cs else re.IGNORECASE), label))
+            out.append((term, bool(cs), re.compile(word_pattern(t), 0 if cs else re.IGNORECASE), en, zh))
         return sorted(out, key=lambda x: -len(x[0]))
 
     def sanitize(self, text: str | None) -> str | None:
@@ -117,6 +156,7 @@ class Moment:
         hidden = [h for h in self._hidden_names if term_matches(h[0], text, "word", h[1])]
         if not hidden:
             return text
+        zh = has_cjk(text)                                   # the label in the language of the surrounding text
         s = normalize(text, True)
 
         def sub(label: str):
@@ -125,8 +165,8 @@ class Moment:
                 return label[:1].upper() + label[1:] if start and label[:1].isalpha() else label
             return f
 
-        for _term, _cs, pat, label in hidden:
-            s = pat.sub(sub(label), s)
+        for _term, _cs, pat, en, zh_label in hidden:
+            s = pat.sub(sub(zh_label if zh else en), s)
         return s
 
     # ── long-range memory: latest recap + what happened after it ────
@@ -140,7 +180,7 @@ class Moment:
                        key=lambda it: (it.start_s, it.item_type))
         out = {"position": ts(self.P), "phase": self.phase}
         if latest:
-            row = next(r for r in self.pack["recaps"] if r["recap_id"] == latest.item_id)
+            row = self.ix["recaps"][latest.item_id]
             out["recap"] = {"up_to": ts(latest.start_s), "text": self.sanitize(
                 row["text_zh"] if self.lang == "zh" and row.get("text_zh") else row["text_en"])}
         out["since_recap" if latest else "so_far"] = [
@@ -149,13 +189,9 @@ class Moment:
 
     # ── semantic search, gate first ─────────────────────────────────
 
-    @functools.cached_property
-    def _cue_rows(self) -> dict:
-        return {c["cue_id"]: c for c in self.pack["cues"]}
-
     def _searchable_line(self, it: retrieval.Item) -> bool:
-        c = self._cue_rows.get(it.item_id)
-        return bool(c) and c["track"] == self._cue_track() and c["kind"] == "dialogue" and long_enough(c["text"])
+        c = self.ix["cues"].get(it.item_id)
+        return bool(c) and c["track"] == self.ix["track"] and c["kind"] == "dialogue" and long_enough(c["text"])
 
     def search(self, query: str, qvec=None, k: int = 6) -> list[retrieval.Hit]:
         """Gate-first search over eligible evidence: cosine ranking when a query vector is given, full text otherwise
@@ -177,29 +213,19 @@ class Moment:
 
     # ── near-window dialogue with speakers ──────────────────────────
 
-    def _cue_track(self) -> str | None:
-        tracks = sorted(self.pack["subtitle_tracks"], key=lambda t: (not t["lang"].startswith("en"), t["priority"]))
-        return tracks[0]["track"] if tracks else None
-
     def speaker(self, cue: dict) -> str:
         """Speaker label at P, or "unknown speaker" if the attribution is not usable yet (character not eligible, or
         attaching the line to them would break identity isolation)."""
-        sp = self._speakers.get(cue["cue_id"])
+        sp = self.ix["speakers"].get(cue["cue_id"])
         cid = sp["character_id"] if sp else None
         if not cid or not self.char_ok(cid) or self.gate.char_isolated(cid, cue["start_s"], cue["end_s"]):
             return "unknown speaker"
         return self.label(cid)
 
-    @functools.cached_property
-    def _speakers(self) -> dict:
-        return {s["cue_id"]: s for s in self.pack.get("cue_speakers", [])
-                if self.gate.pre(s["review_state"]) and s.get("character_id")}
-
     def _lines(self) -> list[dict]:
         """Eligible dialogue cues on the chosen track, oldest first."""
-        track, ok = self._cue_track(), {it.item_id for it in self.eligible if it.item_type == "cue"}
-        return sorted((c for c in self.pack["cues"] if c["cue_id"] in ok and c["track"] == track and c["kind"] == "dialogue"
-                       and (c["text"] or "").strip()), key=lambda c: c["start_s"])
+        ok = {it.item_id for it in self.eligible if it.item_type == "cue"}
+        return [c for c in self.ix["lines"] if c["cue_id"] in ok]
 
     def recent_dialogue(self, seconds: float = 90.0, at_least: int = 0) -> list[dict]:
         """Lines that started in the last `seconds` before P (a line still on screen is excluded, §5.2); if fewer than
@@ -214,7 +240,7 @@ class Moment:
     # ── current shot: who / what is on screen (spec §5.2 current-shot rule) ──
 
     def _facts(self, cid: str) -> list[str]:
-        owner = {f["fact_id"]: f["character_id"] for f in self.pack["character_facts"]}
+        owner = self.ix["fact_owner"]
         return [self.sanitize(it.text) for it in self.eligible
                 if it.item_type == "character_fact" and owner.get(it.item_id) == cid]
 
@@ -244,11 +270,9 @@ class Moment:
         for server-side use (`mention_terms`); never send that to the model."""
         if self.phase == "credits":
             return {"note": "The end credits are rolling; there is nobody to identify on screen."}
-        shots = sorted(self.pack.get("shot_captions", []), key=lambda s: s["start_s"])
-        cur = [i for i, s in enumerate(shots) if s["start_s"] <= self.P + EPS < s["end_s"]]
-        ents_by_shot: dict = {}
-        for e in self.pack.get("shot_entities", []):
-            ents_by_shot.setdefault(e["shot_caption_id"], []).append(e)
+        shots, ents_by_shot = self.ix["shots"], self.ix["entities"]
+        i = bisect.bisect_right(self.ix["shot_starts"], self.P + EPS) - 1
+        cur = [i] if i >= 0 and self.P + EPS < shots[i]["end_s"] else []
         # current shot first; if it has no usable frame yet (it only just started), the shot before it
         candidates = []
         if cur:
@@ -278,7 +302,7 @@ class Moment:
             else:
                 oid = e.get("object_id")
                 if self._object_ok(oid):
-                    o, ref = next(o for o in self.pack["objects"] if o["object_id"] == oid), ("object", oid)
+                    o, ref = self.ix["objects"][oid], ("object", oid)
                     ent.update(kind="object", label=self.sanitize(o["name_en"]), description=self.sanitize(o["description_en"]))
                 else:
                     ent.update(kind="object", label="an object (not described yet)")
@@ -298,6 +322,8 @@ class Moment:
                 out["tap_note"] = "The tap is not on any known entity."
         if used_shot is not None:
             out["shot_started"] = ts(used_shot["start_s"])
+        if refs:
+            out["current_shot"] = used_shot is not None and used_shot is candidates[0]
         return out
 
     def mention_terms(self, ref: tuple[str, str] | None) -> list[str]:
@@ -337,17 +363,13 @@ class Moment:
 
     def evidence_frame(self, start_s: float, end_s: float) -> int | None:
         t = min(int((start_s + end_s) / 2), self.fp)
-        for cand in (t, int(start_s), self.fp):
-            if 0 <= cand <= self.fp and self.title.thumb(cand).exists():
-                return cand
-        return None
+        prefs = [c for c in (t, int(start_s), self.fp) if 0 <= c <= self.fp]
+        have = set(self.title.prefetch(prefs))                   # one concurrent fetch for on-demand titles
+        return next((c for c in prefs if c in have), None)
 
     def gate_counts(self) -> dict:
-        everything = self.gate.candidates()
-        total: dict = {}
-        for it in everything:
-            if it.item_type != "video_window":
-                total[it.item_type] = total.get(it.item_type, 0) + 1
+        total = retrieval.per_pack(self.pack, "gate_totals", lambda _p: dict(collections.Counter(
+            it.item_type for it in self.gate.candidates() if it.item_type != "video_window")))
         elig = {k: 0 for k in total}
         for it in self.eligible:
             if it.item_type in elig:

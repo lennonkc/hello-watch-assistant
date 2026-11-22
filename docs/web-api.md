@@ -98,11 +98,11 @@ The response is `text/event-stream` (read it with `fetch` + a stream reader; `Ev
 | `event:` | `data:` (JSON) | Meaning |
 |---|---|---|
 | `gate` | `{"p": 431.2, "eligible_total": 140, "locked_total": 380}` | Gate computed for this question |
-| `tool` | `{"id": "t1", "name": "story_so_far", "label": "Reading the story so far", "args": {…}}` | A lookup started: a tool the agent called, or (ids `ctx-1`…`ctx-3`) one the server ran to build the context |
+| `tool` | `{"id": "t1", "name": "story_so_far", "label": "Reading the story so far", "args": {…}}` | A lookup started: a tool the agent called, or (ids `ctx-1`…`ctx-3`) one the server ran to build the context. `args` are model-written, so they pass the output guard first (names not visible yet become labels; `{}` if anything else is caught) |
 | `tool_result` | `{"id": "t1", "name": "story_so_far", "summary": "1 recap + 6 events, up to 06:58"}` | That lookup finished |
 | `highlight` | `{"bbox": [210, 380, 760, 560], "label": "the young woman", "frame_t": 430}` | The tap matched an entity whose box was measured within 1 s of the paused frame; draw it right away |
 | `delta` | `{"text": " She is looking for her dragon."}` | Next piece of the answer: one sentence that already passed the output guard, with its leading space if any. Append as is |
-| `answer` | see below | Final, guarded answer; `text` equals the concatenation of all `delta` texts |
+| `answer` | see below | Final, guarded answer. Normally `text` equals the concatenation of all `delta` texts; when it differs (text written before a tool call, a fallback) it replaces what was streamed |
 | `error` | `{"message": "…"}` | Something failed before any answer text; show it politely |
 | `done` | `{}` | Stream finished |
 
@@ -127,6 +127,8 @@ Order: `gate`, then the trace (`tool` / `tool_result`, possibly `highlight`), th
 - `highlight.bbox` is `[ymin, xmin, ymax, xmax]` normalised to 0–1000 on frame `frame_t` (≤ `P`, from the shot's
   keyframe). In `answer` it is `null` unless the answer text mentions the tapped entity, so the box never contradicts
   the text; the early `highlight` event is sent only when the box is fresh (within 1 s of `floor(P)`).
+- `evidence`: only what the answer rests on (at most four rows, a recap as the matching sentence), each checked by the
+  output guard; empty for a refusal or a fallback.
 - `frames[].t` → `/api/titles/{id}/frames/{t}.jpg`; every frame is at or before `P`.
 - `guard.rewritten = true` means the output guard caught something: `dropped` sentences were never sent, or the
   answer was regenerated (one retry) or replaced by a fixed reply.
