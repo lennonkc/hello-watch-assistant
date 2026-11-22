@@ -125,7 +125,7 @@ ensure_venv() {
 
 # ── cloud discovery ──────────────────────────────────────────────────
 
-# reads the service JSON on stdin; argv: env NAME | url | traffic
+# reads the service JSON on stdin; argv: env NAME | url | traffic | tag-url TAG
 PY_SVC='
 import json, sys
 svc = json.load(sys.stdin)
@@ -146,6 +146,16 @@ elif what == "tag-url":
         if t.get("tag") == sys.argv[2]:
             print(t.get("url", ""))
 '
+
+# asset sha of every film in catalog/catalog.json (from ingest/titles/<id>.json)
+PY_SHAS='
+import json, pathlib
+cat = json.loads(pathlib.Path("catalog/catalog.json").read_text(encoding="utf-8"))
+for it in cat["items"]:
+    spec = json.loads(pathlib.Path("ingest/titles/%s.json" % it["id"]).read_text(encoding="utf-8"))
+    print(spec["expected_asset_sha256"][0])
+'
+PY_TOKEN='import secrets; print(secrets.token_hex(24))'
 
 SVC_JSON=""
 JSON_PY=""
@@ -253,9 +263,10 @@ mode_info() {
   say "packs prefix (WATCH_PACKS_GCS): ${PACKS_GCS:-(unset)}"
   for k in WATCH_MODEL WATCH_FLOW WATCH_ASK_PER_MINUTE WATCH_ASK_PER_DAY_PER_IP CEDAR_GEMINI_BACKEND; do
     v=$(svc_q env "$k")
-    if [ -n "$v" ]; then say "service env $k=$v"; fi
+    if [ -n "$v" ]; then say "latest revision env $k=$v"; fi
   done
-  if [ -n "$(svc_q env WATCH_BENCH_TOKEN)" ]; then say "service env WATCH_BENCH_TOKEN: set (value hidden)"; fi
+  if [ -n "$(svc_q env WATCH_BENCH_TOKEN)" ]; then say "latest revision env WATCH_BENCH_TOKEN: set (value hidden)"; fi
+  if [ -n "$(svc_q env WATCH_AGENT_PROMPTS_SECRET)" ]; then say "latest revision env WATCH_AGENT_PROMPTS_SECRET: set"; fi
 
   hr "traffic"
   svc_q traffic
@@ -284,11 +295,147 @@ mode_tests() {
   "$VENV_PY" bench/judge.py --lint
 }
 
-not_yet() { die "mode '$MODE' is not implemented in this commit"; }
+refresh_service() {
+  SVC_JSON=$(gcloud run services describe "$SERVICE" --project "$PROJECT" --region "$REGION" --format=json) \
+    || die "cannot describe Cloud Run service $SERVICE in $REGION"
+}
+
+# Build the image of this commit and deploy it as a NEW revision that takes no traffic, tagged $TAG. Production
+# traffic is never moved (--no-traffic pins any "latest" traffic to the current revision first).
+mode_deploy_staging() {
+  local image token envs url out rc
+  cloud_discover
+  if [ -z "${BUCKET:-}" ]; then die "the service has no CEDAR_INGEST_BUCKET env var"; fi
+  git rev-parse HEAD >/dev/null 2>&1 || die "deploy-staging needs a git checkout (the image is built with git archive)"
+  hr "traffic before"
+  svc_q traffic
+  hr "build $(git rev-parse --short=12 HEAD)"
+  image=$(PROJECT=$PROJECT BUCKET=$BUCKET REGION=$REGION /bin/bash deploy/web/build.sh) || die "image build failed"
+  say "image: $image"
+
+  mkdir -p .cache
+  token=$("$JSON_PY" -c "$PY_TOKEN")
+  (umask 077 && printf '%s\n' "$token" > .cache/bench_token)
+  envs="WATCH_BENCH_TOKEN=$token"
+  envs="$envs,WATCH_ASK_PER_MINUTE=${WATCH_ASK_PER_MINUTE:-6},WATCH_ASK_PER_DAY_PER_IP=${WATCH_ASK_PER_DAY_PER_IP:-80}"
+  envs="$envs,WATCH_ASK_PER_DAY_TOTAL=${WATCH_ASK_PER_DAY_TOTAL:-1500}"
+  if [ -n "${STAGING_ENV:-}" ]; then
+    envs="$envs,$STAGING_ENV"
+  fi
+  hr "deploy (no traffic, tag $TAG)"
+  say "extra env: ${STAGING_ENV:-(none)}; WATCH_BENCH_TOKEN: fresh (written to .cache/bench_token)"
+  # the agent prompts ship in the image now: drop the prompt-secret variable on the new revision
+  out=$(mktemp)
+  if gcloud run deploy "$SERVICE" --project "$PROJECT" --region "$REGION" --image "$image" \
+      --no-traffic --tag "$TAG" --session-affinity \
+      --min-instances "${MIN_INSTANCES:-1}" --max-instances "${MAX_INSTANCES:-2}" \
+      --update-env-vars "$envs" --remove-env-vars WATCH_AGENT_PROMPTS_SECRET --quiet >"$out" 2>&1; then
+    rc=0
+  else
+    rc=$?
+  fi
+  sed "s/$token/***/g" "$out"                  # an error message could quote the flag value: mask the token
+  rm -f "$out"
+  if [ "$rc" != 0 ]; then die "gcloud run deploy failed"; fi
+  refresh_service
+  url=$(svc_q tag-url "$TAG")
+  printf 'image=%s\nstaging_env=%s\ndeployed=%s\n' "$image" "${STAGING_ENV:-}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    > .cache/staging.txt
+  hr "traffic after (production unchanged)"
+  svc_q traffic
+  hr "tagged URL"
+  say "$url"
+  if [ -n "$url" ] && have curl; then
+    say "health: $(curl -fsS -m 90 "$url/api/health" 2>&1 || echo 'FAILED')"
+  fi
+}
+
+# Benchmark a URL (default: the $TAG revision) with bench/run_bench.py, grade with bench/judge.py, print the scorecard.
+mode_bench() {
+  local url sha shas run_id label compare
+  cloud_discover
+  ensure_venv
+  url=${BENCH_URL:-$(svc_q tag-url "$TAG")}
+  if [ -z "$url" ]; then die "no URL: no revision is tagged $TAG (run deploy-staging) and BENCH_URL is unset"; fi
+  if [ -z "${PACKS_GCS:-}" ]; then die "the service has no WATCH_PACKS_GCS env var"; fi
+
+  hr "master packs from $PACKS_GCS"
+  shas=$("$VENV_PY" -c "$PY_SHAS") || die "cannot read the catalog"
+  for sha in $shas; do
+    mkdir -p ".cache/packs/$sha/master"
+    gcloud storage cp "$PACKS_GCS/$sha/master/pack.db" ".cache/packs/$sha/master/pack.db" --quiet >/dev/null 2>&1 \
+      || die "download failed: $sha/master/pack.db"
+    say "  $sha  $(du -h ".cache/packs/$sha/master/pack.db" | cut -f1)"
+  done
+
+  export BENCH_RUNS_DIR="$ROOT/.cache/bench/runs"
+  run_id=${BENCH_RUN_ID:-$(date -u '+%m%d-%H%M')-$TAG}
+  label="${BENCH_LABEL:-}"
+  if [ -z "$label" ] && [ -f .cache/staging.txt ] && [ -z "${BENCH_URL:-}" ]; then
+    label="staging: $(tr '\n' ' ' < .cache/staging.txt)"
+  fi
+  hr "run $run_id against $url"
+  set -- --base "$url" --run-id "$run_id" --workers "${BENCH_WORKERS:-1}" --label "$label" --progress 10
+  if [ -s .cache/bench_token ]; then
+    set -- "$@" --token-file .cache/bench_token
+  fi
+  if [ -n "${BENCH_ONLY:-}" ]; then
+    set -- "$@" --only "$BENCH_ONLY"
+  fi
+  "$VENV_PY" bench/run_bench.py "$@"
+
+  hr "scorecard"
+  compare=""
+  if [ -n "${BENCH_COMPARE:-}" ]; then
+    compare=$BENCH_COMPARE
+  fi
+  set -- --packs "$ROOT/.cache/packs"
+  if [ "${BENCH_LLM:-1}" = 0 ]; then
+    set -- "$@" --no-llm
+  elif [ -z "${CEDAR_GEMINI_KEY_FILE:-}" ] || [ ! -s "$CEDAR_GEMINI_KEY_FILE" ]; then
+    say "WARN: no Gemini key file (HELLO_WATCH_GEMINI_KEY_FILE): rule gate only, no LLM judge"
+    set -- "$@" --no-llm
+  fi
+  if [ -n "$compare" ]; then
+    "$VENV_PY" bench/judge.py "$compare" "$run_id" "$@"
+  else
+    "$VENV_PY" bench/judge.py "$run_id" "$@"
+  fi
+}
+
+# Move 100 % of traffic to the $TAG revision.
+mode_promote() {
+  local url
+  cloud_discover
+  url=$(svc_q tag-url "$TAG")
+  if [ -z "$url" ]; then die "no revision is tagged $TAG"; fi
+  hr "traffic before"
+  svc_q traffic
+  gcloud run services update-traffic "$SERVICE" --project "$PROJECT" --region "$REGION" --to-tags "$TAG=100" \
+    --quiet 2>&1 | tail -5 || die "update-traffic failed"
+  refresh_service
+  hr "traffic after"
+  svc_q traffic
+}
+
+# One-off operations: run tools/ops/job.sh of this commit (with the .venv and the machine-local paths exported).
+mode_job() {
+  if [ ! -f tools/ops/job.sh ]; then die "this commit has no tools/ops/job.sh"; fi
+  ensure_venv
+  export OPS_ROOT="$ROOT" OPS_VENV_PY="$VENV_PY" REGION SERVICE TAG
+  export HELLO_WATCH_GEMINI_KEY_FILE="${HELLO_WATCH_GEMINI_KEY_FILE:-}" HELLO_WATCH_MOVIES_DIR="${HELLO_WATCH_MOVIES_DIR:-}"
+  export HELLO_WATCH_DEVICE_PACKS_DIR="${HELLO_WATCH_DEVICE_PACKS_DIR:-}" HELLO_WATCH_INGEST_CACHE="${HELLO_WATCH_INGEST_CACHE:-}"
+  if [ -n "${PROJECT:-}" ]; then export PROJECT; fi
+  hr "tools/ops/job.sh"
+  /bin/bash tools/ops/job.sh
+}
 
 case "$MODE" in
   info) mode_info ;;
   tests) mode_tests ;;
-  deploy-staging|bench|promote|job) not_yet ;;
+  deploy-staging) mode_deploy_staging ;;
+  bench) mode_bench ;;
+  promote) mode_promote ;;
+  job) mode_job ;;
   *) die "usage: tools/ops/run.sh info|tests|deploy-staging|bench|promote|job" ;;
 esac

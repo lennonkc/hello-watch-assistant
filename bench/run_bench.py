@@ -205,6 +205,7 @@ def main(argv=None) -> int:
     ap.add_argument("--limit", type=int, default=None, help="run at most N cases this invocation")
     ap.add_argument("--timeout", type=float, default=TIMEOUT_S)
     ap.add_argument("--retry-errors", action="store_true")
+    ap.add_argument("--progress", type=int, default=1, help="print every Nth case (errors are always printed)")
     args = ap.parse_args(argv)
     token = args.token
     if args.token_file:
@@ -254,6 +255,9 @@ def main(argv=None) -> int:
     with cf.ThreadPoolExecutor(max(1, args.workers)) as ex:
         for i, r in enumerate(ex.map(one, todo), 1):
             rows[r["id"]] = r
+            if r["status"] == "ok" and i % max(1, args.progress) and i != len(todo):
+                write_jsonl(rpath, sorted(rows.values(), key=lambda x: x["id"]))
+                continue
             print(f"  [{i}/{len(todo)}] {r['id']} {r['status']} {r.get('t_total_ms')} ms"
                   f" first_text={r.get('t_first_text_ms')} tools={r.get('tools')}"
                   + (f" ERROR {r.get('error')}" if r["status"] != "ok" else ""), flush=True)
