@@ -57,6 +57,7 @@ done
 export PATH
 
 say() { printf '%s\n' "$*"; }
+. ./deploy/web/env.sh                # service_env, env_names, live_env, revision_q
 hr() { printf '\n== %s\n' "$*"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -207,7 +208,7 @@ ensure_venv() {
 
 # ── cloud discovery ──────────────────────────────────────────────────
 
-# reads the service JSON on stdin; argv: env NAME | url | traffic | tag-url TAG
+# reads the service JSON on stdin; argv: env NAME | url | traffic | sa | tag-url TAG | tag-revision TAG
 PY_SVC='
 import json, sys
 svc = json.load(sys.stdin)
@@ -229,6 +230,10 @@ elif what == "tag-url":
     for t in svc.get("status", {}).get("traffic", []):
         if t.get("tag") == sys.argv[2]:
             print(t.get("url", ""))
+elif what == "tag-revision":
+    for t in svc.get("status", {}).get("traffic", []):
+        if t.get("tag") == sys.argv[2]:
+            print(t.get("revisionName", ""))
 '
 
 # asset sha of every film in catalog/catalog.json (from ingest/titles/<id>.json)
@@ -445,7 +450,7 @@ mode_tests() {
   local rc=0 lint=0
   ensure_venv
   hr "pytest"
-  "$VENV_PY" -m pytest -q -p no:cacheprovider ingest/tests ingest/cloud/tests server/tests bench/tests \
+  "$VENV_PY" -m pytest -q -p no:cacheprovider ingest/tests ingest/cloud/tests server/tests bench/tests tools/ops/tests \
     >"$LOGS/pytest.log" 2>&1 || rc=$?
   show_tail "$LOGS/pytest.log" 40
   hr "benchmark case lint"
@@ -454,12 +459,13 @@ mode_tests() {
   if [ "$rc" != 0 ] || [ "$lint" != 0 ]; then die "tests failed (pytest exit $rc, lint exit $lint)"; fi
 }
 
-# gs:// URL of PACKS_PREFIX (a path inside the service's own bucket; bucket names are never committed)
 # gs://<bucket>/<path> for a path parameter (PACKS_PREFIX, PRIVATE_PREFIX): a path inside the service's bucket
+# (bucket names are never committed). Only A-Z a-z 0-9 . _ - / : no comma or space can reach --set-env-vars.
 bucket_url() {
   local name=$1 prefix=${2#/}
   case "$prefix" in
     gs://*|*..*|"") die "$name must be a path inside the bucket, e.g. demo-packs-next (got '$2')" ;;
+    *[!A-Za-z0-9._/-]*) die "$name may contain only A-Z a-z 0-9 . _ - / (got '$2')" ;;
   esac
   if [ -z "${BUCKET:-}" ]; then die "$name needs the service's CEDAR_INGEST_BUCKET"; fi
   printf 'gs://%s/%s\n' "$BUCKET" "${prefix%/}"
@@ -474,13 +480,61 @@ refresh_service() {
     || die "cannot describe Cloud Run service $SERVICE in $REGION"
 }
 
+# public films in the catalog (what /api/health must report)
+PY_NFILMS='import json; print(len(json.load(open("catalog/catalog.json", encoding="utf-8"))["items"]))'
+# reads /api/health on stdin; argv: expected public titles → "ok <titles> <revision>" or exit 1 with the reason
+PY_HEALTH='
+import json, sys
+try:
+    h = json.load(sys.stdin)
+except ValueError:
+    print("not JSON"); sys.exit(1)
+want = int(sys.argv[1])
+if not (isinstance(h, dict) and h.get("ok") is True):
+    print("ok is not true"); sys.exit(1)
+if h.get("titles") != want:
+    print("%s public titles, expected %d" % (h.get("titles"), want)); sys.exit(1)
+print("ok %s %s" % (h.get("titles"), h.get("revision") or "?"))
+'
+
+# health URL: "ok …" or dies (no answer, not ok, or not every public film loaded)
+check_health() {
+  local url=$1 body verdict
+  have curl || die "curl not found"
+  if ! body=$(curl -fsS -m 90 "$url/api/health" 2>&1); then die "health: FAILED ($url/api/health: ${body:0:200})"; fi
+  if ! verdict=$(printf '%s' "$body" | "$JSON_PY" -c "$PY_HEALTH" "$("$JSON_PY" -c "$PY_NFILMS")"); then
+    die "health: FAILED ($verdict)"
+  fi
+  say "health: $verdict"
+}
+
 # Build the image of this commit and deploy it as a NEW revision that takes no traffic, tagged $TAG. Production
-# traffic is never moved (--no-traffic pins any "latest" traffic to the current revision first).
+# traffic is never moved (--no-traffic pins any "latest" traffic to the current revision first). The environment is
+# built in full every time (deploy/web/env.sh, --set-env-vars): packs PACKS_PREFIX (default: what production serves),
+# private titles PRIVATE_PREFIX (default: none), limits, STAGING_ENV, and a fresh bench token unless RELEASE=1 (the
+# revision meant for promote carries no token).
 mode_deploy_staging() {
-  local image token envs url out rc pu pv
+  local image token envs url out rc names
   cloud_discover
   if [ -z "${BUCKET:-}" ]; then die "the service has no CEDAR_INGEST_BUCKET env var"; fi
   git rev-parse HEAD >/dev/null 2>&1 || die "deploy-staging needs a git checkout (the image is built with git archive)"
+  if [ -n "${PACKS_PREFIX:-}" ]; then
+    PACKS_GCS=$(packs_url) || exit 1
+  else
+    PACKS_GCS=$(live_env WATCH_PACKS_GCS)
+    if [ -z "$PACKS_GCS" ]; then die "PACKS_PREFIX unset and the production revision has no WATCH_PACKS_GCS"; fi
+  fi
+  PRIVATE_TITLES_GCS=""
+  if [ -n "${PRIVATE_PREFIX:-}" ]; then
+    PRIVATE_TITLES_GCS="$(bucket_url PRIVATE_PREFIX "$PRIVATE_PREFIX")/titles.json" || exit 1
+  fi
+  token=""
+  if [ "${RELEASE:-0}" != 1 ]; then
+    token=$("$JSON_PY" -c "$PY_TOKEN")
+  fi
+  envs=$(PROJECT=$PROJECT BUCKET=$BUCKET PACKS_GCS=$PACKS_GCS PRIVATE_TITLES_GCS=$PRIVATE_TITLES_GCS \
+         BENCH_TOKEN_VALUE=$token EXTRA_ENV="${STAGING_ENV:-}" service_env) || die "bad environment (see above)"
+  names=$(env_names "$envs")
   hr "traffic before"
   svc_q traffic
   hr "build $(git rev-parse --short=12 HEAD)"
@@ -492,50 +546,44 @@ mode_deploy_staging() {
   fi
   say "image: $image"
 
-  mkdir -p .cache
-  token=$("$JSON_PY" -c "$PY_TOKEN")
-  (umask 077 && printf '%s\n' "$token" > .cache/bench_token)
-  envs="WATCH_BENCH_TOKEN=$token"
-  envs="$envs,WATCH_ASK_PER_MINUTE=${WATCH_ASK_PER_MINUTE:-6},WATCH_ASK_PER_DAY_PER_IP=${WATCH_ASK_PER_DAY_PER_IP:-80}"
-  envs="$envs,WATCH_ASK_PER_DAY_TOTAL=${WATCH_ASK_PER_DAY_TOTAL:-1500}"
-  if [ -n "${PACKS_PREFIX:-}" ]; then
-    pu=$(packs_url) || exit 1
-    envs="$envs,WATCH_PACKS_GCS=$pu"
-  fi
-  if [ -n "${PRIVATE_PREFIX:-}" ]; then
-    pv=$(bucket_url PRIVATE_PREFIX "$PRIVATE_PREFIX") || exit 1
-    envs="$envs,WATCH_PRIVATE_TITLES=$pv/titles.json"
-  fi
-  if [ -n "${STAGING_ENV:-}" ]; then
-    envs="$envs,$STAGING_ENV"
-  fi
-  hr "deploy (no traffic, tag $TAG)"
-  say "packs: ${PACKS_PREFIX:-(unchanged)}; private titles: ${PRIVATE_PREFIX:-(unchanged)}; extra env: ${STAGING_ENV:-(none)}"
-  say "WATCH_BENCH_TOKEN: fresh (in .cache/bench_token)"
-  # the agent prompts ship in the image now: drop the prompt-secret variable on the new revision
+  hr "deploy (no traffic, tag $TAG$(if [ "${RELEASE:-0}" = 1 ]; then printf ', RELEASE: no bench token'; fi))"
+  say "packs: $PACKS_GCS; private titles: ${PRIVATE_TITLES_GCS:-(none)}; extra env: ${STAGING_ENV:-(none)}"
+  say "env (complete, replaces the previous revision's): $names"
   out=$(mktemp)
+  trap 'rm -f "$out"' EXIT
   if gcloud run deploy "$SERVICE" --project "$PROJECT" --region "$REGION" --image "$image" \
       --no-traffic --tag "$TAG" --session-affinity \
       --min-instances "${MIN_INSTANCES:-1}" --max-instances "${MAX_INSTANCES:-2}" \
-      --update-env-vars "$envs" --remove-env-vars WATCH_AGENT_PROMPTS_SECRET --quiet >"$out" 2>&1; then
+      --set-env-vars "$(printf '%s\n' "$envs" | paste -sd, -)" --quiet >"$out" 2>&1; then
     rc=0
   else
     rc=$?
   fi
-  sed "s/$token/***/g" "$out" | tail -n 15    # an error message could quote the flag value: mask the token
+  if [ -n "$token" ]; then
+    sed "s/$token/***/g" "$out" | tail -n 15  # an error message could quote the flag value: mask the token
+  else
+    tail -n 15 "$out"
+  fi
   rm -f "$out"
   if [ "$rc" != 0 ]; then die "gcloud run deploy failed"; fi
+  mkdir -p .cache
+  if [ -n "$token" ]; then                      # only now: a failed deploy leaves the previous token in place
+    (umask 077 && printf '%s\n' "$token" > .cache/bench_token)
+    say "WATCH_BENCH_TOKEN: fresh (in .cache/bench_token)"
+  else
+    rm -f .cache/bench_token
+    say "WATCH_BENCH_TOKEN: none (RELEASE=1); .cache/bench_token removed"
+  fi
   refresh_service
   url=$(svc_q tag-url "$TAG")
-  printf 'image=%s\nstaging_env=%s\ndeployed=%s\n' "$image" "${STAGING_ENV:-}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
-    > .cache/staging.txt
+  printf 'image=%s\nrelease=%s\npacks=%s\nprivate=%s\nstaging_env=%s\ndeployed=%s\n' "$image" "${RELEASE:-0}" \
+    "$PACKS_GCS" "${PRIVATE_TITLES_GCS:-}" "${STAGING_ENV:-}" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > .cache/staging.txt
   hr "traffic after (production unchanged)"
   svc_q traffic
   hr "tagged URL"
   say "$url"
-  if [ -n "$url" ] && have curl; then
-    say "health: $(curl -fsS -m 90 "$url/api/health" 2>&1 || echo 'FAILED')"
-  fi
+  if [ -z "$url" ]; then die "no URL for tag $TAG after the deploy"; fi
+  check_health "$url"
 }
 
 # Benchmark a URL (default: the $TAG revision) with bench/run_bench.py, grade with bench/judge.py, print the scorecard.
@@ -639,12 +687,34 @@ mode_bench() {
   show_head "$LOGS/bench-$run_id-judge.txt" 120
 }
 
-# Move 100 % of traffic to the $TAG revision.
+# Move 100 % of traffic to the $TAG revision, after checking it: Ready, image built from the checked-out commit,
+# healthy with every public film, and no bench token (deploy it with RELEASE=1 first; PROMOTE_WITH_BENCH_TOKEN=1
+# overrides). Prints the env names it carries.
 mode_promote() {
-  local url
+  local url rev image want names
   cloud_discover
   url=$(svc_q tag-url "$TAG")
-  if [ -z "$url" ]; then die "no revision is tagged $TAG"; fi
+  rev=$(svc_q tag-revision "$TAG")
+  if [ -z "$url" ] || [ -z "$rev" ]; then die "no revision is tagged $TAG"; fi
+  hr "checks of $rev"
+  if [ "$(revision_q "$rev" ready)" != True ]; then die "$rev is not Ready"; fi
+  say "ready: yes"
+  image=$(revision_q "$rev" image)
+  want=$(git rev-parse --short=12 HEAD 2>/dev/null) || die "promote needs a git checkout of the commit to release"
+  case "$image" in
+    *":$want") say "image: $image (= checked-out commit)" ;;
+    *) die "image $image is not the checked-out commit $want" ;;
+  esac
+  names=$(revision_q "$rev" env-names)
+  say "env names: $names"
+  case " $names " in
+    *" WATCH_BENCH_TOKEN "*)
+      if [ "${PROMOTE_WITH_BENCH_TOKEN:-0}" != 1 ]; then
+        die "$rev carries WATCH_BENCH_TOKEN: deploy-staging with RELEASE=1 for the revision to promote"
+      fi
+      say "WARN: promoting a revision that carries the bench token (PROMOTE_WITH_BENCH_TOKEN=1)" ;;
+  esac
+  check_health "$url"
   hr "traffic before"
   svc_q traffic
   gcloud run services update-traffic "$SERVICE" --project "$PROJECT" --region "$REGION" --to-tags "$TAG=100" \

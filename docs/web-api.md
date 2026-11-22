@@ -55,7 +55,11 @@ on `:root`, overridden under `@media (prefers-color-scheme: dark)` and `:root[da
 
 Access code for the private preview titles, as a JSON body `{"code": "…"}` (never in a URL, so it reaches no log).
 `204` with the cookie `watch_access` (HttpOnly, Secure, SameSite=Lax, Path=/, 30 days) when the code is valid, else
-`404`; at most 10 attempts per minute and IP, malformed ones included (`429`, `Retry-After`). A shared link carries the
+`404`. At most 30 FAILED attempts per minute and IP (wrong or malformed codes, and requests carrying an invalid
+`watch_access` cookie, each distinct value once): after that `429` with `Retry-After`, even for the right code, and no
+access cookie counts for that address until the minute is over. Successes are not counted, so judges behind one
+address do not lock each other out. Codes are printable ASCII without spaces, quotes, commas, semicolons or
+backslashes (anything else is a wrong code); they must be random and at least 20 characters long. A shared link carries the
 code in the URL fragment (`/#code=…`, which browsers never send): the page reads it, POSTs it, removes it from the
 address bar and reloads `/api/titles`. Without the cookie every endpoint answers `404 unknown title` for a private
 title, the question endpoint included; with it, frames and the video redirect of a private title are

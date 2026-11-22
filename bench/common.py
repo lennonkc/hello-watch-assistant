@@ -105,6 +105,9 @@ def validate(c: dict) -> list[str]:
                     errs.append(f"{field}: bad regex {m['regex']!r}: {e}")
             elif not (isinstance(m, str) and m) and not (isinstance(m, dict) and m.get("term")):
                 errs.append(f"{field}: bad marker {m!r}")
+            if isinstance(m, dict) and "link" in m and not (m["link"] is True or (isinstance(m["link"], str)
+                                                                        and m["link"])):
+                errs.append(f"{field}: link must be true or an identity link id")
             if isinstance(m, dict) and m.get("channels") is not None and not (
                     isinstance(m["channels"], list) and set(m["channels"]) <= set(CHANNELS)):
                 errs.append(f"{field}: channels must be a list of {', '.join(CHANNELS)}")

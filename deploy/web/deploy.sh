@@ -1,6 +1,9 @@
 #!/bin/bash
 # Build and deploy the public web demo to Cloud Run (moves 100 % of traffic to the new revision).
-#   PROJECT=<project> BUCKET=<bucket> [REGION=us-west1] deploy/web/deploy.sh
+#   PROJECT=<project> BUCKET=<bucket> [REGION=us-west1] [PACKS_PREFIX=…] [PRIVATE_PREFIX=…] [EXTRA_ENV=…] deploy/web/deploy.sh
+# The environment is computed in full by deploy/web/env.sh (the same as tools/ops/run.sh deploy-staging, without a
+# bench token): packs PACKS_PREFIX, else what the production revision serves now, else demo-packs (first deploy);
+# private titles PRIVATE_PREFIX/titles.json when given.
 # For a revision without traffic (staging, benchmarks) use `tools/ops/run.sh deploy-staging` instead.
 #
 # What it sets up (idempotent):
@@ -25,6 +28,22 @@ EXTRA_ENV=${EXTRA_ENV:-}                     # more env vars, comma-separated KE
 SA=$SA_NAME@$PROJECT.iam.gserviceaccount.com
 ROOT=$(git -C "$(dirname "$0")" rev-parse --show-toplevel)
 cd "$ROOT"
+. ./deploy/web/env.sh
+for v in "${PACKS_PREFIX:-}" "${PRIVATE_PREFIX:-}"; do
+  case "$v" in *..*|gs://*|*[!A-Za-z0-9._/-]*) echo "ERROR: bad prefix '$v'" >&2; exit 1 ;; esac
+done
+if [ -n "${PACKS_PREFIX:-}" ]; then
+  PACKS_GCS="gs://$BUCKET/${PACKS_PREFIX%/}"
+else
+  PACKS_GCS=$(live_env WATCH_PACKS_GCS)
+  PACKS_GCS=${PACKS_GCS:-gs://$BUCKET/demo-packs}
+fi
+PRIVATE_TITLES_GCS=""
+if [ -n "${PRIVATE_PREFIX:-}" ]; then
+  PRIVATE_TITLES_GCS="gs://$BUCKET/${PRIVATE_PREFIX%/}/titles.json"
+fi
+ENV_LINES=$(PACKS_GCS=$PACKS_GCS PRIVATE_TITLES_GCS=$PRIVATE_TITLES_GCS BENCH_TOKEN_VALUE= service_env)
+echo "env: $(env_names "$ENV_LINES") (packs $PACKS_GCS)" >&2
 
 # 1. service account and its permissions
 gcloud iam service-accounts describe "$SA" --project "$PROJECT" >/dev/null 2>&1 \
@@ -40,12 +59,7 @@ gcloud iam service-accounts add-iam-policy-binding "$SA" --project "$PROJECT" --
 IMAGE=$(PROJECT=$PROJECT BUCKET=$BUCKET REGION=$REGION /bin/bash deploy/web/build.sh)
 
 # 3. service
-ENV_VARS="CEDAR_GCP_PROJECT=$PROJECT,CEDAR_GEMINI_BACKEND=enterprise,CEDAR_INGEST_BUCKET=$BUCKET"
-ENV_VARS="$ENV_VARS,WATCH_PACKS_GCS=gs://$BUCKET/demo-packs,WATCH_ASK_PER_MINUTE=$WATCH_ASK_PER_MINUTE"
-ENV_VARS="$ENV_VARS,WATCH_ASK_PER_DAY_PER_IP=$WATCH_ASK_PER_DAY_PER_IP,WATCH_ASK_PER_DAY_TOTAL=$WATCH_ASK_PER_DAY_TOTAL"
-if [ -n "$EXTRA_ENV" ]; then
-  ENV_VARS="$ENV_VARS,$EXTRA_ENV"
-fi
+ENV_VARS=$(printf '%s\n' "$ENV_LINES" | paste -sd, -)
 gcloud run deploy "$SERVICE" --project "$PROJECT" --region "$REGION" --image "$IMAGE" --service-account "$SA" \
   --allow-unauthenticated --cpu 2 --memory 2Gi --concurrency 20 --timeout 300 --cpu-boost --session-affinity \
   --min-instances "$MIN_INSTANCES" --max-instances "$MAX_INSTANCES" --set-env-vars "$ENV_VARS"

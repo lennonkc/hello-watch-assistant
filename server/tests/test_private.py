@@ -40,7 +40,7 @@ class FakeBucket:
             with self.lock:
                 self.reads[prefix + r] += 1
 
-    def read(self, name):
+    def read(self, name, timeout=None):
         time.sleep(self.delay)
         with self.lock:
             self.reads[name] += 1
@@ -128,6 +128,69 @@ def test_missing_or_broken_private_file_is_a_warning(world, content, caplog):
     assert "private titles: not loaded" in caplog.text
 
 
+def _private_doc(world, **entry):
+    doc = json.loads((world.root / "priv" / "titles.json").read_text())
+    doc["titles"][0].update(entry)
+    return doc
+
+
+@pytest.mark.parametrize("damage", ["access not a list", "access entries", "truncated db", "not sqlite",
+                                    "missing tables", "empty asset", "public sha", "same sha twice", "titles entry"])
+def test_bad_private_data_never_stops_the_public_films(world, damage, caplog):
+    """Every private-title failure is a warning and that title is skipped; the public film always loads and serves."""
+    from server import main
+    doc = json.loads((world.root / "priv" / "titles.json").read_text())
+    db = world.root / "packs" / PSHA / "device-auto" / "pack.db"
+    if damage == "access not a list":
+        doc["access_sha256"] = 5
+    elif damage == "access entries":
+        doc["access_sha256"] = [None, 7, {"x": 1}, hashlib.sha256(CODE.encode()).hexdigest()]
+    elif damage == "truncated db":
+        db.write_bytes(db.read_bytes()[:3000])
+    elif damage == "not sqlite":
+        db.write_bytes(b"this is not a database" * 100)
+    elif damage == "missing tables":
+        import sqlite3
+        con = sqlite3.connect(db)
+        for t in ("cues", "characters", "asset", "pack_meta"):
+            con.execute(f"DROP TABLE IF EXISTS {t}")
+        con.commit()
+        con.close()
+    elif damage == "empty asset":
+        import sqlite3
+        con = sqlite3.connect(db)
+        con.execute("DELETE FROM asset")
+        con.commit()
+        con.close()
+    elif damage == "public sha":
+        doc["titles"][0]["sha"] = SHA                  # would put the on-demand cache on the public thumbs dir
+    elif damage == "same sha twice":
+        doc["titles"].append({**doc["titles"][0], "id": "pv2"})
+    elif damage == "titles entry":
+        doc["titles"].insert(0, "not an object")
+    (world.root / "priv" / "titles.json").write_text(json.dumps(doc))
+    store = packs.Store().load()
+    assert "mini" in store.titles
+    ok = damage in ("access not a list", "access entries", "same sha twice", "titles entry")
+    assert ("pv1" in store.titles) == ok, damage
+    assert "pv2" not in store.titles
+    if damage == "access entries":
+        assert store.unlocked(CODE)
+    if damage == "access not a list":                          # loaded, but no code opens it (the bench token does)
+        assert not store.access and "access_sha256 is not a list" in caplog.text
+    if not ok:
+        assert "private" in caplog.text and "skipped" in caplog.text or "not loaded" in caplog.text
+    pub_thumbs = store.get("mini").root / "thumbs"
+    assert (pub_thumbs / "t00003.jpg").exists()                # public frames untouched
+    m = TestClient(main.app)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(packs, "STORE", store)
+        mp.setattr(main, "STORE", store)
+        r = m.get("/api/titles", headers=COOKIE)
+        assert r.status_code == 200 and "mini" in [t["id"] for t in r.json()]
+        assert m.get("/api/titles/mini/gate?p=20").status_code == 200
+
+
 def test_thumbnails_on_demand_negative_cache_eviction_and_prefetch(tmp_path):
     src = tmp_path / "gcs"
     (src / "p" / "thumbs").mkdir(parents=True)
@@ -167,15 +230,35 @@ def test_concurrent_requests_share_one_download(tmp_path):
 
 def test_fetch_errors_do_not_fail_and_retry_later(tmp_path):
     class Broken:
-        calls = 0
+        calls, timeouts = 0, []
 
-        def read(self, name):
+        def read(self, name, timeout=None):
             Broken.calls += 1
+            Broken.timeouts.append(timeout)
             raise OSError("network")
 
     rt = packs.RemoteThumbs(Broken(), "x", tmp_path / "l", error_ttl_s=0.0)
-    assert not rt.ensure(3).exists()
-    assert not rt.ensure(3).exists() and Broken.calls == 2          # error TTL 0: asked again
+    assert not rt.ensure(3).exists() and Broken.calls == 2          # one retry
+    assert set(Broken.timeouts) == {config.THUMB_FETCH_TIMEOUT_S} == {4.0}
+    assert not rt.ensure(3).exists() and Broken.calls == 4          # error TTL 0: asked again
+    rt2 = packs.RemoteThumbs(Broken(), "x", tmp_path / "l2", error_ttl_s=60.0)
+    rt2.ensure(5)
+    n = Broken.calls
+    assert not rt2.ensure(5).exists() and Broken.calls == n         # within the error TTL: not asked again
+
+
+def test_one_slow_attempt_is_retried(tmp_path):
+    class Flaky:
+        calls = 0
+
+        def read(self, name, timeout=None):
+            Flaky.calls += 1
+            if Flaky.calls == 1:
+                raise TimeoutError("read timed out")
+            return b"jpeg"
+
+    rt = packs.RemoteThumbs(Flaky(), "x", tmp_path / "l")
+    assert rt.ensure(7).read_bytes() == b"jpeg" and Flaky.calls == 2
 
 
 @pytest.fixture
@@ -184,7 +267,7 @@ def client(world, monkeypatch):
     store = packs.Store().load()
     monkeypatch.setattr(packs, "STORE", store)
     monkeypatch.setattr(main, "STORE", store)
-    monkeypatch.setattr(main, "UNLOCKS", main.Attempts(config.UNLOCK_PER_MINUTE))
+    monkeypatch.setattr(main, "UNLOCKS", main.Attempts(config.UNLOCK_FAILURES_PER_MINUTE))
     monkeypatch.setattr(main, "_signed_url", lambda obj, _e: f"https://signed.example/{obj}")
     monkeypatch.setattr(config, "ASSET_BUCKET", "bkt")
     monkeypatch.setattr(config, "VIDEO_DIR", None)
@@ -253,9 +336,24 @@ def test_unlock_sets_the_cookie_and_limits_attempts(client):
     assert client.post("/api/unlock", json={"code": "nope"}).status_code == 404
     assert client.post("/api/unlock", content=b"not json").status_code == 404
     assert client.post("/api/unlock", json={"code": 42}).status_code == 404
-    codes = [client.post("/api/unlock", json={"code": f"guess{i}"}).status_code for i in range(10)]
-    assert codes[:6] == [404] * 6 and codes[6:] == [429] * 4        # 10 attempts per minute, 4 above
+    assert client.post("/api/unlock", json={"code": "ünlöck-ça"}).status_code == 404     # not printable ASCII: no 500
+    assert [client.post("/api/unlock", json={"code": CODE}).status_code for _ in range(40)] == [204] * 40  # not counted
+    codes = [client.post("/api/unlock", json={"code": f"guess{i}"}).status_code for i in range(30)]
+    assert codes[:26] == [404] * 26 and codes[26:] == [429] * 4     # 30 failures a minute (4 above were counted)
+    assert client.post("/api/unlock", json={"code": CODE}).status_code == 429   # blocked, even for the right code
+
+
+def test_invalid_cookies_count_as_failures_so_no_endpoint_is_an_oracle(client):
+    """Guessing through the cookie: each distinct wrong value is a failure; past the limit no cookie counts."""
+    stale = {"Cookie": "watch_access=an-old-code"}
+    for _ in range(50):                                                 # one stale cookie, many requests: one failure
+        assert "pv1" not in [t["id"] for t in client.get("/api/titles", headers=stale).json()]
+    assert "pv1" in [t["id"] for t in client.get("/api/titles", headers=COOKIE).json()]
+    for i in range(29):
+        client.get("/api/titles/pv1/gate?p=10", headers={"Cookie": f"watch_access=guess{i}"})
+    assert client.get("/api/titles/pv1/gate?p=10", headers=COOKIE).status_code == 404    # over the limit: no oracle
     assert client.post("/api/unlock", json={"code": CODE}).status_code == 429
+    assert client.get("/api/titles/mini/gate?p=10").status_code == 200                  # public films unaffected
 
 
 def test_check_pack_reports_what_the_service_would_miss(tmp_path):

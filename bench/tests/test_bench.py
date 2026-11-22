@@ -563,3 +563,16 @@ def test_fallbacks_are_their_own_line_and_listed(tmp_path):
     J.report({"A": rows}, tmp_path)
     summary = (tmp_path / "summary.md").read_text()
     assert "`r1` (fallback: spoiler), `r3`" in summary and "fallback answers %" in summary and "(n 3)" in summary
+
+
+def test_lint_public_names_and_verified_link_markers(packs, capsys):
+    ok = case(id="new:l1", set="new", P=20.0, must_not_include=[{"term": "Bob", "case_sensitive": True, "link": True}])
+    bad_link = case(id="new:l2", set="new", P=20.0, must_not_include=[{"term": "Alice", "link": True}])
+    public = case(id="new:l3", set="new", P=20.0, must_not_include=["Alice"])
+    late = case(id="new:l4", set="new", P=80.0, must_not_include=[{"term": "Bob", "link": "k01"}])   # link revealed
+    mini = {"mini": {"title": "Mini", "duration_s": 100.0, "shas": [SHA]}}
+    assert J.lint([ok], with_packs=True, titles=mini) == 0, capsys.readouterr().out
+    capsys.readouterr()
+    assert J.lint([bad_link, public, late], with_packs=True, titles=mini) == 1
+    out = capsys.readouterr().out
+    assert "new:l2: link marker" in out and "new:l3: must_not_include has a public name" in out and "new:l4: link" in out
