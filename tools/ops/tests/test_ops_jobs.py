@@ -33,6 +33,13 @@ if args[:2] == ["storage", "ls"]:
     for f in files:
         print(f"{f.stat().st_size:>10}  2026-11-20T10:00:00Z  gs://{f.relative_to(root)}")
     sys.exit(0)
+if args[:3] == ["storage", "objects", "describe"]:
+    import base64, hashlib, json
+    f = local(args[3])
+    if not f.is_file():
+        print("ERROR: not found: 404", file=sys.stderr); sys.exit(1)
+    print(json.dumps({"md5_hash": base64.b64encode(hashlib.md5(f.read_bytes()).digest()).decode()}))
+    sys.exit(0)
 if args[:2] == ["storage", "cp"] and "-I" in args:
     dst = local(args[-1].rstrip("/"))
     dst.mkdir(parents=True, exist_ok=True)
@@ -93,12 +100,47 @@ def test_upload_is_resumable_and_puts_the_pack_last(gcs, tmp_path):
 
 
 def test_prefix_params_refuse_the_live_prefix(monkeypatch):
-    for bad in ("demo-packs", "demo-packs/x", "gs://b/x", "../x", ""):
+    monkeypatch.delenv("LIVE_PACKS_GCS", raising=False)
+    for bad in ("demo-packs", "demo-packs/x", "./demo-packs", "//demo-packs/", "gs://b/x", "../x", "a b", "a,b", ""):
         monkeypatch.setenv("PACKS_PREFIX", bad)
         with pytest.raises(J.OpsError):
             J.prefix_param("PACKS_PREFIX")
     monkeypatch.setenv("PACKS_PREFIX", "/demo-packs-next/")
     assert J.prefix_param("PACKS_PREFIX") == "demo-packs-next"
+    # after a promote production serves demo-packs-next: then that is the prefix no job may write
+    monkeypatch.setenv("BUCKET", "bkt")
+    monkeypatch.setenv("LIVE_PACKS_GCS", "gs://bkt/demo-packs-next")
+    for bad in ("demo-packs-next", "./demo-packs-next/abc", "demo-packs"):
+        monkeypatch.setenv("PACKS_PREFIX", bad)
+        with pytest.raises(J.OpsError, match="production serves"):
+            J.prefix_param("PACKS_PREFIX")
+
+
+def test_a_reexported_pack_of_the_same_size_is_uploaded_again(gcs, tmp_path):
+    d = tmp_path / "pack"
+    (d / "thumbs").mkdir(parents=True)
+    (d / "pack.db").write_bytes(b"version-1")
+    (d / "thumbs" / "t00000.jpg").write_bytes(b"j")
+    J.upload_tree(d, "gs://bkt/next/abc/master", J.pack_files(d))
+    (d / "pack.db").write_bytes(b"version-2")                          # same size, other content
+    u = J.upload_tree(d, "gs://bkt/next/abc/master", J.pack_files(d))
+    assert u["uploaded"] == 1 and not u["mismatch"] and (gcs / "bkt/next/abc/master/pack.db").read_bytes() == b"version-2"
+    assert J.upload_tree(d, "gs://bkt/next/abc/master", J.pack_files(d))["uploaded"] == 0
+
+
+def test_an_unreadable_titles_file_is_never_overwritten(gcs, tmp_path, monkeypatch):
+    monkeypatch.setattr(J, "WORK", tmp_path / "work")
+    entry = {"id": "pv-1", "sha": "cd" * 32, "title": "T"}
+    (gcs / "bkt" / "priv").mkdir()
+    f = gcs / "bkt" / "priv" / "titles.json"
+    doc = J.write_titles_file("bkt", "priv", [entry], ["00" * 32])         # no file yet: written
+    assert json.loads(f.read_text())["titles"] == [entry] and doc["access_sha256"] == ["00" * 32]
+    J.write_titles_file("bkt", "priv", [{**entry, "sha": "ef" * 32}], ["00" * 32])
+    assert len(json.loads(f.read_text())["titles"]) == 2                 # merged by sha
+    f.write_text("{broken")
+    with pytest.raises(J.OpsError, match="unreadable"):
+        J.write_titles_file("bkt", "priv", [entry], ["00" * 32])
+    assert f.read_text() == "{broken"
 
 
 def test_health_finds_placeholders_and_says_whether_braces_are_visible(tmp_path):

@@ -74,16 +74,36 @@ def hms(t) -> str:
     return f"{t // 3600}:{t // 60 % 60:02d}:{t % 60:02d}"
 
 
+def norm_prefix(v: str) -> str:
+    """`./demo-packs/`, `//demo-packs` → `demo-packs` (one spelling per prefix, so the guard cannot be sidestepped)."""
+    parts = [x for x in v.strip().split("/") if x not in ("", ".")]
+    return "/".join(parts)
+
+
+def live_prefixes() -> set[str]:
+    """What production serves: the literal default, plus the prefix of LIVE_PACKS_GCS (exported by run.sh from the
+    revision that has the traffic: after a promote that is demo-packs-next, not demo-packs)."""
+    out = {LIVE_PREFIX}
+    live = env("LIVE_PACKS_GCS")
+    if live.startswith("gs://"):
+        name, _, prefix = live[5:].partition("/")
+        if prefix and (not env("BUCKET") or name == env("BUCKET")):
+            out.add(norm_prefix(prefix))
+    return out
+
+
 def prefix_param(name: str, required: bool = True) -> str:
-    v = env(name).strip("/")
+    raw = env(name)
+    v = norm_prefix(raw)
     if not v:
         if required:
             raise OpsError(f"set {name} in tools/ops/params.env")
         return ""
-    if v.startswith("gs:") or ".." in v or not re.fullmatch(r"[A-Za-z0-9._/-]+", v):
-        raise OpsError(f"{name} must be a path inside the bucket, e.g. demo-packs-next (got {v!r})")
-    if v == LIVE_PREFIX or v.startswith(LIVE_PREFIX + "/"):
-        raise OpsError(f"{name} must not be the live prefix {LIVE_PREFIX!r}")
+    if raw.strip().startswith("gs:") or ".." in v.split("/") or not re.fullmatch(r"[A-Za-z0-9._/-]+", v):
+        raise OpsError(f"{name} must be a path inside the bucket, e.g. demo-packs-next (got {raw!r})")
+    for live in live_prefixes():
+        if v == live or v.startswith(live + "/"):
+            raise OpsError(f"{name} must not be the prefix production serves ({live!r})")
     return v
 
 
@@ -711,7 +731,8 @@ def upload_tree(local: pathlib.Path, dest: str, rels: list[str], last: tuple[str
     the rest too. Returns {"uploaded", "bytes", "skipped", "dest_files", "dest_bytes", "mismatch"}."""
     have = {url[len(dest) + 1:]: size for size, _d, url in gls(dest + "/")}
     size = {r: (local / r).stat().st_size for r in rels}
-    todo = [r for r in rels if have.get(r) != size[r]]
+    # thumbnails by size; the pack files by content (a re-exported pack can have the same size)
+    todo = [r for r in rels if have.get(r) != size[r] or (r in last and not same_content(local / r, f"{dest}/{r}"))]
     groups: dict[str, list[str]] = collections.defaultdict(list)
     tail = []
     for r in todo:
@@ -725,13 +746,61 @@ def upload_tree(local: pathlib.Path, dest: str, rels: list[str], last: tuple[str
         if r.returncode:
             raise OpsError(f"upload to {target} failed: {_err(r)}")
     after = {url[len(dest) + 1:]: sz for sz, _d, url in gls(dest + "/")}
-    mismatch = [r for r in rels if after.get(r) != size[r]]
+    mismatch = [r for r in rels if after.get(r) != size[r]
+                or (r in last and r in todo and not same_content(local / r, f"{dest}/{r}"))]
     return {"uploaded": len(todo), "bytes": sum(size[r] for r in todo), "skipped": len(rels) - len(todo),
             "dest_files": len(after), "dest_bytes": sum(after.values()), "mismatch": mismatch}
 
 
+def remote_hashes(url: str) -> dict:
+    """{"md5": base64, "crc32c": base64} of one object (empty when it does not exist)."""
+    r = gcloud("storage", "objects", "describe", url, "--format=json")
+    if r.returncode:
+        if "not found" in (r.stderr + r.stdout).lower() or "matched no objects" in (r.stderr + r.stdout):
+            return {}
+        raise OpsError(f"gcloud storage objects describe: {_err(r)}")
+    try:
+        d = json.loads(r.stdout)
+    except ValueError:
+        raise OpsError("gcloud storage objects describe: not JSON") from None
+    d = d[0] if isinstance(d, list) and d else d
+    return {k: d.get(f"{k}_hash") for k in ("md5", "crc32c") if isinstance(d, dict) and d.get(f"{k}_hash")}
+
+
+def local_hashes(path: pathlib.Path) -> dict:
+    import base64
+    md5 = hashlib.md5()
+    try:
+        import google_crc32c
+        crc = google_crc32c.Checksum()
+    except ImportError:
+        crc = None
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            md5.update(chunk)
+            if crc is not None:
+                crc.update(chunk)
+    out = {"md5": base64.b64encode(md5.digest()).decode()}
+    if crc is not None:
+        out["crc32c"] = base64.b64encode(crc.digest()).decode()
+    return out
+
+
+def same_content(path: pathlib.Path, url: str) -> bool:
+    """The object holds exactly this file: md5 when the bucket has one (not for composite uploads), else crc32c."""
+    rh = remote_hashes(url)
+    if not rh:
+        return False
+    lh = local_hashes(path)
+    for k in ("md5", "crc32c"):
+        if rh.get(k) and lh.get(k):
+            return rh[k] == lh[k]
+    raise OpsError(f"cannot compare {path.name}: no common hash with the bucket")
+
+
 def upload_line(u: dict) -> str:
-    ok = "matches local" if not u["mismatch"] else f"MISMATCH {len(u['mismatch'])}: {', '.join(u['mismatch'][:3])}"
+    ok = "matches local (pack files by content hash, the rest by size)" if not u["mismatch"] else \
+        f"MISMATCH {len(u['mismatch'])}: {', '.join(u['mismatch'][:3])}"
     return (f"uploaded {u['uploaded']} files ({human(u['bytes'])}), {u['skipped']} already there · destination "
             f"{u['dest_files']} objects, {human(u['dest_bytes'])} · {ok}")
 
@@ -903,8 +972,11 @@ def preview_cmd(src: pathlib.Path, out: pathlib.Path, fps: float) -> list[str]:
             "-movflags", "+faststart", "-f", "mp4", "-progress", "pipe:1", "-nostats", str(out)]
 
 
-def make_preview(sha: str, src: pathlib.Path, duration: float) -> pathlib.Path:
+def make_preview(sha: str, src: pathlib.Path, duration: float, rebuild: bool = False) -> pathlib.Path:
     out = _work() / f"{sha}-640.mp4"
+    if rebuild:                                           # PREVIEW_REBUILD=1: never reuse an earlier local encode
+        for old in (out, out.with_name(out.name + ".part")):
+            old.unlink(missing_ok=True)
     if out.exists():
         try:
             d = float(ffprobe_json(out)["format"]["duration"])
@@ -925,6 +997,17 @@ def make_preview(sha: str, src: pathlib.Path, duration: float) -> pathlib.Path:
     part = out.with_name(out.name + ".part")
     t0 = time.monotonic()
     proc = subprocess.Popen(preview_cmd(src, part, fps), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        _follow_encode(proc, duration, t0)
+    except BaseException:                                 # failed or interrupted: no half-written file stays behind
+        proc.kill()
+        part.unlink(missing_ok=True)
+        raise
+    os.replace(part, out)
+    return _report_preview(out, t0)
+
+
+def _follow_encode(proc: subprocess.Popen, duration: float, t0: float) -> None:
     err_tail = collections.deque(maxlen=8)
     import threading
     threading.Thread(target=lambda: [err_tail.append(x.rstrip()) for x in proc.stderr], daemon=True).start()
@@ -942,7 +1025,9 @@ def make_preview(sha: str, src: pathlib.Path, duration: float) -> pathlib.Path:
                 next_pct += 25
     if proc.wait() != 0:
         raise OpsError("ffmpeg failed: " + " | ".join(list(err_tail)[-3:]))
-    os.replace(part, out)
+
+
+def _report_preview(out: pathlib.Path, t0: float) -> pathlib.Path:
     p = ffprobe_json(out)
     v = next(x for x in p["streams"] if x.get("codec_type") == "video")
     a = next((x for x in p["streams"] if x.get("codec_type") == "audio"), {})
@@ -956,6 +1041,35 @@ def make_preview(sha: str, src: pathlib.Path, duration: float) -> pathlib.Path:
     if tags:
         say(f"  WARNING: container tags left in the preview: {', '.join(sorted(tags))}")
     return out
+
+
+def write_titles_file(b: str, private_prefix: str, entries: list[dict], codes: list[str]) -> dict:
+    """Merge `entries` (by sha) into gs://<b>/<private_prefix>/titles.json and write it with `codes`. An existing file
+    must download and parse: anything else aborts before writing (an unreadable file is never replaced blindly)."""
+    doc_url = f"gs://{b}/{private_prefix}/titles.json"
+    old = {}
+    tmp = _work() / "titles.json"
+    if gls(doc_url):
+        gcp(doc_url, str(tmp))
+        try:
+            prev = json.loads(tmp.read_text(encoding="utf-8"))
+            if not isinstance(prev, dict) or not isinstance(prev.get("titles", []), list):
+                raise ValueError("not a {access_sha256, titles} object")
+            old = {e.get("sha"): e for e in prev.get("titles", []) if isinstance(e, dict)}
+        except ValueError as e:
+            tmp.unlink(missing_ok=True)
+            raise OpsError(f"{private_prefix}/titles.json exists but is unreadable ({e.__class__.__name__}); "
+                           "not overwriting it") from None
+    merged = {**old, **{e["sha"]: e for e in entries}}
+    doc = {"access_sha256": codes, "titles": list(merged.values())}
+    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
+    try:
+        gcp(str(tmp), doc_url)
+    finally:
+        tmp.unlink(missing_ok=True)
+    say(f"titles file: {private_prefix}/titles.json · {len(merged)} title(s) ({len(old)} before) · "
+        f"{len(codes)} access hash(es)")
+    return doc
 
 
 def publish_private_title() -> int:
@@ -1007,27 +1121,13 @@ def publish_private_title() -> int:
             say(f"  film file: {how}")
             if film is None:
                 raise OpsError("film file not found locally; not downloading the original")
-            out = make_preview(sha, film, float(a["duration_s"]))
+            out = make_preview(sha, film, float(a["duration_s"]), rebuild=env("PREVIEW_REBUILD") == "1")
             u2 = upload_tree(out.parent, f"gs://{b}/previews", [out.name], last=())
             say(f"  → previews/{sha[:12]}-640.mp4: {upload_line(u2)}")
         entries.append({"id": f"pv-{sha[:12]}", "sha": sha, "title": cat["title"], "synopsis": cat["synopsis"],
                         "license": "private-preview", "attribution": ATTRIBUTION, "dist": dist,
                         "video_object": f"previews/{sha}-640.mp4", "playback": "preview"})
-    doc_url = f"gs://{b}/{private_prefix}/titles.json"
-    old = {}
-    tmp = _work() / "titles.json"
-    try:
-        gcp(doc_url, str(tmp))
-        old = {e.get("sha"): e for e in json.loads(tmp.read_text(encoding="utf-8")).get("titles", [])}
-    except (OpsError, ValueError, OSError):
-        pass
-    merged = {**old, **{e["sha"]: e for e in entries}}
-    doc = {"access_sha256": codes, "titles": list(merged.values())}
-    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
-    gcp(str(tmp), doc_url)
-    tmp.unlink()
-    say(f"titles file: {private_prefix}/titles.json · {len(merged)} title(s) ({len(old)} before) · "
-        f"{len(codes)} access hash(es)")
+    write_titles_file(b, private_prefix, entries, codes)
     say(f"service account can read the bucket: {sa_can_read(b)}")
     return 0
 

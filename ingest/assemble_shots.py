@@ -52,6 +52,10 @@ def object_label(obj: dict | None, local: dict | None, t: float, lang: str) -> s
     return name
 
 
+DETERMINER_BEFORE = re.compile(r"(?i)\b(the|an?|his|her|their|its|this|that|my|your)\s+$")
+LEADING_ARTICLE = re.compile(r"(?i)^(the|an?)\s+")
+
+
 def fill_tokens(text: str | None, label_of) -> str | None:
     """{cNN} / {oNN} → label_of(ref); capitalize at sentence start."""
     if not text:
@@ -60,12 +64,14 @@ def fill_tokens(text: str | None, label_of) -> str | None:
     def rep(m):
         cid = m.group(1) or m.group(2)
         lab = label_of(cid)
-        at_start = m.start() == 0 or bool(re.search(r"[.!?]\s*$", text[:m.start()]))
+        before = text[:m.start()]
+        if lab and DETERMINER_BEFORE.search(before):     # "the {o04}" + "the old phone": one determiner, only here
+            lab = LEADING_ARTICLE.sub("", lab)
+        at_start = m.start() == 0 or bool(re.search(r"[.!?]\s*$", before))
         return lab[:1].upper() + lab[1:] if at_start and lab else lab
     out = TOKEN.sub(rep, text).strip()
     zh = has_cjk(text)
     out = OTHER.sub("某人" if zh else "someone", out)            # the model sometimes writes {other} for people off the roster
-    out = re.sub(r"\b(the|an?|his|her|their|its|this|that|my|your)\s+the\s+", r"\1 ", out, flags=re.IGNORECASE)  # no doubled determiner
     out = re.sub(r"\s{2,}", " ", out)
     if out and out[0].islower():
         out = out[0].upper() + out[1:]

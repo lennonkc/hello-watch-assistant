@@ -27,6 +27,13 @@ def test_fill_tokens_renders_objects_and_other():
     assert assemble_shots.fill_tokens("{o04} rings.", label_of("en", 5.0)) == "The old phone rings."   # not revealed yet: this shot's name
     assert assemble_shots.fill_tokens("{c01} 拿起{o04}。", label_of("zh", 12.0)) == "Proog 拿起烛台电话。"
     assert assemble_shots.object_label(None, None, 0.0, "en") == "something"
+    # the doubled-determiner fix applies only where a token was replaced, never to the rest of the caption
+    plain = "She hands her the phone and says that the bridge is out."
+    assert assemble_shots.fill_tokens(plain, label_of("en", 12.0)) == plain
+    assert assemble_shots.fill_tokens("{c01} hands her the {o04} and says that the bridge is out.",
+                                      label_of("en", 5.0)) == "Proog hands her the old phone and says that the bridge is out."
+    assert assemble_shots.fill_tokens("He lifts his {o04}; the the end.", label_of("en", 5.0)) == \
+        "He lifts his old phone; the the end."
 
 
 def test_merge_short_into_previous_and_leading_into_next():
