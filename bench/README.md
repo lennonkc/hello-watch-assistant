@@ -113,9 +113,11 @@ and reports show their ids and numbers only (`--show-private` for everything).
 - `c5:sintel-g08`: the "innocent blood" line ends earlier on the generated English track than on the official one,
   so the words can be eligible at `P` = 116.5 although the official cue is not; since 2026-11-22 they are suspects
   (`flag_if_any`), not leaks. The positive check still assumes the service quotes the official track.
-- Term matching is folding plus whole words for Latin terms (a CJK character never counts as a word character, so
-  `Scales` right after Chinese text still matches) and substrings for CJK terms: a one- or two-character CJK term can
-  match inside an unrelated word. Prefer phrases or regex markers for those.
+- Term matching is folding plus whole words for Latin terms on the pack's word class (`ingest.textnorm.LATIN_WORD`:
+  CJK and other scripts are boundaries, so `Scales` right after Chinese text still matches; `\b` / `\B` in regex
+  markers use the same class, as in the service) and substrings for CJK terms: a one- or two-character CJK term can
+  match inside an unrelated word. Prefer phrases or regex markers for those. The one remaining difference from the
+  service: the bench folds `_` to a space, so it is the stricter of the two there.
 
 ## Grading (`judge.py`)
 

@@ -169,9 +169,48 @@ def find_term(term: str, text: str, case_sensitive: bool = False, whole_word: bo
     return find_span(term, text, case_sensitive, whole_word, prefix) is not None
 
 
+_L = f"[{LATIN_WORD}]"
+_REGEX_B = {"b": f"(?:(?<={_L})(?!{_L})|(?<!{_L})(?={_L}))", "B": f"(?:(?<={_L})(?={_L})|(?<!{_L})(?!{_L}))"}
+
+
+def latin_boundaries(pattern: str) -> str:
+    """`\\b` / `\\B` of a regex marker on the pack's Latin word class, as the service does (ingest.textnorm): Python's
+    own `\\b` counts CJK as word characters, so `\\bolder\\b` would miss "他变older了". Escapes and character classes
+    (where `\\b` is a backspace) are left alone."""
+    out, i, n, in_class = [], 0, len(pattern), False
+    while i < n:
+        ch = pattern[i]
+        if ch == "\\" and i + 1 < n:
+            nxt = pattern[i + 1]
+            out.append(_REGEX_B[nxt] if nxt in "bB" and not in_class else ch + nxt)
+            i += 2
+            continue
+        if ch == "[" and not in_class:
+            in_class = True
+            out.append(ch)
+            i += 1
+            if i < n and pattern[i] == "^":
+                out.append("^")
+                i += 1
+            if i < n and pattern[i] == "]":                 # a "]" first in a class is a literal
+                out.append("]")
+                i += 1
+            continue
+        if ch == "]" and in_class:
+            in_class = False
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+@functools.lru_cache(maxsize=2048)
+def _regex(pattern: str, flags: int) -> re.Pattern:
+    return re.compile(latin_boundaries(pattern), flags)
+
+
 def _regex_span(pattern: str, text: str, flags: int) -> Span | None:
     x = N(text, True)
-    m = re.search(pattern, x, flags)
+    m = _regex(pattern, flags).search(x)
     return (x, m.start(), m.end()) if m else None
 
 
