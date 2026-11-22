@@ -8,6 +8,8 @@
 | `WATCH_VIDEO_DIR` | Local directory with `<asset_sha>.mp4` or `<asset_sha>/proxy_640.mp4` (or the file name of a title's `video_object`), streamed directly |
 | `WATCH_PRIVATE_TITLES` | `gs://` object or local path of the private preview titles file (`server/packs.py`); unset = none |
 | `WATCH_THUMB_CACHE_MAX` | Thumbnails kept on local disk per private preview title (fetched on demand; default 4000) |
+| `WATCH_THUMB_FETCH_TIMEOUT_S` | Timeout of one on-demand thumbnail download (default 4 s; one retry, then the frame is skipped for 30 s) |
+| `WATCH_UNLOCK_FAILURES_PER_MINUTE` | Failed access-code attempts per IP and minute before `/api/unlock` answers 429 and no access cookie counts (default 30) |
 | `CEDAR_INGEST_BUCKET` | Bucket holding `assets/<sha>.mp4`: signed playback URLs and the near-window video for Gemini |
 | `CEDAR_GCP_PROJECT` | Project for Gemini on Agent Platform (location is always `global`) |
 | `WATCH_AGENT_PROMPTS_SECRET` / `WATCH_AGENT_PROMPTS_DIR` | Agent prompts (see `server/prompts.py`) |
@@ -42,9 +44,12 @@ VIDEO_DIR = env_path("WATCH_VIDEO_DIR")
 ASSET_BUCKET = os.environ.get("CEDAR_INGEST_BUCKET", "").removeprefix("gs://").rstrip("/")
 PRIVATE_TITLES = os.environ.get("WATCH_PRIVATE_TITLES", "").strip()
 THUMB_CACHE_MAX = int(os.environ.get("WATCH_THUMB_CACHE_MAX", "4000"))
+THUMB_FETCH_TIMEOUT_S = float(os.environ.get("WATCH_THUMB_FETCH_TIMEOUT_S", "4"))   # per attempt; one retry
 ACCESS_COOKIE = "watch_access"
 ACCESS_COOKIE_DAYS = 30
-UNLOCK_PER_MINUTE = 10                                # access-code attempts per IP
+# FAILED access-code attempts per IP and minute (wrong codes, malformed bodies, distinct invalid access cookies);
+# successes are not counted, so judges sharing one address are not locked out by each other
+UNLOCK_FAILURES_PER_MINUTE = int(os.environ.get("WATCH_UNLOCK_FAILURES_PER_MINUTE", "30"))
 
 # Abuse / cost protection for a public URL
 ASK_PER_MINUTE = int(os.environ.get("WATCH_ASK_PER_MINUTE", "6"))

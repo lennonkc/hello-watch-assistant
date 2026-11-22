@@ -59,11 +59,14 @@ class GcsBucket:
         if bad:
             raise RuntimeError(f"download failed: {bad[0].__class__.__name__}")
 
-    def read(self, name: str) -> bytes | None:
-        """The object's bytes, None when it does not exist (other errors raise)."""
+    def read(self, name: str, timeout: float | None = None) -> bytes | None:
+        """The object's bytes, None when it does not exist (other errors raise). With `timeout`: that many seconds per
+        attempt and no library retries (the caller decides)."""
         from google.api_core import exceptions
         try:
-            return self.bucket.blob(name).download_as_bytes()
+            if timeout is None:
+                return self.bucket.blob(name).download_as_bytes()
+            return self.bucket.blob(name).download_as_bytes(timeout=timeout, retry=None)
         except exceptions.NotFound:
             return None
 
@@ -106,13 +109,16 @@ class RemoteThumbs:
     """`tNNNNN.jpg` fetched from `<bucket>/<prefix>` the first time it is asked for, then served from `local_dir`.
     Thread-safe: concurrent requests for one frame share one download; a frame the bucket does not have is not asked
     for again for `miss_ttl_s` (a failed download: `error_ttl_s`). At most `max_files` frames are kept, least recently
-    used deleted first."""
+    used deleted first. A download gets `timeout_s` per attempt and one retry, then the frame counts as failed (asked
+    again after `error_ttl_s`), so a slow bucket holds a request for at most about 2 × `timeout_s`."""
 
     def __init__(self, bucket, prefix: str, local_dir: pathlib.Path, max_files: int | None = None,
-                 miss_ttl_s: float = 600.0, error_ttl_s: float = 30.0, wait_s: float = 10.0) -> None:
+                 miss_ttl_s: float = 600.0, error_ttl_s: float = 30.0, wait_s: float = 10.0,
+                 timeout_s: float | None = None) -> None:
         self.bucket, self.prefix, self.local_dir = bucket, prefix.strip("/"), pathlib.Path(local_dir)
         self.max_files = max(1, max_files if max_files is not None else config.THUMB_CACHE_MAX)
         self.miss_ttl_s, self.error_ttl_s, self.wait_s = miss_ttl_s, error_ttl_s, wait_s
+        self.timeout_s = config.THUMB_FETCH_TIMEOUT_S if timeout_s is None else timeout_s
         self.lock = threading.Lock()
         self.kept: collections.OrderedDict[int, None] = collections.OrderedDict()   # least recently used first
         self.misses: dict[int, float] = {}                                          # t → monotonic retry time
@@ -147,11 +153,14 @@ class RemoteThumbs:
             return p
         try:
             data, ttl = None, self.miss_ttl_s
-            try:
-                data = self.bucket.read(_key(self.prefix, p.name))
-            except Exception as e:                       # network / permission: retry soon, never fail the request
-                ttl = self.error_ttl_s
-                log.debug("thumbnail fetch failed: %s", e.__class__.__name__)
+            for attempt in (1, 2):
+                try:
+                    data = self.bucket.read(_key(self.prefix, p.name), timeout=self.timeout_s)
+                    ttl = self.miss_ttl_s
+                    break
+                except Exception as e:                   # timeout / network / permission: one retry, then the
+                    ttl = self.error_ttl_s               # negative cache; never fail the request
+                    log.debug("thumbnail fetch failed (attempt %d): %s", attempt, e.__class__.__name__)
             if data:
                 tmp = p.with_name(f".{p.name}.{threading.get_ident()}.tmp")
                 tmp.write_bytes(data)
@@ -375,6 +384,33 @@ def _ensure_pack(remote: tuple[str, str] | None, base: pathlib.Path, sha: str, d
     return root
 
 
+REQUIRED_TABLES = ("asset", "pack_meta", "cues", "characters", "subtitle_tracks")
+
+
+def _usable(db_path: pathlib.Path) -> None:
+    """Raises ValueError unless the pack opens as SQLite, has the tables and the asset row every endpoint reads, and
+    parses (the warm-up the first question would otherwise do)."""
+    try:
+        db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            present = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if missing := [t for t in REQUIRED_TABLES if t not in present]:
+                raise ValueError("pack lacks tables: " + ", ".join(missing))
+            a = db.execute("SELECT duration_s, story_start_s, story_end_s FROM asset").fetchone()
+            db.execute("PRAGMA quick_check").fetchone()
+        finally:
+            db.close()
+    except sqlite3.Error as e:
+        raise ValueError(f"pack is not a readable SQLite file ({e.__class__.__name__})") from None
+    if a is None or any(v is None for v in a):
+        raise ValueError("pack has no asset row")
+    try:
+        data = retrieval.load_pack(db_path)
+        retrieval.Gate(data, 0.0, allow_auto=True).eligible()
+    except Exception as e:
+        raise ValueError(f"pack does not load ({e.__class__.__name__})") from None
+
+
 class Store:
     def __init__(self) -> None:
         self.titles: dict[str, Title] = {}
@@ -401,11 +437,12 @@ class Store:
             issues = check_pack(root / "pack.db")
             if issues:
                 log.warning("pack %s: %s", c["sha"][:12], "; ".join(issues))
-        if config.PRIVATE_TITLES:
-            self.load_private(config.PRIVATE_TITLES, remote, base)
-        # warm the parsed-pack cache in parallel so the first question is fast
+        # warm the parsed-pack cache in parallel so the first question is fast (private titles are opened, checked
+        # and warmed one by one in load_private, where a failure only skips that title)
         with cf.ThreadPoolExecutor(4) as ex:
             list(ex.map(lambda t: t.pack, self.titles.values()))
+        if config.PRIVATE_TITLES:
+            self.load_private(config.PRIVATE_TITLES, remote, base)
         return self
 
     def load_private(self, src: str, remote: tuple[str, str] | None, base: pathlib.Path) -> int:
@@ -418,20 +455,32 @@ class Store:
         except Exception as e:
             log.warning("private titles: not loaded (%s)", e.__class__.__name__)
             return 0
-        self.access = {str(h).lower() for h in doc.get("access_sha256") or [] if HEX64.match(str(h).lower())}
+        codes = doc.get("access_sha256")
+        if not isinstance(codes, list):
+            log.warning("private titles: access_sha256 is not a list; no access code loaded")
+            codes = []
+        self.access = {h.lower() for h in codes if isinstance(h, str) and HEX64.match(h.lower())}
+        public_shas = {t.sha for t in self.titles.values()}
+        taken: set[str] = set()
         n = 0
         for i, e in enumerate(doc.get("titles") or [], 1):
             try:
                 s = private_spec(e)
                 if s["id"] in self.titles:
                     raise ValueError("id already taken")
+                if s["sha"] in public_shas:
+                    raise ValueError("sha of a public film")      # would share (and evict) its local files
+                if s["sha"] in taken:
+                    raise ValueError("sha listed twice")
                 root = _ensure_pack(remote, base, s["sha"], s["dist"], whole=False)
                 if not (root / "pack.db").exists():
                     raise ValueError("no pack")
+                _usable(root / "pack.db")
             except Exception as err:
                 log.warning("private title #%d: skipped (%s)", i, err if isinstance(err, ValueError)
                             else err.__class__.__name__)
                 continue
+            taken.add(s["sha"])
             thumbs = None
             if remote is not None:
                 thumbs = RemoteThumbs(bucket_for(remote[0]), _key(remote[1], s["sha"], s["dist"], "thumbs"),
@@ -440,9 +489,9 @@ class Store:
                                          s["attribution"], root, hidden=True, dist=s["dist"],
                                          video_object=s["video_object"], playback=s["playback"],
                                          remote_thumbs=thumbs)
-            issues = check_pack(root / "pack.db")
-            if issues:
-                log.debug("private title #%d pack: %s", i, "; ".join(issues))
+            with contextlib.suppress(Exception):
+                if issues := check_pack(root / "pack.db"):
+                    log.debug("private title #%d pack: %s", i, "; ".join(issues))
             n += 1
         log.info("private preview titles: %d loaded, %d access code(s)", n, len(self.access))
         return n

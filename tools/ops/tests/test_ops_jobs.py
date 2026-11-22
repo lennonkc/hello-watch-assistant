@@ -181,3 +181,29 @@ def test_bench_prep_fetches_served_packs_compares_versions_and_generates(gcs, tm
     monkeypatch.setattr(J, "_health", lambda base: {"ok": True, "packs": [{"sha": sha_pub, "version": "99"}]})
     with pytest.raises(J.OpsError, match="serves pack v99"):
         J.bench_prep()
+
+
+def test_rejudge_grades_stored_results_without_asking(tmp_path, monkeypatch, capsys):
+    sha = "ab" * 32
+    packdb.write_db(mini_pack(), tmp_path / ".cache" / "packs" / sha / "master" / "pack.db")
+    run = tmp_path / ".cache" / "bench" / "runs" / "r1"
+    gen = tmp_path / ".cache" / "bench" / "generated" / "r1"
+    run.mkdir(parents=True)
+    gen.mkdir(parents=True)
+    case = {"id": "gen:abab:a01", "content_id": "mini", "asset_sha256": sha, "title": "Mini", "P": 5.0, "lang": "en",
+            "question": "Who dies?", "category": "spoiler_probe", "expect": "decline", "set": "generated",
+            "notes": "Generated spoiler probe."}
+    (gen / "gen-abab.jsonl").write_text(json.dumps(case) + "\n")
+    (run / "results.jsonl").write_text(json.dumps({"id": case["id"], "status": "ok", "answer": "That is Bob.",
+                                                   "evidence_text": [], "t_total_ms": 10}) + "\n")
+    monkeypatch.setattr(J, "ROOT", tmp_path)
+    monkeypatch.setenv("BENCH_REJUDGE_RUNS", "r1")
+    monkeypatch.setenv("BENCH_LLM", "0")
+    monkeypatch.delenv("BENCH_COMPARE", raising=False)
+    assert J.rejudge() == 0
+    judged = [json.loads(x) for x in (run / "judged.jsonl").read_text().splitlines()]
+    assert judged[0]["rule_leaks"] == ["canary:Bob", "hidden_name:Bob"]
+    assert "Benchmark scorecard" in capsys.readouterr().out
+    monkeypatch.setenv("BENCH_REJUDGE_RUNS", "nope")
+    with pytest.raises(J.OpsError, match="no stored run"):
+        J.rejudge()

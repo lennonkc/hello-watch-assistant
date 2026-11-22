@@ -11,12 +11,14 @@ import contextlib
 import contextvars
 import datetime as dt
 import functools
+import hashlib
 import hmac
 import json
 import logging
 import math
 import os
 import re
+import threading
 import time
 import uuid
 
@@ -80,7 +82,7 @@ class AccessMiddleware:
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
         conn = HTTPConnection(scope)
-        token = UNLOCKED.set(STORE.unlocked(conn.cookies.get(config.ACCESS_COOKIE)) or is_bench(conn))
+        token = UNLOCKED.set(is_bench(conn) or _cookie_unlocks(conn))
         try:
             await self.app(scope, receive, send)
         finally:
@@ -88,6 +90,29 @@ class AccessMiddleware:
 
 
 app.add_middleware(AccessMiddleware)
+
+
+def _cookie_unlocks(conn: HTTPConnection) -> bool:
+    """A valid `watch_access` cookie. An invalid one counts as a failed attempt of that IP (each distinct value once
+    a minute: a browser holding an old cookie is not punished per request); while the IP is over the limit no cookie
+    counts, valid or not, so guessing through any endpoint learns nothing."""
+    cookie = conn.cookies.get(config.ACCESS_COOKIE)
+    if not cookie:
+        return False
+    ip = client_ip(conn)
+    if UNLOCKS.blocked(ip):
+        return False
+    if code_ok(cookie) and STORE.unlocked(cookie):
+        return True
+    UNLOCKS.fail(ip, hashlib.sha256(cookie.encode("utf-8", "replace")).hexdigest()[:16])
+    return False
+
+
+def code_ok(code) -> bool:
+    """Access codes are printable ASCII without space, quotes, comma, semicolon or backslash (cookie-safe), 1–200
+    characters; anything else is simply a wrong code. Real codes should be random and at least 20 characters."""
+    return isinstance(code, str) and 0 < len(code) <= 200 and all(33 <= ord(ch) <= 126 and ch not in '",;\\'
+                                                                  for ch in code)
 
 
 def _title(title_id: str):
@@ -129,9 +154,11 @@ def titles():
 @app.post("/api/unlock")
 async def unlock(request: Request):
     """Access code (JSON body `{"code": "…"}`; never in a URL, so it reaches no log) → 204 with the `watch_access`
-    cookie (30 days), or 404. At most `UNLOCK_PER_MINUTE` attempts per IP and minute, malformed ones included (429
-    after that), so codes cannot be guessed quickly."""
-    if wait := UNLOCKS.check(client_ip(request)):
+    cookie (30 days), or 404. At most `UNLOCK_FAILURES_PER_MINUTE` FAILED attempts per IP and minute (wrong codes,
+    malformed bodies, invalid access cookies); after that 429, even for the right code, until the minute is over.
+    Successes are not counted: judges behind one address do not lock each other out."""
+    ip = client_ip(request)
+    if wait := UNLOCKS.blocked(ip):
         return JSONResponse({"message": "Too many attempts. Try again in a minute.", "retry_after_s": wait},
                             status_code=429, headers={"Retry-After": str(wait), **PRIVATE_HEADERS})
     try:
@@ -139,7 +166,8 @@ async def unlock(request: Request):
     except Exception:                                      # not JSON: same answer as a wrong code
         data = None
     code = data.get("code") if isinstance(data, dict) else None
-    if not isinstance(code, str) or not STORE.unlocked(code):
+    if not code_ok(code) or not STORE.unlocked(code):
+        UNLOCKS.fail(ip)
         raise HTTPException(404, "not found")
     r = Response(status_code=204, headers=PRIVATE_HEADERS)
     r.set_cookie(config.ACCESS_COOKIE, code, max_age=config.ACCESS_COOKIE_DAYS * 86400, path="/", secure=True,
@@ -148,28 +176,39 @@ async def unlock(request: Request):
 
 
 class Attempts:
-    """Sliding one-minute window per IP."""
+    """Failed attempts per IP in a sliding one-minute window (thread-safe: the middleware runs for sync endpoints
+    too). `fail(ip, key)` counts a keyed failure (an invalid cookie value) once per window."""
 
     def __init__(self, per_minute: int) -> None:
         self.per_minute = per_minute
         self.seen: collections.OrderedDict[str, collections.deque] = collections.OrderedDict()
+        self.lock = threading.Lock()
 
-    def check(self, ip: str) -> int:
-        """0 = allowed (and counted), else seconds to wait."""
-        now = time.monotonic()
+    def _window(self, ip: str, now: float) -> collections.deque:          # lock held
         q = self.seen.setdefault(ip, collections.deque())
         self.seen.move_to_end(ip)
-        while q and now - q[0] > 60:
+        while q and now - q[0][0] > 60:
             q.popleft()
-        if len(q) >= self.per_minute:
-            return max(1, math.ceil(60 - (now - q[0])))
-        q.append(now)
         while len(self.seen) > 10_000:
             self.seen.popitem(last=False)
-        return 0
+        return q
+
+    def blocked(self, ip: str) -> int:
+        """0 = allowed, else the seconds until the oldest failure leaves the window."""
+        now = time.monotonic()
+        with self.lock:
+            q = self._window(ip, now)
+            return max(1, math.ceil(60 - (now - q[0][0]))) if len(q) >= self.per_minute else 0
+
+    def fail(self, ip: str, key: str | None = None) -> None:
+        now = time.monotonic()
+        with self.lock:
+            q = self._window(ip, now)
+            if key is None or all(k != key for _t, k in q):
+                q.append((now, key))
 
 
-UNLOCKS = Attempts(config.UNLOCK_PER_MINUTE)
+UNLOCKS = Attempts(config.UNLOCK_FAILURES_PER_MINUTE)
 
 
 @app.get("/api/titles/{title_id}/frames/{t}.jpg")

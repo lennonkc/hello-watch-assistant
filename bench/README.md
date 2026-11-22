@@ -64,7 +64,9 @@ report `base` and `new` separately.
   suspects (never for a public name: `name_public` names are allowed at any time). `lint_allow_eligible` exempts a
   marker from the "already eligible at P" lint; `"channels": [...]` limits a marker to some of what the viewer
   receives (`answer`, `evidence`, `frame`, `highlight`, `tool_args`, `tool_summary`, `streamed`, `history`; default
-  all).
+  all). `"link": true` (or a link id) on a `must_not_include` term says it is the name of one side of an identity link
+  whose other side is the case's subject: the lint accepts it although the name is public or already eligible, after
+  checking against the pack that such a link is still pending at `P`.
 - `set`: `base`, `new` (ids `new:…`) or `generated` (ids `gen:…`, from `gen_cases.py`). A generated set is always a
   run of its own: `run_bench.py` and `judge.py` refuse to mix it with hand-written cases.
 - `judge.py --lint` checks the schema, catalog / asset ids, `P` within the film, English notes, history order and

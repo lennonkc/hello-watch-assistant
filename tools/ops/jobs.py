@@ -1207,6 +1207,49 @@ def logs() -> int:
     return 0
 
 
+# ── rejudge ──────────────────────────────────────────────────────────
+
+def rejudge() -> int:
+    """Grade stored runs again with this commit's judge and cases (BENCH_REJUDGE_RUNS=<id>[,<id>], optional
+    BENCH_COMPARE=<id> side by side): reads results.jsonl only, never asks the service. Rule gate against the packs of
+    the last bench (.cache/packs); LLM judge unless BENCH_LLM=0 or there is no Gemini key. Prints the summary."""
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from bench import judge as J
+
+    runs_dir = ROOT / ".cache" / "bench" / "runs"
+    ids = [x.strip() for x in env("BENCH_REJUDGE_RUNS").split(",") if x.strip()]
+    if not ids:
+        raise OpsError("set BENCH_REJUDGE_RUNS=<run id>[,<run id>] (under .cache/bench/runs)")
+    for i in ids + ([env("BENCH_COMPARE")] if env("BENCH_COMPARE") else []):
+        if not re.fullmatch(r"[A-Za-z0-9._+-]+", i) or not (runs_dir / i.split("+")[0] / "results.jsonl").exists():
+            raise OpsError(f"no stored run {i!r} under .cache/bench/runs")
+    packs = ROOT / ".cache" / "packs"
+    common = ["--packs", str(packs)] if packs.is_dir() else ["--no-rules"]
+    if not packs.is_dir():
+        say("WARN: no .cache/packs (run a bench first): rule results come from the cache only")
+    key = env("CEDAR_GEMINI_KEY_FILE")
+    if env("BENCH_LLM", "1") == "0" or not (key and pathlib.Path(key).is_file()):
+        common.append("--no-llm")
+        say("LLM judge: off (BENCH_LLM=0 or no Gemini key); cached grades are used where they still match")
+    if env("BENCH_SHOW_PRIVATE") == "1":
+        common.append("--show-private")
+    gen = ROOT / ".cache" / "bench" / "generated"
+
+    def cases_for(run_id: str) -> list[str]:
+        d = gen / run_id.split("+")[0]
+        return ["--cases", str(d)] if d.is_dir() else []
+
+    batches = [[env("BENCH_COMPARE")] + ids] if env("BENCH_COMPARE") else [[i] for i in ids]
+    for batch in batches:
+        say(f"== rejudge {' vs '.join(batch)}")
+        rc = J.main(["+".join(str(runs_dir / x) for x in r.split("+")) for r in batch] + cases_for(batch[-1])
+                    + common + ["--summary"])
+        if rc:
+            return rc
+    return 0
+
+
 # ── bench prep (run by `run.sh bench` before every run, not a JOB) ────
 
 def _health(base: str) -> dict:
@@ -1322,7 +1365,7 @@ def bench_prep() -> int:
 
 JOBS = {"inspect-packs": inspect_packs, "publish-public-packs": publish_public_packs,
         "publish-private-title": publish_private_title, "bench-show": bench_show, "logs": logs,
-        "bench-prep": bench_prep}
+        "rejudge": rejudge, "bench-prep": bench_prep}
 
 
 def main(argv: list[str]) -> int:

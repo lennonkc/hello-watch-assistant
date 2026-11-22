@@ -186,6 +186,23 @@ def _only(src: list[tuple[str, str]], m) -> list[tuple[str, str]]:
     return src if not want else [(w, t) for w, t in src if (w.rstrip("0123456789") or w) in want]
 
 
+def link_marker_ok(pv, P: float, m) -> bool:
+    """A marker with `"link": true` (or a link id) names one side of an identity link that is still pending at P:
+    the case's subject is the other side, so the name is barred although it may be public or already eligible."""
+    if not (isinstance(m, dict) and m.get("link") and m.get("term")):
+        return False
+    term = C.N(m["term"])
+    for lk in pv.pending_links(P):
+        if isinstance(m["link"], str) and lk.get("link_id") != m["link"]:
+            continue
+        sides = (lk["a_character_id"], lk["b_character_id"])
+        names = [t for cid in sides if cid in pv.chars for t in pv.name_variants(cid)]
+        names += [a["alias"] for a in pv.aliases if a["character_id"] in sides]
+        if term in {C.N(t) for t in names}:
+            return True
+    return False
+
+
 def _is_public(m, public: set) -> bool:
     return not (isinstance(m, dict) and "regex" in m) and C.N(C.marker_label(m)) in public
 
@@ -886,12 +903,22 @@ def lint(cases: list[dict], with_packs: bool, titles: dict | None = None, show_p
             if dur and c["P"] > dur:
                 add(errors, c, "P beyond the pack's duration", f"P={c['P']} > {dur}")
             txt = eligible_text(c)
+            linked = []
+            for m in c.get("must_not_include") or []:
+                if isinstance(m, dict) and m.get("link"):
+                    if link_marker_ok(pv, c["P"], m):
+                        linked.append(m)
+                    else:
+                        add(errors, c, "link marker: no identity link pending at P has this name on a side",
+                            str(marker_label(m)))
             legal = [m for m in c.get("must_not_include") or []
-                     if not (isinstance(m, dict) and m.get("lint_allow_eligible")) and marker_hits(m, txt)]
+                     if not (isinstance(m, dict) and m.get("lint_allow_eligible")) and m not in linked
+                     and marker_hits(m, txt)]
             if legal:
                 add(errors, c, f"must_not_include already eligible at P={c['P']}", str([marker_label(m) for m in legal]))
             public = {C.N(t) for t in pv.public_names()}
-            if pub := [marker_label(m) for m in c.get("must_not_include") or [] if _is_public(m, public)]:
+            if pub := [marker_label(m) for m in c.get("must_not_include") or [] if _is_public(m, public)
+                       and m not in linked]:
                 add(errors, c, "must_not_include has a public name (allowed at any time)", str(pub))
             if pub := [marker_label(m) for m in c.get("flag_if_any") or [] if _is_public(m, public)]:
                 add(warns, c, "flag_if_any has a public name: ignored by the rule gate", str(pub))
