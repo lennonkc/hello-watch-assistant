@@ -207,7 +207,7 @@ def build(m: Moment, tap: dict | None, turn: A.Turn, frame: bytes | None | type(
     screen = m.on_screen(tap, refs=True)
     ents = screen.get("entities", [])
     clean = {**screen, "entities": [{k: v for k, v in e.items() if k != "ref"} for e in ents]}
-    lookups = [Lookup("ctx-1", "on_screen", A.TOOL_LABELS["on_screen"], A.note_on_screen(turn, m, clean))]
+    lookups = [Lookup("ctx-1", "on_screen", A.tool_label("on_screen", m.lang), A.note_on_screen(turn, m, clean))]
     ringed, note = False, ""
     if m.phase != "story":
         frame = None
@@ -241,11 +241,11 @@ def build(m: Moment, tap: dict | None, turn: A.Turn, frame: bytes | None | type(
 
     lines, dialogue = _dialogue(m)
     sections.append(dialogue)
-    lookups.append(Lookup("ctx-2", "recent_dialogue", A.TOOL_LABELS["recent_dialogue"], A.note_dialogue(turn, lines)))
+    lookups.append(Lookup("ctx-2", "recent_dialogue", A.tool_label("recent_dialogue", m.lang), A.note_dialogue(turn, lines, m.lang)))
 
     story = m.story_so_far(limit=STORY_ITEMS, refs=True)
     sections.append(_story(story))
-    lookups.append(Lookup("ctx-3", "story_so_far", A.TOOL_LABELS["story_so_far"], A.note_story(turn, m, story)))
+    lookups.append(Lookup("ctx-3", "story_so_far", A.tool_label("story_so_far", m.lang), A.note_story(turn, m, story)))
 
     tapped, on = focus(screen)
     return Context(text="\n\n".join(sections), frame=frame, frame_note=note, lookups=lookups,

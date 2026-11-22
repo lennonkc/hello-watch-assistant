@@ -76,15 +76,124 @@ function newId() {
   });
 }
 
-const TYPE_LABELS = {
-  scene: 'Scene', event: 'Event', recap: 'Recap', shot_caption: 'Shot', character_fact: 'Character',
-  object: 'Object', cue: 'Dialogue', video_window: 'Clip', look: 'Look', character: 'Character',
-  shot: 'Shot', line: 'Dialogue',
+// Everything the live demo shows, in the language picked with the EN / ZH switch (the answer language). A question's
+// card keeps the language it was asked in. Server-written labels (steps, frame captions) come in that language too.
+const STR = {
+  en: {
+    types: {
+      scene: 'Scene', event: 'Event', recap: 'Recap', shot_caption: 'Shot', character_fact: 'Character',
+      object: 'Object', cue: 'Dialogue', video_window: 'Clip', look: 'Look', character: 'Character',
+      shot: 'Shot', line: 'Dialogue',
+    },
+    gateRows: {
+      scene: 'Scenes', event: 'Events', cue: 'Lines of dialogue', shot_caption: 'Shots described',
+      character_fact: 'Character facts', object: 'Objects', recap: 'Recaps',
+    },
+    chooseFilm: 'Choose a film', playFilm: 'Play the film', preview: 'Preview quality',
+    wholeFrame: 'Whole frame', cancel: 'Cancel',
+    gateChecking: 'Checking what the assistant can see…', details: 'Details',
+    gateLine: (e, l) => `Assistant can see <b class="xp-ok">${e}</b> moments · <b class="xp-locked">${l}</b> still locked`,
+    gateNothing: (l) => `Nothing unlocked yet · <b class="xp-locked">${l}</b> moments locked until they play`,
+    gateChars: (k, n) => `${k} of ${n} characters introduced`,
+    gateNote: (t) => `Counts only, at ${t}. Locked items stay on the server; the gate runs there before any lookup or search.`,
+    panelTitle: 'Ask the assistant', quick: 'Quick questions', answerLang: 'Answer language',
+    placeholder: 'Ask about this moment…', yourQuestion: 'Your question', ask: 'Ask', stop: 'Stop',
+    tapNote: 'Your tap goes with the next question.', clear: 'Clear',
+    emptyHead: 'Pause anywhere, then ask. ',
+    emptyBody: 'To ask about someone, tap them on the paused picture first. Answers use what the film has shown up to that moment.',
+    lock: (t) => `Answers as of <b>${t}</b>`, lockTitle: 'Questions are answered as of this moment',
+    hintTap: 'Tap someone on screen to ask about them', outside: 'That is outside the picture. Tap inside it.',
+    outsideLive: 'That is outside the picture.', videoError: 'The video could not be loaded. Try another film or reload.',
+    pointSet: 'Point set. Ask who or what it is.', pickLive: (q) => `${q} on the picture, or use the arrow keys and Enter.`,
+    wentBack: (t) => `You went back to ${t}. The answers below are from later in the film, so the assistant leaves them out now.`,
+    answerLive: 'Answer: ', couldNot: 'The assistant could not answer.', http: (n) => `The service returned HTTP ${n}.`,
+    budgetTotal: ['The demo has used up today’s question budget.', 'It resets within a day. The player and the gate line keep working meanwhile.'],
+    budgetIp: ['You have reached today’s question limit for this demo.', 'Thanks for trying it this much. It resets within a day.'],
+    tooMany: ['Too many questions right now.', 'Wait a minute, then try again.'],
+    listFailed: ['The film list did not load.', 'The service may be waking up. Give it a few seconds and try again.'],
+    tryAgain: 'Try again',
+    // one question's card
+    tapped: 'tapped', steps: 'What the assistant did', locking: 'Locking the moment and checking the gate…',
+    gateStep: (t) => `Spoiler gate at ${t}`, gateSummary: (e, l) => `${e} moments unlocked · ${l} kept from the model`,
+    lookingUp: 'Looking things up…', working: 'Working', step: 'Step', done: 'Done', writing: 'Writing the answer…',
+    lookups: (n) => (n === 1 ? '1 lookup' : `${n} lookups`), traceDone: (t, look) => `Gate at ${t} + ${look}`,
+    basedOn: 'Based on', evAt: (type, t) => `${type} at ${t}`, rewindTo: (t) => `Rewind to ${t}`,
+    frameAria: (cap, t) => `${cap}. Rewind the player to ${t}`,
+    guardNotRun: 'Guard not run', guardReplaced: 'Guard replaced the draft',
+    guardRemoved: (n) => `Guard removed ${n} sentence${n > 1 ? 's' : ''}`,
+    guardCaught: 'The output guard caught something in the draft', guardOk: 'Passed the output guard',
+    guardOkTitle: 'Checked for unrevealed names, later plot terms and real people’s names',
+    timing: (f, d) => `first words ${f} s · done ${d} s`, secs: (d) => `${d} s`,
+    cutBadge: 'Cut short', cutTitle: 'The answer ran out of time; the sentences shown are complete and checked',
+    askAgain: 'Ask again',
+    cutError: ['The answer was cut short.', 'Something went wrong partway through.'],
+    problem: ['The assistant ran into a problem.', 'Please try again.'],
+    stoppedCut: ['Stopped.', 'You stopped this answer partway through.'], stopped: ['Stopped.', 'You stopped this answer.'],
+    droppedCut: ['The answer was cut short.', 'The connection dropped. Check your network and ask again.'],
+    dropped: ['The connection dropped.', 'Check your network and try again.'],
+    endedCut: ['The answer was cut short.', 'The stream ended before the answer was complete.'],
+    ended: ['No answer came back.', 'The stream ended early. Please try again.'],
+    pause: 'Quick pause: the demo takes a few questions a minute.',
+    askIn: (t) => `You can ask again in ${t}.`, askNow: 'You can ask again now.',
+  },
+  zh: {
+    types: {
+      scene: '场景', event: '事件', recap: '回顾', shot_caption: '镜头', character_fact: '角色',
+      object: '物件', cue: '台词', video_window: '片段', look: '外观', character: '角色', shot: '镜头', line: '台词',
+    },
+    gateRows: {
+      scene: '场景', event: '事件', cue: '台词', shot_caption: '已描述的镜头', character_fact: '角色信息',
+      object: '物件', recap: '回顾',
+    },
+    chooseFilm: '选择影片', playFilm: '播放影片', preview: '预览画质',
+    wholeFrame: '整个画面', cancel: '取消',
+    gateChecking: '正在查看助手能看到什么…', details: '详情',
+    gateLine: (e, l) => `助手能看到 <b class="xp-ok">${e}</b> 条内容 · <b class="xp-locked">${l}</b> 条仍然锁着`,
+    gateNothing: (l) => `还没有解锁任何内容 · <b class="xp-locked">${l}</b> 条内容播到才解锁`,
+    gateChars: (k, n) => `已出场 ${k} / ${n} 个角色`,
+    gateNote: (t) => `只显示数量，截至 ${t}。锁住的内容留在服务器上；每次查找或搜索之前，都先在服务器上过这道闸。`,
+    panelTitle: '向助手提问', quick: '快捷问题', answerLang: '回答语言',
+    placeholder: '问问这一刻…', yourQuestion: '你的问题', ask: '提问', stop: '停止',
+    tapNote: '你点的位置会和下一个问题一起发送。', clear: '清除',
+    emptyHead: '随时暂停，然后提问。',
+    emptyBody: '想问某个人，先在暂停的画面上点一下他。回答只用到影片播到这一刻为止展示过的内容。',
+    lock: (t) => `回答截至 <b>${t}</b>`, lockTitle: '问题按这一刻来回答',
+    hintTap: '点一下画面里的人，就能问关于他的问题', outside: '那里在画面外面，请点画面里面。',
+    outsideLive: '那里在画面外面。', videoError: '视频没能加载。换一部影片或刷新页面试试。',
+    pointSet: '位置已选好，问问那是谁或是什么。', pickLive: (q) => `${q}，或用方向键加回车。`,
+    wentBack: (t) => `你退回到了 ${t}。下面的回答来自影片更后面的位置，所以助手现在不会用到它们。`,
+    answerLive: '回答：', couldNot: '助手没能回答。', http: (n) => `服务返回了 HTTP ${n}。`,
+    budgetTotal: ['今天的演示提问额度已经用完了。', '一天之内会重置。播放器和闸门信息照常可用。'],
+    budgetIp: ['你今天在这个演示里的提问次数已经用完了。', '谢谢你这么认真地试用！一天之内会重置。'],
+    tooMany: ['现在提问太频繁了。', '请等一分钟再试。'],
+    listFailed: ['影片列表没能加载。', '服务可能正在启动，过几秒再试一次。'],
+    tryAgain: '再试一次',
+    tapped: '已点选', steps: '助手做了什么', locking: '正在锁定这一刻并检查闸门…',
+    gateStep: (t) => `${t} 的防剧透闸门`, gateSummary: (e, l) => `已解锁 ${e} 条 · ${l} 条不给模型看`,
+    lookingUp: '正在查找…', working: '处理中', step: '步骤', done: '完成', writing: '正在写回答…',
+    lookups: (n) => `${n} 次查找`, traceDone: (t, look) => `${t} 的闸门 + ${look}`,
+    basedOn: '依据', evAt: (type, t) => `${t} 的${type}`, rewindTo: (t) => `倒回到 ${t}`,
+    frameAria: (cap, t) => `${cap}。把播放器倒回到 ${t}`,
+    guardNotRun: '未经输出检查', guardReplaced: '输出检查替换了草稿',
+    guardRemoved: (n) => `输出检查删掉了 ${n} 句`,
+    guardCaught: '输出检查在草稿里发现了问题', guardOk: '通过输出检查',
+    guardOkTitle: '已检查：尚未揭晓的名字、后面剧情的词、真人姓名',
+    timing: (f, d) => `首句 ${f} 秒 · 完成 ${d} 秒`, secs: (d) => `${d} 秒`,
+    cutBadge: '被截断', cutTitle: '回答超时了；显示出来的句子都完整并且经过了检查',
+    askAgain: '再问一次',
+    cutError: ['回答被中断了。', '中途出了点问题。'],
+    problem: ['助手遇到了问题。', '请再试一次。'],
+    stoppedCut: ['已停止。', '你中途停止了这个回答。'], stopped: ['已停止。', '你停止了这个回答。'],
+    droppedCut: ['回答被中断了。', '连接断开了。检查一下网络再问一次。'],
+    dropped: ['连接断开了。', '检查一下网络再试一次。'],
+    endedCut: ['回答被中断了。', '回答还没写完，连接就结束了。'],
+    ended: ['没有收到回答。', '连接提前结束了，请再试一次。'],
+    pause: '稍等一下：这个演示每分钟只接受几个问题。',
+    askIn: (t) => `${t} 后可以再问。`, askNow: '现在可以再问了。',
+  },
 };
-const GATE_ROWS = [
-  ['scene', 'Scenes'], ['event', 'Events'], ['cue', 'Lines of dialogue'], ['shot_caption', 'Shots described'],
-  ['character_fact', 'Character facts'], ['object', 'Objects'], ['recap', 'Recaps'],
-];
+const strings = (lang) => STR[lang] || STR.en;
+const GATE_ROWS = ['scene', 'event', 'cue', 'shot_caption', 'character_fact', 'object', 'recap'];
 
 function toolIcon(name = '') {
   const n = name.toLowerCase();
@@ -98,10 +207,10 @@ function toolIcon(name = '') {
 
 // The four one-tap questions. `pick`: ask the viewer to point at something first (unless they already tapped).
 const QUICK = [
-  { key: 'who', label: 'Who is this?', zh: '这是谁？', icon: 'user', pick: 'Tap the person you mean' },
+  { key: 'who', label: 'Who is this?', zh: '这是谁？', icon: 'user', pick: 'Tap the person you mean', pickZh: '点一下你说的那个人' },
   { key: 'miss', label: 'What did I miss?', zh: '我错过了什么？', icon: 'book' },
   { key: 'say', label: 'What did they just say?', zh: '他们刚才说了什么？', icon: 'quote' },
-  { key: 'what', label: 'What is that?', zh: '那是什么？', icon: 'target', pick: 'Tap the thing you mean' },
+  { key: 'what', label: 'What is that?', zh: '那是什么？', icon: 'target', pick: 'Tap the thing you mean', pickZh: '点一下你说的那个东西' },
 ];
 
 function loadStyles() {
@@ -146,6 +255,9 @@ class Experience {
     this.cooldownNotice = null;
   }
 
+  /** The page's strings in the current language. */
+  get s() { return strings(this.lang); }
+
   // ---------- layout ----------
 
   render() {
@@ -153,7 +265,7 @@ class Experience {
     r.classList.add('xp');
     r.innerHTML = '';
 
-    this.films = h('div', { class: 'xp-films', role: 'group', 'aria-label': 'Choose a film' },
+    this.films = h('div', { class: 'xp-films', role: 'group' },
       [0, 1, 2].map(() => h('span', { class: 'xp-film xp-film--skeleton', 'aria-hidden': 'true' })));
 
     // Player: the picture (video + overlays + tap layer) above its own controls, so the whole paused picture can
@@ -173,14 +285,12 @@ class Experience {
     });
     this.hint = h('div', { class: 'xp-hint', hidden: true, 'aria-hidden': 'true' });
     this.bigPlay = h('button', {
-      type: 'button', class: 'xp-bigplay', 'aria-label': 'Play the film', html: icon('play'),
-      onclick: () => this.video.play(),
+      type: 'button', class: 'xp-bigplay', html: icon('play'), onclick: () => this.video.play(),
     });
+    this.wholeBtn = h('button', { type: 'button', class: 'xp-btn xp-btn--ghost', onclick: () => this.confirmPick(null) });
+    this.cancelBtn = h('button', { type: 'button', class: 'xp-btn xp-btn--ghost', onclick: () => this.cancelPick() });
     this.pickBar = h('div', { class: 'xp-pickbar', role: 'status' },
-      h('span', { class: 'xp-pickbar__msg' }),
-      h('span', { class: 'xp-pickbar__actions' },
-        h('button', { type: 'button', class: 'xp-btn xp-btn--ghost', onclick: () => this.confirmPick(null) }, 'Whole frame'),
-        h('button', { type: 'button', class: 'xp-btn xp-btn--ghost', onclick: () => this.cancelPick() }, 'Cancel')));
+      h('span', { class: 'xp-pickbar__msg' }), h('span', { class: 'xp-pickbar__actions' }, this.wholeBtn, this.cancelBtn));
     this.screen = h('div', { class: 'xp-screen' },
       this.video, this.content, this.tapLayer, this.hint, this.bigPlay, this.pickBar);
 
@@ -199,11 +309,12 @@ class Experience {
     this.player = h('div', { class: 'xp-player', onkeydown: (e) => this.onPlayerKey(e) }, this.screen, this.controls);
 
     // The gate line: what the assistant can see at this position, live.
-    this.gateText = h('span', { class: 'xp-gate__text' }, 'Checking what the assistant can see…');
+    this.gateText = h('span', { class: 'xp-gate__text' });
+    this.gateMoreLabel = h('span', {});
     this.gateMore = h('button', {
       type: 'button', class: 'xp-gate__more', 'aria-expanded': 'false', 'aria-controls': 'xp-gate-rows',
       onclick: () => this.toggleGateRows(),
-    }, h('span', {}, 'Details'), h('span', { html: icon('down') }));
+    }, this.gateMoreLabel, h('span', { html: icon('down') }));
     this.gateRows = h('div', { class: 'xp-gate__rows', id: 'xp-gate-rows', hidden: true });
     this.gate = h('div', { class: 'xp-gate' },
       h('div', { class: 'xp-gate__line' },
@@ -217,32 +328,28 @@ class Experience {
       title: code === 'en' ? 'Answer in English' : 'Answer in Chinese',
       onclick: () => this.setLang(code),
     }, code.toUpperCase()));
-    this.lockChip = h('span', { class: 'xp-lock', title: 'Questions are answered as of this moment' });
+    this.lockChip = h('span', { class: 'xp-lock' });
     this.chips = QUICK.map((q) => h('button', {
       type: 'button', class: 'xp-chip', 'data-key': q.key, onclick: () => this.onQuick(q),
-      html: `${icon(q.icon)}<span>${q.label}</span>`,
     }));
     this.input = h('input', {
       class: 'xp-input', type: 'text', name: 'question', maxlength: '300', autocomplete: 'off', enterkeyhint: 'send',
-      placeholder: 'Ask about this moment…', 'aria-label': 'Your question',
     });
-    this.sendBtn = h('button', { type: 'submit', class: 'xp-send', 'aria-label': 'Ask', html: icon('send') });
+    this.sendBtn = h('button', { type: 'submit', class: 'xp-send', html: icon('send') });
     this.form = h('form', { class: 'xp-form', onsubmit: (e) => this.onSubmit(e) }, this.input, this.sendBtn);
+    this.tapNoteText = h('span', {});
+    this.tapClear = h('button', { type: 'button', class: 'xp-tapnote__clear', onclick: () => this.clearTap() });
     this.tapNote = h('div', { class: 'xp-tapnote', hidden: true },
-      h('span', { html: icon('tap') }),
-      h('span', {}, 'Your tap goes with the next question.'),
-      h('button', { type: 'button', class: 'xp-tapnote__clear', onclick: () => this.clearTap() }, 'Clear'));
+      h('span', { html: icon('tap') }), this.tapNoteText, this.tapClear);
     this.thread = h('div', { class: 'xp-thread', 'aria-label': 'Answers' });
     this.live = h('div', { class: 'visually-hidden', 'aria-live': 'polite' });
+    this.panelTitle = h('h2', { id: 'xp-panel-h', class: 'xp-panel__title' });
+    this.langSeg = h('div', { class: 'xp-seg', role: 'group' }, this.langBtns);
+    this.chipGroup = h('div', { class: 'xp-chips', role: 'group' }, this.chips);
     this.panel = h('aside', { class: 'xp-panel', 'aria-labelledby': 'xp-panel-h' },
       h('div', { class: 'xp-panel__head' },
-        h('div', { class: 'xp-panel__titles' },
-          h('h2', { id: 'xp-panel-h', class: 'xp-panel__title' }, 'Ask the assistant'),
-          this.lockChip),
-        h('div', { class: 'xp-seg', role: 'group', 'aria-label': 'Answer language' }, this.langBtns)),
-      h('div', { class: 'xp-composer' },
-        h('div', { class: 'xp-chips', role: 'group', 'aria-label': 'Quick questions' }, this.chips),
-        this.form, this.tapNote),
+        h('div', { class: 'xp-panel__titles' }, this.panelTitle, this.lockChip), this.langSeg),
+      h('div', { class: 'xp-composer' }, this.chipGroup, this.form, this.tapNote),
       this.thread, this.live);
 
     this.stage = h('section', { class: 'xp-stage', 'aria-labelledby': 'xp-stage-h' },
@@ -255,9 +362,37 @@ class Experience {
       if (e.key === 'Escape' && this.pick) { this.cancelPick(); this.input.focus(); }
     });
     if (params.get('q')) this.input.value = params.get('q').slice(0, 300);
+    this.applyLang();
     this.renderEmptyThread();
     this.bindVideo();
     this.updateControls();
+    this.updateLock();
+  }
+
+  /** Puts the page's own words in the current language (cards already in the thread keep theirs). */
+  applyLang() {
+    const s = this.s;
+    this.stage.setAttribute('lang', this.lang === 'zh' ? 'zh-CN' : 'en');
+    this.films.setAttribute('aria-label', s.chooseFilm);
+    this.bigPlay.setAttribute('aria-label', s.playFilm);
+    this.wholeBtn.textContent = s.wholeFrame;
+    this.cancelBtn.textContent = s.cancel;
+    this.gateMoreLabel.textContent = s.details;
+    if (this.gateCounts) { this.gateShown = null; this.setGateCounts(...this.gateCounts); } else this.gateText.textContent = s.gateChecking;
+    if (this.gateData) this.renderGate(this.gateData, false);
+    this.panelTitle.textContent = s.panelTitle;
+    this.lockChip.title = s.lockTitle;
+    this.langSeg.setAttribute('aria-label', s.answerLang);
+    this.chipGroup.setAttribute('aria-label', s.quick);
+    QUICK.forEach((q, i) => { this.chips[i].innerHTML = `${icon(q.icon)}<span></span>`; this.chips[i].lastChild.textContent = this.lang === 'zh' ? q.zh : q.label; });
+    this.input.placeholder = s.placeholder;
+    this.input.setAttribute('aria-label', s.yourQuestion);
+    this.sendBtn.setAttribute('aria-label', this.busy ? s.stop : s.ask);
+    this.tapNoteText.textContent = s.tapNote;
+    this.tapClear.textContent = s.clear;
+    if (this.thread.querySelector('.xp-empty')) this.renderEmptyThread();
+    for (const b of this.films.querySelectorAll('.xp-badge--preview')) b.textContent = s.preview;
+    if (!this.hint.hidden && !this.hint.classList.contains('is-warn')) { this.hint.hidden = true; this.updateHint(); }
     this.updateLock();
   }
 
@@ -317,9 +452,7 @@ class Experience {
   }
 
   renderEmptyThread() {
-    this.thread.replaceChildren(h('div', { class: 'xp-empty' },
-      h('p', {}, h('b', {}, 'Pause anywhere, then ask. '),
-        'To ask about someone, tap them on the paused picture first. Answers use what the film has shown up to that moment.')));
+    this.thread.replaceChildren(h('div', { class: 'xp-empty' }, h('p', {}, h('b', {}, this.s.emptyHead), this.s.emptyBody)));
   }
 
   // ---------- titles ----------
@@ -335,9 +468,9 @@ class Experience {
       this.films.replaceChildren(h('div', { class: 'xp-notice', role: 'alert' },
         h('span', { html: icon('alert') }),
         h('div', {},
-          h('strong', {}, 'The film list did not load.'),
-          h('p', {}, 'The service may be waking up. Give it a few seconds and try again.'),
-          h('button', { type: 'button', class: 'xp-btn', onclick: () => this.loadTitles() }, 'Try again'))));
+          h('strong', {}, this.s.listFailed[0]),
+          h('p', {}, this.s.listFailed[1]),
+          h('button', { type: 'button', class: 'xp-btn', onclick: () => this.loadTitles() }, this.s.tryAgain))));
       return;
     }
     this.renderFilms();
@@ -361,7 +494,7 @@ class Experience {
         type: 'button', class: 'xp-film', 'data-id': t.id, 'aria-pressed': 'false',
         title: t.synopsis || t.title, onclick: () => this.selectTitle(t),
       }, h('span', { class: 'xp-film__thumb' }, img), h('span', { class: 'xp-film__name' }, t.title),
-      t.playback === 'preview' ? h('span', { class: 'xp-badge xp-badge--preview' }, 'Preview quality') : null);
+      t.playback === 'preview' ? h('span', { class: 'xp-badge xp-badge--preview' }, this.s.preview) : null);
     }));
   }
 
@@ -393,8 +526,10 @@ class Experience {
       const v = this.video;
       const go = () => { v.currentTime = this.at; };
       if (v.readyState >= 1) go(); else v.addEventListener('loadedmetadata', go, { once: true });
-      if (ask) v.addEventListener('seeked', () => this.onSubmit(), { once: true });
     }
+    // &ask=1: send right away. The question is asked at the deep link's position whether or not the video can play
+    // here (position() reports `at` until the player has seeked), so it never waits on the video.
+    if (ask) setTimeout(() => this.onSubmit(), 0);
     this.clearOverlay();
     this.renderEmptyThread();
     this.updateControls();
@@ -442,7 +577,7 @@ class Experience {
     v.addEventListener('ended', () => this.updateControls());
     v.addEventListener('error', () => {
       if (!this.title || !v.getAttribute('src')) return;
-      this.showHint('The video could not be loaded. Try another film or reload.', true);
+      this.showHint(this.s.videoError, true);
     });
     new ResizeObserver(() => this.layoutContent()).observe(v);
     for (const ev of ['fullscreenchange', 'webkitfullscreenchange']) {
@@ -529,7 +664,7 @@ class Experience {
       && this.position() > 0.5;
     if (!show) { if (!this.hint.classList.contains('is-warn')) this.hint.hidden = true; return; }
     if (!this.hint.hidden && !this.hint.classList.contains('is-warn')) return;
-    this.showHint('Tap someone on screen to ask about them');
+    this.showHint(this.s.hintTap);
   }
 
   bigPlayVisible() { return !this.bigPlay.hidden; }
@@ -543,7 +678,7 @@ class Experience {
 
   updateLock(p) {
     const at = p ?? this.position();
-    this.lockChip.innerHTML = `${icon('lock')}<span>Answers as of <b>${fmt(at)}</b></span>`;
+    this.lockChip.innerHTML = `${icon('lock')}<span>${this.s.lock(fmt(at))}</span>`;
   }
 
   // ---------- the gate line ----------
@@ -567,7 +702,9 @@ class Experience {
     if (immediate) run(); else this.gateTimer = setTimeout(run, 200);
   }
 
-  renderGate(g) {
+  renderGate(g, counts = true) {
+    const s = this.s;
+    this.gateData = g;
     const keys = new Set([...Object.keys(g.eligible || {}), ...Object.keys(g.total || {})]);
     let eligible = 0;
     let total = 0;
@@ -575,9 +712,9 @@ class Experience {
       eligible += Number(g.eligible?.[k]) || 0;
       total += Number(g.total?.[k]) || 0;
     }
-    this.setGateCounts(eligible, Math.max(0, total - eligible));
-    const rows = GATE_ROWS.filter(([k]) => keys.has(k));
-    for (const k of keys) if (!GATE_ROWS.some(([r]) => r === k) && Number(g.total?.[k])) rows.push([k, TYPE_LABELS[k] || k]);
+    if (counts) this.setGateCounts(eligible, Math.max(0, total - eligible));
+    const rows = GATE_ROWS.filter((k) => keys.has(k)).map((k) => [k, s.gateRows[k]]);
+    for (const k of keys) if (!GATE_ROWS.includes(k) && Number(g.total?.[k])) rows.push([k, s.types[k] || k]);
     this.gateRows.replaceChildren(
       ...rows.map(([k, label]) => {
         const e = Number(g.eligible?.[k]) || 0;
@@ -588,19 +725,17 @@ class Experience {
           h('span', { class: 'xp-gate-row__num' }, `${e} / ${n}`));
       }),
       g.characters_total != null
-        ? h('p', { class: 'xp-gate__chars' }, `${g.characters_known ?? 0} of ${g.characters_total} characters introduced`)
+        ? h('p', { class: 'xp-gate__chars' }, s.gateChars(g.characters_known ?? 0, g.characters_total))
         : null,
-      h('p', { class: 'xp-gate__note' },
-        `Counts only, at ${fmt(g.p)}. Locked items stay on the server; the gate runs there before any lookup or search.`));
+      h('p', { class: 'xp-gate__note' }, s.gateNote(fmt(g.p))));
   }
 
   setGateCounts(eligible, locked) {
     const key = `${eligible}/${locked}`;
     if (this.gateShown === key) return;
     this.gateShown = key;
-    this.gateText.innerHTML = eligible
-      ? `Assistant can see <b class="xp-ok">${num(eligible)}</b> moments · <b class="xp-locked">${num(locked)}</b> still locked`
-      : `Nothing unlocked yet · <b class="xp-locked">${num(locked)}</b> moments locked until they play`;
+    this.gateCounts = [eligible, locked];
+    this.gateText.innerHTML = eligible ? this.s.gateLine(num(eligible), num(locked)) : this.s.gateNothing(num(locked));
     this.gate.classList.remove('is-pulse');
     void this.gate.offsetWidth;
     this.gate.classList.add('is-pulse');
@@ -638,8 +773,8 @@ class Experience {
   }
 
   nudge() {
-    this.showHint('That is outside the picture. Tap inside it.', true);
-    this.live.textContent = 'That is outside the picture.';
+    this.showHint(this.s.outside, true);
+    this.live.textContent = this.s.outsideLive;
     clearTimeout(this.nudgeTimer);
     this.nudgeTimer = setTimeout(() => { this.hint.classList.remove('is-warn'); this.updateHint(); }, 1600);
   }
@@ -650,7 +785,7 @@ class Experience {
     this.drawRing(p);
     this.tapNote.hidden = false;
     for (const c of this.chips) c.classList.toggle('is-ready', c.dataset.key === 'who' || c.dataset.key === 'what');
-    this.live.textContent = 'Point set. Ask who or what it is.';
+    this.live.textContent = this.s.pointSet;
     this.updateHint();
   }
 
@@ -677,7 +812,7 @@ class Experience {
     this.tapLayer.focus({ preventScroll: true });
     const r = this.player.getBoundingClientRect();
     if (r.top < 0 || r.bottom > innerHeight) this.player.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    this.live.textContent = `${q.pick} on the picture, or use the arrow keys and Enter.`;
+    this.live.textContent = this.s.pickLive(q.pick);
   }
 
   cancelPick() {
@@ -778,15 +913,17 @@ class Experience {
     this.lang = code;
     for (const b of this.langBtns) b.setAttribute('aria-pressed', String(b.dataset.lang === code));
     try { localStorage.setItem(LANG_KEY, code); } catch { /* storage unavailable */ }
+    this.applyLang();
   }
 
   onQuick(q) {
     if (this.busy || !this.title) return;
-    const question = this.lang === 'zh' ? q.zh : q.label;
+    const zh = this.lang === 'zh';
+    const question = zh ? q.zh : q.label;
     if (!q.pick) { this.ask(question, null); return; }
     const tap = this.tapAt(this.position());
     if (tap) this.ask(question, tap);
-    else this.startPick({ ...q, question });
+    else this.startPick({ ...q, question, pick: zh ? q.pickZh : q.pick });
   }
 
   onSubmit(e) {
@@ -804,7 +941,7 @@ class Experience {
     for (const c of this.chips) c.disabled = on;
     this.input.disabled = on;
     this.sendBtn.innerHTML = icon(on ? 'stop' : 'send');
-    this.sendBtn.setAttribute('aria-label', on ? 'Stop' : 'Ask');
+    this.sendBtn.setAttribute('aria-label', on ? this.s.stop : this.s.ask);
     this.sendBtn.classList.toggle('is-stop', on);
     this.updateHint();
   }
@@ -839,7 +976,7 @@ class Experience {
       for (const turn of this.thread.querySelectorAll('.xp-turn')) turn.classList.add('is-stale');
       this.thread.prepend(h('div', { class: 'xp-divider', role: 'note' },
         h('span', { html: icon('rewind') }),
-        h('span', {}, `You went back to ${fmt(p)}. The answers below are from later in the film, so the assistant leaves them out now.`)));
+        h('span', {}, this.s.wentBack(fmt(p)))));
     }
     this.lastAskP = p;
     this.updateLock(p);
@@ -867,7 +1004,7 @@ class Experience {
         let body = {};
         try { body = await res.json(); } catch { /* not JSON */ }
         if (res.status === 429) this.limited(turn, body, Number(res.headers.get('retry-after')));
-        else turn.fail('The assistant could not answer.', body.message || body.detail || `The service returned HTTP ${res.status}.`);
+        else turn.fail(turn.s.couldNot, body.message || body.detail || turn.s.http(res.status));
         return;
       }
       await readSSE(res, (event, data) => {
@@ -879,7 +1016,7 @@ class Experience {
           // The answer's box is the truthful one: null when the text is not about the tapped entity.
           if (data.highlight) this.drawHighlight(data.highlight, p);
           else if (this.hlP === p) this.clearHighlight();
-          this.live.textContent = `Answer: ${data.text || ''}`;
+          this.live.textContent = `${turn.s.answerLive}${data.text || ''}`;
         }
       });
       turn.finish();
@@ -902,13 +1039,11 @@ class Experience {
       this.cooldownUntil = Date.now() + wait * 1000;
       this.cooldownNotice = turn.countdown(this.cooldownUntil);
     } else if (body.limit === 'daily' && body.scope === 'total') {
-      turn.fail('The demo has used up today’s question budget.',
-        'It resets within a day. The player and the gate line keep working meanwhile.', 'slow', false);
+      turn.fail(...turn.s.budgetTotal, 'slow', false);
     } else if (body.limit === 'daily') {
-      turn.fail('You have reached today’s question limit for this demo.',
-        'Thanks for trying it this much. It resets within a day.', 'slow', false);
+      turn.fail(...turn.s.budgetIp, 'slow', false);
     } else {
-      turn.fail('Too many questions right now.', body.message || 'Wait a minute, then try again.', 'slow');
+      turn.fail(turn.s.tooMany[0], turn.lang === 'en' && body.message ? body.message : turn.s.tooMany[1], 'slow');
     }
   }
 
@@ -977,6 +1112,9 @@ class Turn {
     this.app = app;
     this.q = { question, tap, p };
     this.title = title;
+    this.lang = lang;
+    this.s = strings(lang);
+    const s = this.s;
     this.steps = new Map();
     this.nSteps = 0;
     this.lookups = 0;
@@ -984,20 +1122,20 @@ class Turn {
     this.answered = false;
     this.failed = false;
 
-    this.stepList = h('ol', { class: 'xp-steps', 'aria-label': 'What the assistant did' });
-    this.traceLabel = h('span', { class: 'xp-trace__label' }, 'Locking the moment and checking the gate…');
+    this.stepList = h('ol', { class: 'xp-steps', 'aria-label': s.steps });
+    this.traceLabel = h('span', { class: 'xp-trace__label' }, s.locking);
     this.trace = h('details', { class: 'xp-trace is-working', open: true },
       h('summary', {}, h('i', { class: 'xp-spinner', 'aria-hidden': 'true' }), this.traceLabel),
       this.stepList);
     this.text = h('p', { class: 'xp-answer__text', lang: lang === 'zh' ? 'zh' : 'en' });
     this.card = h('div', { class: 'xp-answer is-streaming', hidden: true }, this.text);
     this.slot = h('div', { class: 'xp-turn__notes' });
-    this.el = h('article', { class: 'xp-turn' },
+    this.el = h('article', { class: 'xp-turn', lang: lang === 'zh' ? 'zh-CN' : 'en' },
       h('div', { class: 'xp-q' },
         h('p', { class: 'xp-q__text' }, question),
         h('span', { class: 'xp-q__meta' },
           h('span', { class: 'xp-tag', html: `${icon('lock')}<span>${fmt(p)}</span>` }),
-          tap ? h('span', { class: 'xp-tag', html: `${icon('tap')}<span>tapped</span>` }) : null)),
+          tap ? h('span', { class: 'xp-tag', html: `${icon('tap')}<span>${s.tapped}</span>` }) : null)),
       this.trace, this.card, this.slot);
   }
 
@@ -1015,31 +1153,32 @@ class Turn {
   }
 
   onEvent(event, data, elapsed) {
+    const s = this.s;
     switch (event) {
       case 'gate':
         this.addStep({
-          iconName: 'shield', label: `Spoiler gate at ${fmt(data.p ?? this.q.p)}`,
-          summary: `${num(data.eligible_total)} moments unlocked · ${num(data.locked_total)} kept from the model`,
+          iconName: 'shield', label: s.gateStep(fmt(data.p ?? this.q.p)),
+          summary: s.gateSummary(num(data.eligible_total), num(data.locked_total)),
         }).classList.add('xp-step--gate');
-        this.setLabel('Looking things up…');
+        this.setLabel(s.lookingUp);
         break;
       case 'tool': {
         const id = data.id || `s${this.nSteps}`;
-        this.addStep({ id, iconName: toolIcon(data.name), label: `${data.label || data.name || 'Working'}…`, pending: true });
+        this.addStep({ id, iconName: toolIcon(data.name), label: `${data.label || data.name || s.working}…`, pending: true });
         this.lookups += 1;
-        this.setLabel(`${data.label || data.name || 'Working'}…`);
+        this.setLabel(`${data.label || data.name || s.working}…`);
         break;
       }
       case 'tool_result': {
-        const s = this.steps.get(data.id);
-        const li = s ? s.li : this.addStep({ iconName: toolIcon(data.name), label: data.name || 'Step' });
+        const st = this.steps.get(data.id);
+        const li = st ? st.li : this.addStep({ iconName: toolIcon(data.name), label: data.name || s.step });
         li.classList.remove('is-pending');
         const label = li.querySelector('.xp-step__label');
         label.textContent = label.textContent.replace(/…$/, '');
-        li.querySelector('.xp-step__summary').textContent = data.summary || 'Done';
-        const ms = s ? performance.now() - s.start : 0;
-        li.querySelector('.xp-step__ms').textContent = ms >= 50 ? `${(ms / 1000).toFixed(1)} s` : '';
-        if (!this.streamed && !this.pending()) this.setLabel('Writing the answer…');
+        li.querySelector('.xp-step__summary').textContent = data.summary || s.done;
+        const ms = st ? performance.now() - st.start : 0;
+        li.querySelector('.xp-step__ms').textContent = ms >= 50 ? s.secs((ms / 1000).toFixed(1)) : '';
+        if (!this.streamed && !this.pending()) this.setLabel(s.writing);
         break;
       }
       case 'delta':
@@ -1050,8 +1189,8 @@ class Turn {
         this.finalise(data, elapsed);
         break;
       case 'error':
-        if (this.streamed) this.cutShort('The answer was cut short.', 'Something went wrong partway through.');
-        else this.fail('The assistant ran into a problem.', data.message || 'Please try again.');
+        if (this.streamed) this.cutShort(...s.cutError);
+        else this.fail(s.problem[0], this.lang === 'en' && data.message ? data.message : s.problem[1]);
         break;
       default:
         break;
@@ -1069,9 +1208,9 @@ class Turn {
     this.trace.classList.toggle('is-working', working);
     if (this.streamed || this.answered || this.failed) {
       if (!this.folded) { this.trace.open = false; this.folded = true; }
-      const look = this.lookups === 1 ? '1 lookup' : `${this.lookups} lookups`;
       const busy = [...this.steps.values()].filter((x) => x.li.classList.contains('is-pending')).pop();
-      this.setLabel(busy ? busy.li.querySelector('.xp-step__label').textContent : `Gate at ${fmt(this.q.p)} + ${look}`);
+      this.setLabel(busy ? busy.li.querySelector('.xp-step__label').textContent
+        : this.s.traceDone(fmt(this.q.p), this.s.lookups(this.lookups)));
     }
   }
 
@@ -1084,6 +1223,7 @@ class Turn {
 
   finalise(a, elapsed) {
     const app = this.app;
+    const s = this.s;
     const tid = encodeURIComponent(this.title.id);
     this.card.hidden = false;
     this.card.classList.remove('is-streaming');
@@ -1093,7 +1233,7 @@ class Turn {
     if (ev.length) {
       const quote = h('blockquote', { class: 'xp-evidence__quote', hidden: true });
       const chips = ev.map((e) => h('button', {
-        type: 'button', class: 'xp-ev', 'aria-pressed': 'false', 'aria-label': `${TYPE_LABELS[e.type] || e.type} at ${fmt(e.start_s)}`,
+        type: 'button', class: 'xp-ev', 'aria-pressed': 'false', 'aria-label': s.evAt(s.types[e.type] || e.type, fmt(e.start_s)),
         onclick: (evt) => {
           const btn = evt.currentTarget;
           const on = btn.getAttribute('aria-pressed') !== 'true';
@@ -1102,17 +1242,17 @@ class Turn {
           quote.hidden = !on || !e.text;
           quote.textContent = e.text || '';
         },
-      }, h('span', { class: 'xp-ev__t' }, fmt(e.start_s)), h('span', { class: 'xp-ev__type' }, TYPE_LABELS[e.type] || e.type)));
+      }, h('span', { class: 'xp-ev__t' }, fmt(e.start_s)), h('span', { class: 'xp-ev__type' }, s.types[e.type] || e.type)));
       this.card.append(h('div', { class: 'xp-evidence' },
-        h('span', { class: 'xp-evidence__h' }, 'Based on'),
+        h('span', { class: 'xp-evidence__h' }, s.basedOn),
         h('div', { class: 'xp-evidence__chips' }, chips), quote));
     }
 
     const frames = (a.frames || []).filter((f) => f && f.t != null);
     if (frames.length) {
       this.card.append(h('div', { class: 'xp-frames' }, frames.map((f) => h('button', {
-        type: 'button', class: 'xp-frame', title: `Rewind to ${fmt(f.t)}`,
-        'aria-label': `${f.caption || fmt(f.t)}. Rewind the player to ${fmt(f.t)}`,
+        type: 'button', class: 'xp-frame', title: s.rewindTo(fmt(f.t)),
+        'aria-label': s.frameAria(f.caption || fmt(f.t), fmt(f.t)),
         onclick: () => app.rewindTo(f.t),
       },
         h('img', { src: `/api/titles/${tid}/frames/${Math.floor(f.t)}.jpg`, alt: '', loading: 'lazy' }),
@@ -1122,26 +1262,26 @@ class Turn {
     const guard = a.guard || {};
     const dropped = Number(guard.dropped) || 0;
     const guardEl = !guard.checked
-      ? h('span', { class: 'xp-badge', html: `${icon('shield')}<span>Guard not run</span>` })
+      ? h('span', { class: 'xp-badge', html: `${icon('shield')}<span>${s.guardNotRun}</span>` })
       : guard.rewritten
         ? h('span', {
-          class: 'xp-badge xp-badge--rewrite', title: 'The output guard caught something in the draft',
-          html: `${icon('shield')}<span>${dropped ? `Guard removed ${dropped} sentence${dropped > 1 ? 's' : ''}` : 'Guard replaced the draft'}</span>`,
+          class: 'xp-badge xp-badge--rewrite', title: s.guardCaught,
+          html: `${icon('shield')}<span>${dropped ? s.guardRemoved(dropped) : s.guardReplaced}</span>`,
         })
         : h('span', {
-          class: 'xp-badge xp-badge--ok', title: 'Checked for unrevealed names, later plot terms and real people’s names',
-          html: `${icon('shield')}<span>Passed the output guard</span>`,
+          class: 'xp-badge xp-badge--ok', title: s.guardOkTitle,
+          html: `${icon('shield')}<span>${s.guardOk}</span>`,
         });
     const t = a.timing || {};
     const total = t.total_ms ?? a.latency_ms ?? elapsed;
     const timing = t.first_text_ms != null && t.first_text_ms < total - 150
-      ? `first words ${(t.first_text_ms / 1000).toFixed(1)} s · done ${(total / 1000).toFixed(1)} s`
-      : `${(total / 1000).toFixed(1)} s`;
+      ? s.timing((t.first_text_ms / 1000).toFixed(1), (total / 1000).toFixed(1))
+      : s.secs((total / 1000).toFixed(1));
     if (a.cut_off) this.card.classList.add('is-cut');
     this.card.append(h('div', { class: 'xp-answer__foot' }, guardEl,
       a.cut_off ? h('span', {
-        class: 'xp-badge xp-badge--rewrite', title: 'The answer ran out of time; the sentences shown are complete and checked',
-        html: `${icon('clock')}<span>Cut short</span>`,
+        class: 'xp-badge xp-badge--rewrite', title: s.cutTitle,
+        html: `${icon('clock')}<span>${s.cutBadge}</span>`,
       }) : null,
       total != null ? h('span', { class: 'xp-badge', html: `${icon('clock')}<span>${timing}</span>` }) : null));
   }
@@ -1153,7 +1293,7 @@ class Turn {
       h('div', {},
         h('strong', {}, title),
         detail ? h('p', {}, detail) : null,
-        retry ? h('button', { type: 'button', class: 'xp-btn', onclick: () => this.app.retry(question, tap, p) }, 'Ask again') : null));
+        retry ? h('button', { type: 'button', class: 'xp-btn', onclick: () => this.app.retry(question, tap, p) }, this.s.askAgain) : null));
     this.slot.append(box);
     return box;
   }
@@ -1178,31 +1318,31 @@ class Turn {
   }
 
   stopped() {
-    if (this.streamed) this.cutShort('Stopped.', 'You stopped this answer partway through.', 'muted');
-    else this.fail('Stopped.', 'You stopped this answer.', 'muted');
+    if (this.streamed) this.cutShort(...this.s.stoppedCut, 'muted');
+    else this.fail(...this.s.stopped, 'muted');
   }
 
   dropped() {
-    if (this.streamed) this.cutShort('The answer was cut short.', 'The connection dropped. Check your network and ask again.');
-    else this.fail('The connection dropped.', 'Check your network and try again.');
+    if (this.streamed) this.cutShort(...this.s.droppedCut);
+    else this.fail(...this.s.dropped);
   }
 
   /** Per-minute limit: a live countdown, then the retry button. */
   countdown(until) {
-    const box = this.fail('Quick pause: the demo takes a few questions a minute.', ' ', 'slow', false);
+    const box = this.fail(this.s.pause, ' ', 'slow', false);
     if (!box) return null;
     const p = box.querySelector('p');
     const tick = () => {
       const left = Math.ceil((until - Date.now()) / 1000);
       if (left > 0 && box.isConnected) {
-        p.textContent = `You can ask again in ${fmt(left).replace(/^00:/, '0:')}.`;
+        p.textContent = this.s.askIn(fmt(left).replace(/^00:/, '0:'));
         setTimeout(tick, 1000 - (Date.now() % 1000) + 5);
         return;
       }
-      p.textContent = 'You can ask again now.';
+      p.textContent = this.s.askNow;
       const { question, tap, p: at } = this.q;
       if (box.isConnected && !box.querySelector('button')) {
-        box.lastChild.append(h('button', { type: 'button', class: 'xp-btn', onclick: () => this.app.retry(question, tap, at) }, 'Ask again'));
+        box.lastChild.append(h('button', { type: 'button', class: 'xp-btn', onclick: () => this.app.retry(question, tap, at) }, this.s.askAgain));
       }
     };
     tick();
@@ -1211,7 +1351,7 @@ class Turn {
 
   finish() {
     if (this.answered || this.failed) return;
-    if (this.streamed) this.cutShort('The answer was cut short.', 'The stream ended before the answer was complete.');
-    else this.fail('No answer came back.', 'The stream ended early. Please try again.');
+    if (this.streamed) this.cutShort(...this.s.endedCut);
+    else this.fail(...this.s.ended);
   }
 }

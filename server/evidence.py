@@ -141,9 +141,10 @@ def frame_plan(m: Moment, kept: list[Candidate], *, ref_frames=()) -> list[tuple
     for c in kept:
         if c.frame_at is not None:
             t = min(int(c.frame_at), m.fp)
-            wants.append((f"Earlier: {ts(c.frame_at)}", [t, int(c.start_s), m.fp]))
+            cap = f"更早：{ts(c.frame_at)}" if m.lang == "zh" else f"Earlier: {ts(c.frame_at)}"
+            wants.append((cap, [t, int(c.start_s), m.fp]))
     wants += [(cap, [t]) for t, cap in ref_frames]
-    wants.append((f"Paused frame {ts(m.P)}", [m.fp]))
+    wants.append((f"暂停画面 {ts(m.P)}" if m.lang == "zh" else f"Paused frame {ts(m.P)}", [m.fp]))
     return [(cap, [t for t in prefs if 0 <= t <= m.fp]) for cap, prefs in wants]
 
 

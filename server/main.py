@@ -559,7 +559,7 @@ async def _run(runner: Runner, user: str, sid: str, text: str, emit, turn: A.Tur
                 args = A.tool_args(fc.args)
                 if args and turn.args_filter:                  # whole arguments: a cut could hide part of a name
                     args = await asyncio.to_thread(turn.args_filter, args)
-                await emit("tool", {"id": fc.id, "name": fc.name, "label": A.TOOL_LABELS.get(fc.name, fc.name),
+                await emit("tool", {"id": fc.id, "name": fc.name, "label": A.tool_label(fc.name, turn.lang),
                                     "args": A.args_preview(args)})
             for fr in ev.get_function_responses():
                 await emit("tool_result", {"id": fr.id, "name": fr.name, "summary": turn.summaries.get(fr.id, "done")})
@@ -781,7 +781,7 @@ async def ask(body: Ask, request: Request):
     async def work():
         REQUEST_ID.set(rid)
         turn = A.Turn(max_tool_rounds=TOOL_ROUNDS[flow], soft_deadline_s=config.SOFT_DEADLINE_S)
-        turn.deadline = turn.started + config.ASK_DEADLINE_S
+        turn.deadline, turn.lang = turn.started + config.ASK_DEADLINE_S, body.lang
         A.TURN.set(turn)
         rec = {"t0": turn.started, "first_text_ms": None, "held_preamble": 0, "leaked_preamble": 0, "retried": False,
                "fallback": None, "declined": None, "dropped": 0, "dropped_kinds": [], "history_turns": 0, "status": "ok",

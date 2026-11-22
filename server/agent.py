@@ -43,6 +43,24 @@ TOOL_LABELS = {
     "on_screen": "Checking who and what is on screen",
     "look_closer": "Watching the last 30 seconds again",
 }
+TOOL_LABELS_ZH = {
+    "story_so_far": "回顾到目前为止的剧情",
+    "search_moments": "搜索你已经看过的内容",
+    "recent_dialogue": "回听最近的台词",
+    "on_screen": "查看画面里有谁、有什么",
+    "look_closer": "重看最近 30 秒",
+}
+
+
+def tool_label(name: str, lang: str = "en") -> str:
+    """The step-trace label of a lookup / tool, in the question's language."""
+    return (TOOL_LABELS_ZH if lang == "zh" else TOOL_LABELS).get(name, name)
+
+
+def say(lang: str, en: str, zh: str) -> str:
+    return zh if lang == "zh" else en
+
+
 ANSWER_NOW = ("Answer now, in the viewer's language, from the context and the tool results you already have. "
               "Do not call any more tools.")
 
@@ -58,6 +76,7 @@ class Turn:
     history: list = dataclasses.field(default_factory=list)   # earlier turns as types.Content (context flow)
     started: float = dataclasses.field(default_factory=time.monotonic)
     deadline: float = math.inf                  # monotonic time the whole question must be answered by
+    lang: str = "en"                            # the question's language (step labels)
     max_tool_rounds: int = 2
     soft_deadline_s: float = 9.0
     run_calls: int = 0                          # model calls in the current run (the budget counts these)
@@ -119,11 +138,16 @@ def note_story(turn: Turn, m: Moment, out: dict) -> str:
         at = secs(it["at"])
         turn.support.append(Candidate("story", TYPE_LABEL.get(it["type"], it["type"]), at, at, it["text"], frame_at=at,
                                       text_zh=m.text_zh(it.get("ref"))))
-    return (f"Recap up to {out['recap']['up_to']} + " if "recap" in out else "") + f"{len(items)} later moments"
+    if "recap" in out:
+        return say(m.lang, f"Recap up to {out['recap']['up_to']} + {len(items)} later moments",
+                   f"截至 {out['recap']['up_to']} 的回顾 + 之后 {len(items)} 个片段")
+    return say(m.lang, f"{len(items)} moments so far", f"到目前为止 {len(items)} 个片段")
 
 
-def note_dialogue(turn: Turn, lines: list[dict]) -> str:
+def note_dialogue(turn: Turn, lines: list[dict], lang: str = "en") -> str:
     turn.support += [Candidate("line", "line", ln["t"], ln["t"], f"{ln['speaker']}: {ln['text']}") for ln in lines]
+    if lang == "zh":
+        return f"{len(lines)} 句台词" + (f"（{lines[0]['at']} 起）" if lines else "")
     return f"{len(lines)} lines" + (f" since {lines[0]['at']}" if lines else "")
 
 
@@ -141,9 +165,12 @@ def note_on_screen(turn: Turn, m: Moment, out: dict) -> str:
                          for fact, z in zip(e.get("facts", []), zh)]
     if "tapped" in out:
         e = ents[out["tapped"]]
-        turn.ref_frames = [(t, f"{e['label']} at {ts(t)}") for t in e.get("reference_frames", [])]
-        return f"Tapped: {e['label']}"
-    return f"{len(ents)} on screen" if ents else "Nothing identified on screen"
+        turn.ref_frames = [(t, say(m.lang, f"{e['label']} at {ts(t)}", f"{e['label']}（{ts(t)}）"))
+                           for t in e.get("reference_frames", [])]
+        return say(m.lang, f"Tapped: {e['label']}", f"点中：{e['label']}")
+    if ents:
+        return say(m.lang, f"{len(ents)} on screen", f"画面里有 {len(ents)} 个")
+    return say(m.lang, "Nothing identified on screen", "画面里还没有识别出任何东西")
 
 
 # ── tools ────────────────────────────────────────────────────────────
@@ -181,7 +208,8 @@ async def search_moments(query: str, tool_context: ToolContext) -> dict:
         turn.support.append(Candidate("search", TYPE_LABEL.get(h.item_type, h.item_type), h.start_s, h.end_s, h.text,
                                       frame_at=h.start_s if h.item_type in ("scene", "event", "shot_caption") else None,
                                       text_zh=m.text_zh((h.item_type, h.item_id))))
-    _summarise(tool_context, f"{len(results)} matches, all before {ts(m.P)}")
+    _summarise(tool_context, say(m.lang, f"{len(results)} matches, all before {ts(m.P)}",
+                                 f"{len(results)} 条结果，都在 {ts(m.P)} 之前"))
     return {"query": query, "results": results}
 
 
@@ -190,7 +218,8 @@ async def recent_dialogue(seconds: int, tool_context: ToolContext) -> dict:
     further back; at most 240), with who said each line when known."""
     m = moment_of(tool_context.state)
     lines = await asyncio.to_thread(m.recent_dialogue, min(max(int(seconds or 60), 10), 240))
-    _summarise(tool_context, note_dialogue(_turn(), lines) if m.has_subtitles else "No subtitles for this film")
+    _summarise(tool_context, note_dialogue(_turn(), lines, m.lang) if m.has_subtitles
+               else say(m.lang, "No subtitles for this film", "这部影片没有字幕"))
     out = {"lines": [{k: v for k, v in ln.items() if k != "t"} for ln in lines]}
     if not m.has_subtitles:
         out["note"] = "This film has no subtitle track: what was said is not available."
@@ -216,7 +245,7 @@ async def look_closer(question: str, tool_context: ToolContext) -> dict:
     # the whole tool (stills + the nested call) fits in what is left of the question minus the answer step after it
     budget = min(config.LOOK_TIMEOUT_S, turn.deadline - time.monotonic() - config.ANSWER_RESERVE_S)
     if budget < 1.0:
-        _summarise(tool_context, "No time left to look closer")
+        _summarise(tool_context, say(m.lang, "No time left to look closer", "没有时间再细看了"))
         return {"observation": "", "note": "no time left to look closer; answer from what you have"}
     end = time.monotonic() + budget
     chars = ", ".join(c["label"] for c in m.known_characters()) or "none yet"
@@ -236,7 +265,7 @@ async def look_closer(question: str, tool_context: ToolContext) -> dict:
         jpegs = [ctx_frame] + [None] * (len(wanted) - 1)
     frame, stills = jpegs[0], [(t, b) for t, b in zip(wanted[1:], jpegs[1:]) if b is not None]
     if frame is None and not stills and not video:
-        _summarise(tool_context, "Could not read the frames in time")
+        _summarise(tool_context, say(m.lang, "Could not read the frames in time", "没能及时读取画面"))
         return {"observation": "", "note": "the frames could not be read in time; answer from what you have"}
     if video:
         # whole-film clip from Cloud Storage (has audio, but adds tens of seconds of latency)
@@ -244,12 +273,14 @@ async def look_closer(question: str, tool_context: ToolContext) -> dict:
             file_data=types.FileData(file_uri=f"gs://{config.ASSET_BUCKET}/assets/{m.title.sha}.mp4", mime_type="video/mp4"),
             video_metadata=types.VideoMetadata(start_offset=f"{win[0]:.1f}s", end_offset=f"{win[1]:.1f}s", fps=1)))
         span = f"frame + video {ts(win[0])}–{ts(win[1])}"
+        span_zh = f"当前画面 + 视频 {ts(win[0])}–{ts(win[1])}"
     elif win:
         for t, jpeg in stills:
             parts += [types.Part.from_text(text=f"[{ts(t)}]"), types.Part.from_bytes(data=jpeg, mime_type="image/jpeg")]
         span = f"frame + {len(stills)} stills {ts(win[0])}–{ts(win[1])}"
+        span_zh = f"当前画面 + {len(stills)} 张截图 {ts(win[0])}–{ts(win[1])}"
     else:
-        span = "current frame"
+        span, span_zh = "current frame", "当前画面"
     if frame is not None:
         parts += [types.Part.from_text(text=f"[{ts(m.P)}] current frame"),
                   types.Part.from_bytes(data=frame, mime_type="image/jpeg")]
@@ -257,10 +288,10 @@ async def look_closer(question: str, tool_context: ToolContext) -> dict:
     try:
         r = await asyncio.wait_for(vision_generate(parts), max(0.1, end - time.monotonic()))
     except Exception as e:                                     # noqa: BLE001 — timeout / model error: answer without it
-        _summarise(tool_context, "Could not look closer in time")
+        _summarise(tool_context, say(m.lang, "Could not look closer in time", "没能及时细看"))
         return {"observation": "", "note": f"looking closer failed ({type(e).__name__}); answer from what you have"}
     turn.add_usage(r.usage_metadata)
-    _summarise(tool_context, f"Looked at the {span}")
+    _summarise(tool_context, say(m.lang, f"Looked at the {span}", f"看了{span_zh}"))
     return {"observation": m.sanitize((r.text or "").strip()), "looked_at": span}
 
 
