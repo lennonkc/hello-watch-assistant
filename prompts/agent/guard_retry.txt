@@ -1,1 +1,1 @@
-Rewrite your answer without these terms, which the viewer has not seen yet: {terms}
+Important: the viewer has not reached the point in the film where the following words become safe, so your reply must not contain them or any synonym or hint of them: {terms}. Answer the question again using only what your tools show, and if that is not enough, say it has not been shown yet.

@@ -37,10 +37,11 @@ RRF_K = 60
 class Item:
     item_type: str
     item_id: str
-    start_s: float              # item start time (identity isolation is judged on it)
+    start_s: float
     end_s: float
-    eligible_from: float        # earliest eligible P (margin included); eligible ⇔ eligible_from ≤ P
+    eligible_from: float        # earliest eligible P by time and review state (margin included)
     text: str | None            # video windows have no text
+    span: tuple[float, float] | None = None   # interval identity isolation is judged over (default start_s–end_s)
 
 
 @dataclasses.dataclass
@@ -79,6 +80,18 @@ def margins(pack: dict, floor: dict | None = None) -> dict:
 # ── Gate (spec §5) ───────────────────────────────────────────────────
 
 class Gate:
+    """Eligibility at P. On top of the per-table time / review rules of §5.2 every item must also pass:
+
+    - visibility: an item is visible only once it is over and revealed, i.e. scenes and shot captions at
+      max(reveal_at_s, end_s), events at max(reveal_at_s, t_s), objects at max(reveal_at_s, first_seen_s), facts at
+      max(reveal_at_s, evidence_t_s), recaps at max(reveal_at_s, upto_s), each plus its margin;
+    - story end: nothing that starts at / after `story_end_s` or reveals after it (credits material); cues are exempt;
+    - relations: every character linked through `item_characters` (and a fact's owner, a shot's on-screen characters)
+      must itself be eligible at P;
+    - supporting cues: every cue linked through `item_cues` must be eligible at P;
+    - identity isolation (§5.3), judged over the item's whole interval (`Item.span`), see `isolated`.
+    """
+
     def __init__(self, pack: dict, P: float, allow_auto: bool = False, margin_floor: dict | None = None):
         self.pack, self.P, self.allow_auto = pack, float(P), allow_auto
         self.m = margins(pack, margin_floor)
@@ -91,11 +104,26 @@ class Gate:
         for r in pack.get("shot_entities", []):
             if r.get("character_id"):
                 self.item_chars.setdefault(("shot_caption", r["shot_caption_id"]), set()).add(r["character_id"])
+        self.item_cues: dict = {}
+        for r in pack.get("item_cues", []):
+            self.item_cues.setdefault((r["item_type"], r["item_id"]), set()).add(r["cue_id"])
+        self.cue_end = {c["cue_id"]: c["end_s"] for c in pack.get("cues", [])}
+        links = pack.get("identity_links", [])
+        linked = {lk[k] for lk in links for k in ("a_character_id", "b_character_id")}
+        # §5.2 appearances: prereviewed+ (reviewed for characters in identity links), start ≤ P, truncated at P
         self.appear: dict = {}
         for a in pack.get("appearances", []):
-            self.appear.setdefault(a["character_id"], []).append((a["start_s"], a["end_s"]))
-        self.pending = [lk for lk in pack.get("identity_links", [])
-                        if not (self.reviewed(lk["review_state"]) and self.le(lk["reveal_at_s"] + self.m["gate_margin_reviewed_reveal_s"]))]
+            ok = self.reviewed(a["review_state"]) if a["character_id"] in linked else self.pre(a["review_state"])
+            if ok and a["character_id"] in self.chars and self.le(a["start_s"]):
+                self.appear.setdefault(a["character_id"], []).append((a["start_s"], max(a["start_s"], min(a["end_s"], self.P))))
+        # a link is pending until it is reviewed, revealed (+ margin) and both of its characters are eligible
+        self.pending = []
+        for lk in links:
+            if not (self.reviewed(lk["review_state"]) and self.le(lk["reveal_at_s"] + self.m["gate_margin_reviewed_reveal_s"])
+                    and self.le(self.char_from(lk["a_character_id"])) and self.le(self.char_from(lk["b_character_id"]))):
+                fa = (self.chars.get(lk["a_character_id"]) or {}).get("first_appears_s")
+                self.pending.append({"a": lk["a_character_id"], "b": lk["b_character_id"], "reveal_at_s": lk["reveal_at_s"],
+                                     "window_start": max(0.0, fa) if fa is not None else 0.0})
 
     def le(self, t: float) -> bool:
         return t <= self.P + EPS
@@ -112,57 +140,87 @@ class Gate:
             return math.inf
         return c["first_appears_s"] + self.m["gate_margin_first_appears_s"]
 
-    def isolated(self, item_type: str, item_id: str, t: float) -> bool:
-        """§5.3: under a not-yet-eligible identity link (a, b, R), items tied to b within [first_appears(a), R) are ineligible (unless b is on screen)."""
-        linked = self.item_chars.get((item_type, item_id))
-        if not linked:
-            return False
+    def char_isolated(self, cid: str, start: float, end: float | None = None) -> bool:
+        """§5.3 for one character over [start, end]: while an identity link (a, b, R) is pending, nothing in
+        [first_appears(a), R) may be attached to b, unless one of b's own appearances covers the whole interval."""
+        end = start if end is None else end
         for lk in self.pending:
-            a = self.chars.get(lk["a_character_id"]) or {}
-            fa = a.get("first_appears_s")
-            if fa is None or lk["b_character_id"] not in linked:
+            if lk["b"] != cid or not (start < lk["reveal_at_s"] and end >= lk["window_start"]):
                 continue
-            on_screen = any(s <= t <= e for s, e in self.appear.get(lk["b_character_id"], []))
-            if fa <= t < lk["reveal_at_s"] and not on_screen:
+            if not any(s <= start and end <= e for s, e in self.appear.get(cid, [])):
                 return True
         return False
 
+    def isolated(self, item_type: str, item_id: str, start: float, end: float | None = None) -> bool:
+        """True if any character linked to the item is isolated over the item's interval [start, end]."""
+        return any(self.char_isolated(cid, start, end) for cid in self.item_chars.get((item_type, item_id), ()))
+
+    def relations_ok(self, it: Item) -> bool:
+        """Linked characters all eligible at P and none isolated; linked cues all eligible at P."""
+        start, end = it.span or (it.start_s, it.end_s)
+        for cid in self.item_chars.get((it.item_type, it.item_id), ()):
+            if not self.le(self.char_from(cid)) or self.char_isolated(cid, start, end):
+                return False
+        for cue_id in self.item_cues.get((it.item_type, it.item_id), ()):
+            if cue_id not in self.cue_end or not self.le(self.cue_end[cue_id] + self.m["gate_margin_cue_s"]):
+                return False
+        return True
+
     def candidates(self) -> list[Item]:
-        """Every retrievable item with its earliest eligible time; inf if it fails review."""
+        """Every retrievable item with its earliest eligible time by time and review state; inf if it can never be
+        eligible (fails review, or credits material). Relations and isolation depend on P and are checked in
+        `eligible`."""
         p, m, inf = self.pack, self.m, math.inf
+        story_end = (p.get("asset") or {}).get("story_end_s")
+        story_end = inf if story_end is None else story_end
+
+        def inside(start: float, reveal: float) -> bool:          # not credits material
+            return start < story_end and reveal <= story_end + EPS
+
         out = []
         for c in p.get("cues", []):
-            if c["kind"] != "lyrics":
+            if c["kind"] != "lyrics" and (c["text"] or "").strip():      # generated tracks can contain blank cues
                 out.append(Item("cue", c["cue_id"], c["start_s"], c["end_s"], c["end_s"] + m["gate_margin_cue_s"], c["text"]))
         for s in p.get("scenes", []):
             mm = m["gate_margin_scene_snapped_s"] if s["snapped"] else m["gate_margin_scene_unsnapped_s"]
-            ok = self.pre(s["review_state"])
+            vis = max(s["reveal_at_s"], s["end_s"])
+            ok = self.pre(s["review_state"]) and inside(s["start_s"], s["reveal_at_s"])
             loc = f"{s['location_en']}. " if s.get("location_en") else ""
-            out.append(Item("scene", s["scene_id"], s["start_s"], s["end_s"], s["reveal_at_s"] + mm if ok else inf,
-                            loc + s["summary_en"]))
+            out.append(Item("scene", s["scene_id"], s["start_s"], s["end_s"], vis + mm if ok else inf,
+                            loc + s["summary_en"], (s["start_s"], vis)))
         for e in p.get("events", []):
             ok = self.reviewed(e["review_state"]) if (e["kind"] == "reveal" or e["spoiler_critical"]) else self.pre(e["review_state"])
-            out.append(Item("event", e["event_id"], e["t_s"], e["reveal_at_s"],
-                            e["reveal_at_s"] + m["gate_margin_event_s"] if ok else inf, e["text_en"]))
+            vis = max(e["reveal_at_s"], e["t_s"])
+            ok = ok and inside(e["t_s"], e["reveal_at_s"])
+            out.append(Item("event", e["event_id"], e["t_s"], e["reveal_at_s"], vis + m["gate_margin_event_s"] if ok else inf,
+                            e["text_en"], (min(e["t_s"], e["reveal_at_s"]), vis)))
         for o in p.get("objects", []):
             ok = self.reviewed(o["review_state"]) if o["spoiler_critical"] else self.pre(o["review_state"])
+            vis = max(o["reveal_at_s"], o["first_seen_s"])
+            ok = ok and inside(o["first_seen_s"], o["reveal_at_s"])
             out.append(Item("object", o["object_id"], o["first_seen_s"], o["reveal_at_s"],
-                            o["reveal_at_s"] + m["gate_margin_object_s"] if ok else inf, f"{o['name_en']}: {o['description_en']}"))
+                            vis + m["gate_margin_object_s"] if ok else inf, f"{o['name_en']}: {o['description_en']}",
+                            (min(o["first_seen_s"], o["reveal_at_s"]), vis)))
         for f in p.get("character_facts", []):
-            t = max(f["reveal_at_s"] + m["gate_margin_reviewed_reveal_s"], self.char_from(f["character_id"]))
-            out.append(Item("character_fact", f["fact_id"], f["reveal_at_s"], f["reveal_at_s"],
-                            t if self.reviewed(f["review_state"]) else inf, f["text_en"]))
+            ev_t = f["evidence_t_s"] if f.get("evidence_t_s") is not None else f["reveal_at_s"]
+            vis = max(f["reveal_at_s"], ev_t)
+            t = max(vis + m["gate_margin_reviewed_reveal_s"], self.char_from(f["character_id"]))
+            ok = self.reviewed(f["review_state"]) and inside(min(ev_t, f["reveal_at_s"]), f["reveal_at_s"])
+            out.append(Item("character_fact", f["fact_id"], f["reveal_at_s"], f["reveal_at_s"], t if ok else inf,
+                            f["text_en"], (min(ev_t, f["reveal_at_s"]), vis)))
         for s in p.get("shot_captions", []):
+            vis = max(s["reveal_at_s"], s["end_s"])
+            ok = self.pre(s["review_state"]) and inside(s["start_s"], s["reveal_at_s"])
             out.append(Item("shot_caption", s["shot_caption_id"], s["start_s"], s["end_s"],
-                            s["reveal_at_s"] + m["gate_margin_scene_snapped_s"] if self.pre(s["review_state"]) else inf,
-                            s["caption_en"]))
+                            vis + m["gate_margin_scene_snapped_s"] if ok else inf, s["caption_en"], (s["start_s"], vis)))
         for r in p.get("recaps", []):
+            vis = max(r["reveal_at_s"], r["upto_s"])
+            ok = self.pre(r["review_state"]) and r["upto_s"] <= story_end + EPS and r["reveal_at_s"] <= story_end + EPS
             out.append(Item("recap", r["recap_id"], r["upto_s"], r["upto_s"],
-                            r["reveal_at_s"] + m["gate_margin_scene_snapped_s"] if self.pre(r["review_state"]) else inf,
-                            r["text_en"]))
+                            vis + m["gate_margin_scene_snapped_s"] if ok else inf, r["text_en"], (r["upto_s"], vis)))
         for w in p.get("video_windows", []):
             out.append(Item("video_window", w["window_id"], w["start_s"], w["end_s"],
-                            w["end_s"] + m["gate_margin_scene_snapped_s"], None))
+                            w["end_s"] + m["gate_margin_scene_snapped_s"] if w["start_s"] < story_end else inf, None))
         return out
 
     def eligible(self, types=None) -> list[Item]:
@@ -170,8 +228,7 @@ class Gate:
         if a.get("story_start_s") is not None and self.P + EPS < a["story_start_s"]:
             return []                                    # §5.4: no content answers before the story starts
         return [it for it in self.candidates()
-                if (types is None or it.item_type in types) and self.le(it.eligible_from)
-                and not self.isolated(it.item_type, it.item_id, it.start_s)]
+                if (types is None or it.item_type in types) and self.le(it.eligible_from) and self.relations_ok(it)]
 
 
 # ── Ranking (within the eligible set only) ───────────────────────────
@@ -228,10 +285,14 @@ def _hit(it: Item, score: float, **kw) -> Hit:
 
 
 def search(db_path, P: float, query: str, k: int = 5, *, mode: str = "vector", allow_auto: bool = False,
-           types=None, qvec=None, embed_query=None, margin_floor: dict | None = None) -> list[Hit]:
-    """mode ∈ vector (single cosine ranking) / fts / hybrid (RRF over text vectors, video-window vectors, and full text). qvec may be passed directly; otherwise embed_query(q) or the default Gemini query embedding is used."""
+           types=None, qvec=None, embed_query=None, margin_floor: dict | None = None, keep=None) -> list[Hit]:
+    """mode ∈ vector (single cosine ranking) / fts / hybrid (RRF over text vectors, video-window vectors, and full text). qvec may be passed directly; otherwise embed_query(q) or the default Gemini query embedding is used.
+    `keep(item) -> bool` narrows the eligible set before ranking (e.g. one subtitle track, no very short lines), so the
+    top k are taken from what the caller can actually use."""
     pack = load_pack(db_path)
     items = Gate(pack, P, allow_auto, margin_floor).eligible(types)      # ① gate first
+    if keep is not None:
+        items = [it for it in items if keep(it)]
     vec, fts = [], []
     if mode in ("vector", "hybrid"):                                      # ② then rank within the eligible set
         if qvec is None:
@@ -277,3 +338,54 @@ def query_vector(q: str):
     if os.environ.get("CEDAR_EMBED", "1") == "0":
         raise RuntimeError("CEDAR_EMBED=0: query embedding disabled")
     return np.asarray(_qvec(q), dtype=np.float32)
+
+
+# ── Online query embedding: one bounded attempt, never the ingest retry loop ──
+
+class OnlineEmbedder:
+    """Query embeddings for a live answer. One attempt with a hard timeout and no retries (the ingest client retries
+    for up to 75 s, which is fine for a batch job and fatal for a viewer waiting on an answer). Any failure returns
+    None so the caller ranks full text instead, and a failure pauses embedding for `cooldown_s` so later questions do
+    not each wait for the timeout again. Successful vectors are cached per query."""
+
+    def __init__(self, timeout_s: float = 1.5, cooldown_s: float = 60.0, embed=None, cache_size: int = 512):
+        self.timeout_s, self.cooldown_s = timeout_s, cooldown_s
+        self._embed = embed or self._gemini
+        self._cache: dict[str, np.ndarray] = {}
+        self._cache_size = cache_size
+        self.down_until = 0.0
+        self.last_error: str | None = None
+
+    async def _gemini(self, text: str) -> list[float]:
+        from google.genai import types
+        r = await _online_client().aio.models.embed_content(
+            model=embed.MODEL, contents=text,
+            config=types.EmbedContentConfig(output_dimensionality=embed.DIM, http_options=types.HttpOptions(
+                timeout=int(self.timeout_s * 1000), retry_options=types.HttpRetryOptions(attempts=1))))
+        return r.embeddings[0].values
+
+    async def vector(self, q: str):
+        import asyncio
+        import time
+        if q in self._cache:
+            return self._cache[q]
+        if os.environ.get("CEDAR_EMBED", "1") == "0" or time.monotonic() < self.down_until:
+            return None
+        try:
+            vals = await asyncio.wait_for(self._embed(embed.QUERY_PREFIX.format(q)), self.timeout_s)
+        except Exception as e:                       # noqa: BLE001 — timeout, quota, permissions: rank full text instead
+            self.last_error = f"{type(e).__name__}: {str(e)[:200]}"
+            self.down_until = time.monotonic() + self.cooldown_s
+            return None
+        v = np.asarray(vals, dtype=np.float32)
+        v = v / (np.linalg.norm(v) or 1.0)
+        if len(self._cache) >= self._cache_size:
+            self._cache.pop(next(iter(self._cache)))
+        self._cache[q] = v
+        return v
+
+
+@functools.lru_cache(maxsize=1)
+def _online_client():
+    from ingest import gemini
+    return gemini.client()

@@ -47,3 +47,21 @@ QUESTION_MAX_CHARS = 300
 
 NEAR_WINDOW_S = float(os.environ.get("WATCH_NEAR_WINDOW_S", "30"))
 LOOK_VIDEO = os.environ.get("WATCH_LOOK_VIDEO", "0") == "1"      # near window as a gs:// video clip instead of stills
+
+# Online answer path: deadlines (seconds). Every model / embedding call is bounded; see docs/online-qa.md §4a.
+EMBED_TIMEOUT_S = float(os.environ.get("WATCH_EMBED_TIMEOUT_S", "1.5"))     # query embedding, one attempt
+EMBED_COOLDOWN_S = float(os.environ.get("WATCH_EMBED_COOLDOWN_S", "60"))    # after a failure: full-text ranking only
+
+# Benchmark runs against a deployed revision: requests with this value in `X-Watch-Bench-Token` skip the limiter
+BENCH_TOKEN = os.environ.get("WATCH_BENCH_TOKEN", "")
+
+# Answer flow: `context` (server-built context + two tools, streamed) or `tools` (five tools, one answer event).
+# Bench-token requests may pick one per request with `X-Watch-Flow`.
+FLOW = os.environ.get("WATCH_FLOW", "context")
+THINKING_LEVEL = os.environ.get("WATCH_THINKING_LEVEL", "LOW")
+TOOL_ROUNDS = int(os.environ.get("WATCH_TOOL_ROUNDS", "2"))                  # context flow; the tools flow allows 3
+SOFT_DEADLINE_S = float(os.environ.get("WATCH_SOFT_DEADLINE_S", "9"))        # after it: no more tool calls
+STEP_TIMEOUT_S = float(os.environ.get("WATCH_STEP_TIMEOUT_S", "12"))         # longest silence from the agent run
+ASK_DEADLINE_S = float(os.environ.get("WATCH_ASK_DEADLINE_S", "25"))         # whole question, retry included
+LOOK_TIMEOUT_S = float(os.environ.get("WATCH_LOOK_TIMEOUT_S", "10"))         # nested look_closer model call
+HISTORY_TURNS = int(os.environ.get("WATCH_HISTORY_TURNS", "6"))              # earlier turns sent with a question

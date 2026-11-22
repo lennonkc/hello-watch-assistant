@@ -10,6 +10,8 @@ import collections
 import contextlib
 import datetime as dt
 import functools
+import hmac
+import json
 import logging
 import math
 import re
@@ -19,6 +21,8 @@ import uuid
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from google.adk.agents.invocation_context import LlmCallsLimitExceededError
+from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -26,7 +30,9 @@ from pydantic import BaseModel, Field
 
 from server import agent as A
 from server import config, guard, prompts
-from server.knowledge import Moment
+from server import context as C
+from server.answer import GuardedAnswer, split_ready
+from server.knowledge import Moment, ts
 from server.packs import STORE
 
 log = logging.getLogger("watch")
@@ -48,7 +54,6 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="Hello Watch Assistant", lifespan=lifespan, docs_url=None, redoc_url=None)
 session_service = InMemorySessionService()
-runner = Runner(app_name=APP_NAME, agent=A.build_agent(), session_service=session_service)
 
 
 # ── catalog, media and gate ─────────────────────────────────────────
@@ -123,12 +128,15 @@ def gate(title_id: str, p: float):
 # ── rate limiting (per instance; max instances is capped at deploy time) ──
 
 class Limiter:
+    """Per-IP questions per minute, per-IP and total questions per day. `check` returns None (allowed) or the 429 body:
+    `{"message", "limit": "per_minute" | "daily", "scope": "ip" | "total", "retry_after_s"}` so the UI can word it."""
+
     def __init__(self):
         self.minute: dict[str, collections.deque] = collections.defaultdict(collections.deque)
         self.day: dict[str, int] = collections.Counter()
         self.total, self.today = 0, dt.date.today()
 
-    def check(self, ip: str) -> str | None:
+    def check(self, ip: str) -> dict | None:
         now, today = time.monotonic(), dt.date.today()
         if today != self.today:
             self.day.clear()
@@ -137,9 +145,14 @@ class Limiter:
         while q and now - q[0] > 60:
             q.popleft()
         if len(q) >= config.ASK_PER_MINUTE:
-            return "You're asking quickly. Give it a few seconds and try again."
+            wait = max(1, math.ceil(60 - (now - q[0]))) if q else 60
+            return {"message": "You're asking quickly. Give it a few seconds and try again.", "limit": "per_minute",
+                    "scope": "ip", "retry_after_s": wait}
         if self.day[ip] >= config.ASK_PER_DAY_PER_IP or self.total >= config.ASK_PER_DAY_TOTAL:
-            return "The demo has reached its daily question limit. Please come back tomorrow."
+            midnight = dt.datetime.combine(today + dt.timedelta(days=1), dt.time())
+            return {"message": "The demo has reached its daily question limit. Please come back tomorrow.",
+                    "limit": "daily", "scope": "ip" if self.day[ip] >= config.ASK_PER_DAY_PER_IP else "total",
+                    "retry_after_s": max(1, int((midnight - dt.datetime.now()).total_seconds()))}
         q.append(now)
         self.day[ip] += 1
         self.total += 1
@@ -147,6 +160,7 @@ class Limiter:
 
 
 LIMITER = Limiter()
+BENCH_HEADER = "x-watch-bench-token"
 
 
 def client_ip(request: Request) -> str:
@@ -154,11 +168,28 @@ def client_ip(request: Request) -> str:
     return fwd.split(",")[0].strip() if fwd else (request.client.host if request.client else "?")
 
 
-# ── conversations ───────────────────────────────────────────────────
+def is_bench(request: Request) -> bool:
+    """Benchmark runs against a deployed revision skip the limiter when they carry `WATCH_BENCH_TOKEN` in the
+    `X-Watch-Bench-Token` header. Constant-time compare; the token is never logged."""
+    sent = request.headers.get(BENCH_HEADER)
+    return bool(config.BENCH_TOKEN and sent) and hmac.compare_digest(sent.encode(), config.BENCH_TOKEN.encode())
+
+
+# ── agents and conversations ────────────────────────────────────────
+
+RUNNERS = {"context": Runner(app_name=APP_NAME, agent=A.build_context_agent(), session_service=session_service),
+           "tools": Runner(app_name=APP_NAME, agent=A.build_agent(), session_service=session_service)}
+TOOL_ROUNDS = {"context": config.TOOL_ROUNDS, "tools": 3}
+TIMEOUT_FALLBACK = {
+    "en": "Sorry, that took me too long to work out. Please ask again in a moment.",
+    "zh": "抱歉,这个问题我想得太久了,请稍后再问一次。",
+}
+EPS = 1e-9
+
 
 class Conversations:
-    """Browser session → ADK session. A seek backwards (or a guard rewrite) starts a fresh ADK session, because
-    earlier turns may contain things that are not eligible at the new P."""
+    """`tools` flow: browser session → ADK session. A seek backwards (or a guard rewrite) starts a fresh ADK session,
+    because earlier turns may contain things that are not eligible at the new P."""
     MAX_TURNS = 8
 
     def __init__(self):
@@ -176,11 +207,43 @@ class Conversations:
         self.map[key] = cur
         self.map.move_to_end(key)
         while len(self.map) > 500:
-            self.map.popitem(last=False)
+            old_key, old = self.map.popitem(last=False)
+            with contextlib.suppress(Exception):
+                await session_service.delete_session(app_name=APP_NAME, user_id=old_key, session_id=old["sid"])
         return cur["sid"]
 
 
 CONVERSATIONS = Conversations()
+
+
+class History:
+    """`context` flow: per browser session, the turns the viewer actually received — (P, question, the answer exactly
+    as sent) — so a dropped draft or a tool payload never reaches a later prompt. A question at P gets only the turns
+    asked at or before P: the gate is monotone in P, so everything in them is still eligible; after a seek backwards
+    the later turns are hidden, not deleted, and come back when the viewer catches up."""
+    MAX_KEYS, MAX_TURNS = 500, 12
+
+    def __init__(self):
+        self.map: collections.OrderedDict = collections.OrderedDict()
+
+    def contents(self, key: str, p: float) -> tuple[list[types.Content], int]:
+        turns = [t for t in self.map.get(key, []) if t["p"] <= p + EPS][-config.HISTORY_TURNS:]
+        out = []
+        for t in turns:
+            out += [types.Content(role="user", parts=[types.Part.from_text(text=f"[asked at {ts(t['p'])}] {t['q']}")]),
+                    types.Content(role="model", parts=[types.Part.from_text(text=t["a"])])]
+        return out, len(turns)
+
+    def add(self, key: str, p: float, q: str, a: str) -> None:
+        turns = self.map.setdefault(key, [])
+        turns.append({"p": p, "q": q, "a": a})
+        del turns[:-self.MAX_TURNS]
+        self.map.move_to_end(key)
+        while len(self.map) > self.MAX_KEYS:
+            self.map.popitem(last=False)
+
+
+HISTORY = History()
 
 
 # ── ask ─────────────────────────────────────────────────────────────
@@ -208,20 +271,201 @@ def sse(event: str, data) -> str:
     return f"event: {event}\ndata: {A.dumps(data)}\n\n"
 
 
-async def _run_agent(user: str, sid: str, text: str, state: dict, emit) -> str:
-    """One agent run; tool calls / results are forwarded to `emit` as they happen. Returns the final text."""
+class Streamer:
+    """Routes streamed model text into the guarded answer, one model call ("step") at a time.
+
+    A step's first sentence is held until a second sentence starts or the step ends without a function call: text
+    the model writes before calling a tool ("Let me look closer.") is never sent. If a step sends text and then calls
+    a tool anyway, that is counted as `leaked_preamble` (it was guarded, so it is safe, just out of place)."""
+
+    def __init__(self, answer: GuardedAnswer, emit, rec: dict):
+        self.answer, self.emit, self.rec = answer, emit, rec
+        self.pending, self.released = "", False
+
+    async def _send(self, deltas: list[str]) -> None:
+        for d in deltas:
+            if self.rec.get("first_text_ms") is None:
+                self.rec["first_text_ms"] = int((time.monotonic() - self.rec["t0"]) * 1000)
+            await self.emit("delta", {"text": d})
+
+    async def text(self, chunk: str) -> None:
+        if self.released:
+            await self._send(self.answer.feed(chunk))
+            return
+        self.pending += chunk
+        ready, rest = split_ready(self.pending)
+        if ready and rest.strip():
+            self.released = True
+            held, self.pending = self.pending, ""
+            await self._send(self.answer.feed(held))
+
+    async def end_step(self, has_calls: bool) -> None:
+        if has_calls:
+            if self.pending.strip() or self.answer.buf.strip():
+                self.rec["held_preamble"] += 1
+                log.info("dropped text written before a tool call: %r", (self.pending + self.answer.buf)[:200])
+            if self.released:
+                self.rec["leaked_preamble"] += 1
+            self.pending, self.answer.buf = "", ""
+        else:
+            held, self.pending = self.pending, ""
+            await self._send(self.answer.feed(held) + self.answer.flush())
+        self.released = False
+
+    async def abort(self) -> None:
+        """The run stopped early (deadline, error): send the sentences that are complete, drop a half-written one."""
+        held, self.pending = self.pending, ""
+        await self._send(self.answer.feed(held))
+        if self.answer.buf.strip():
+            self.rec["cut_off"] = True
+        self.answer.buf, self.released = "", False
+
+
+async def _run(runner: Runner, user: str, sid: str, text: str, emit, turn: A.Turn, deadline: float,
+               sink: Streamer | None = None, streaming: bool = True, state_delta: dict | None = None) -> tuple[str, str]:
+    """One agent run → (final text, status ∈ ok / timeout / limit / error). Tool calls and results go to `emit` as
+    they happen; with a `sink`, model text goes to it as it streams. The run is bounded twice: no event for
+    STEP_TIMEOUT_S (a stalled model call or tool) and the question's overall deadline."""
     msg = types.Content(role="user", parts=[types.Part.from_text(text=text)])
-    final = ""
-    async for ev in runner.run_async(user_id=user, session_id=sid, new_message=msg, state_delta=state):
-        for fc in ev.get_function_calls():
-            await emit("tool", {"id": fc.id, "name": fc.name, "label": A.TOOL_LABELS.get(fc.name, fc.name),
-                                "args": A.args_preview(fc.args)})
-        for fr in ev.get_function_responses():
-            await emit("tool_result", {"id": fr.id, "name": fr.name,
-                                       "summary": A._turn().summaries.get(fr.id, "done")})
-        if ev.is_final_response() and ev.content and ev.content.parts:
-            final += "".join(p.text for p in ev.content.parts if p.text and not p.thought)
-    return final.strip()
+    rc = RunConfig(streaming_mode=StreamingMode.SSE if streaming else StreamingMode.NONE,
+                   max_llm_calls=turn.max_tool_rounds + 2)
+    turn.run_calls = 0
+    final, status, streamed = "", "ok", False
+    agen = runner.run_async(user_id=user, session_id=sid, new_message=msg, run_config=rc, state_delta=state_delta)
+    try:
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                raise TimeoutError
+            try:
+                ev = await asyncio.wait_for(agen.__anext__(), min(config.STEP_TIMEOUT_S, left))
+            except StopAsyncIteration:
+                break
+            parts = (ev.content.parts or []) if ev.content else []
+            chunk = "".join(p.text for p in parts if p.text and not p.thought)
+            if ev.partial:
+                if chunk:
+                    streamed = True
+                    if sink:
+                        await sink.text(chunk)
+                continue
+            calls = ev.get_function_calls()
+            for fc in calls:
+                turn.tools.append(fc.name)
+                await emit("tool", {"id": fc.id, "name": fc.name, "label": A.TOOL_LABELS.get(fc.name, fc.name),
+                                    "args": A.args_preview(fc.args)})
+            for fr in ev.get_function_responses():
+                await emit("tool_result", {"id": fr.id, "name": fr.name, "summary": turn.summaries.get(fr.id, "done")})
+            if ev.content and ev.content.role == "model":            # one model call completed
+                if sink:
+                    if chunk and not streamed:
+                        await sink.text(chunk)
+                    await sink.end_step(bool(calls))
+                if ev.is_final_response() and chunk:
+                    final += chunk
+                streamed = False
+    except TimeoutError:
+        status = "timeout"
+        log.warning("agent run timed out after %.1f s", time.monotonic() - turn.started)
+    except LlmCallsLimitExceededError:
+        status = "limit"
+    except Exception:                                            # noqa: BLE001 — the caller decides what the viewer sees
+        status = "error"
+        log.exception("agent run failed")
+    finally:
+        with contextlib.suppress(Exception):
+            await agen.aclose()
+    if sink and status != "ok":
+        await sink.abort()
+    return final.strip(), status
+
+
+def _retry_note(hits: list[dict]) -> str:
+    terms = list(dict.fromkeys(readable(h["term"]) for h in hits))
+    return prompts.render("guard_retry", terms=", ".join(terms)) if terms else ""
+
+
+async def _throwaway(runner: Runner, user: str, state: dict, text: str, emit, turn, deadline, sink, streaming):
+    """A run in a fresh ADK session that is deleted afterwards (context flow: the history lives in HISTORY)."""
+    s = await session_service.create_session(app_name=APP_NAME, user_id=user, state=state)
+    try:
+        return await _run(runner, user, s.id, text, emit, turn, deadline, sink, streaming)
+    finally:
+        with contextlib.suppress(Exception):
+            await session_service.delete_session(app_name=APP_NAME, user_id=user, session_id=s.id)
+
+
+class AskFailed(Exception):
+    pass
+
+
+async def flow_context(t, body: Ask, p: float, user: str, state: dict, emit, turn: A.Turn, rec: dict) -> dict:
+    """Server-built context, then one streamed run; each finished sentence is guarded before it is sent."""
+    m = A.moment_of(state)
+    ctx = C.build(m, state["tap"], turn)
+    for lk in ctx.lookups:
+        turn.tools.append(f"ctx:{lk.name}")
+        await emit("tool", {"id": lk.id, "name": lk.name, "label": lk.label, "args": {}})
+        await emit("tool_result", {"id": lk.id, "name": lk.name, "summary": lk.summary})
+        if lk.name == "on_screen" and turn.highlight and ctx.highlight_fresh:
+            await emit("highlight", turn.highlight)
+    turn.context = ctx
+    turn.history, rec["history_turns"] = HISTORY.contents(user, p)
+    answer = GuardedAnswer(lambda s: guard.violations(t.pack, s, p))
+    sink = Streamer(answer, emit, rec)
+    runner, deadline, question = RUNNERS["context"], turn.started + config.ASK_DEADLINE_S, body.question.strip()
+    _text, status = await _throwaway(runner, user, state, question, emit, turn, deadline, sink, True)
+    if not answer.text and status in ("ok", "limit"):
+        # nothing survived the guard (or the model said nothing): one non-streamed retry with the note
+        rec["retried"] = True
+        hits = [h for d in answer.dropped for h in d]
+        note = _retry_note(hits)
+        _text, status = await _throwaway(runner, user, state, f"{question}\n\n{note}".strip(), emit, turn, deadline,
+                                         sink, False)
+    rec["status"] = status
+    if answer.dropped:
+        rec["dropped_kinds"] = sorted({h["kind"] for d in answer.dropped for h in d})
+        log.warning("guard dropped %d sentence(s) at p=%.1f: %s", len(answer.dropped), p, rec["dropped_kinds"])
+    if not answer.text:
+        if status == "error":
+            raise AskFailed
+        rec["fallback"] = "timeout" if status == "timeout" else "spoiler"
+        await sink._send([answer.force((TIMEOUT_FALLBACK if status == "timeout" else FALLBACK)[body.lang])])
+    else:
+        HISTORY.add(user, p, question, answer.text)
+    rec["dropped"] = len(answer.dropped)
+    return {"text": answer.text, "terms": ctx.tapped_terms,
+            "rewritten": bool(answer.dropped or rec["retried"] or rec["fallback"])}
+
+
+async def flow_tools(t, body: Ask, p: float, user: str, state: dict, emit, turn: A.Turn, rec: dict) -> dict:
+    """The earlier design: the agent picks among five tools; the whole answer is guarded, then sent at once."""
+    runner, deadline, question = RUNNERS["tools"], turn.started + config.ASK_DEADLINE_S, body.question.strip()
+    sid = await CONVERSATIONS.get(user, p)
+    text, status = await _run(runner, user, sid, question, emit, turn, deadline, None, False, state)
+    hits, rewritten = guard.violations(t.pack, text, p), False
+    if (hits or not text) and status in ("ok", "limit"):
+        # the bad draft must not stay in the conversation: retry in a fresh session
+        rewritten, rec["retried"] = True, True
+        log.warning("guard hit at p=%.1f: %s", p, [h["kind"] for h in hits])
+        rec["dropped_kinds"] = sorted({h["kind"] for h in hits})
+        sid = await CONVERSATIONS.get(user, p, fresh=True)
+        text, status = await _run(runner, user, sid, f"{question}\n\n{_retry_note(hits)}".strip(), emit, turn,
+                                  deadline, None, False, state)
+    rec["status"] = status
+    if not text and status == "error":
+        raise AskFailed
+    if not text or guard.violations(t.pack, text, p):
+        rewritten = True
+        rec["fallback"] = "timeout" if status == "timeout" else "spoiler"
+        text = (TIMEOUT_FALLBACK if status == "timeout" else FALLBACK)[body.lang]
+        await CONVERSATIONS.get(user, p, fresh=True)
+    rec["first_text_ms"] = int((time.monotonic() - rec["t0"]) * 1000)
+    await emit("delta", {"text": text})
+    return {"text": text, "terms": C.tapped_terms(A.moment_of(state), state["tap"]), "rewritten": rewritten}
+
+
+FLOWS = {"context": flow_context, "tools": flow_tools}
 
 
 @app.post("/api/ask")
@@ -231,8 +475,11 @@ async def ask(body: Ask, request: Request):
         raise HTTPException(400, "lang must be en or zh")
     a = t.pack["asset"]
     p = min(body.p, a["duration_s"])
-    if msg := LIMITER.check(client_ip(request)):
-        return JSONResponse({"message": msg}, status_code=429)
+    bench = is_bench(request)
+    if not bench and (limited := LIMITER.check(client_ip(request))):
+        return JSONResponse(limited, status_code=429, headers={"Retry-After": str(limited["retry_after_s"])})
+    flow = request.headers.get("x-watch-flow") if bench else None
+    flow = flow if flow in FLOWS else (config.FLOW if config.FLOW in FLOWS else "context")
 
     user = f"{body.session_id or uuid.uuid4().hex}:{t.id}"
     state = {"title_id": t.id, "p": p, "lang": body.lang, "tap": body.tap.model_dump() if body.tap else None}
@@ -242,36 +489,35 @@ async def ask(body: Ask, request: Request):
         await queue.put(sse(event, data))
 
     async def work():
-        started = time.monotonic()
-        turn = A.Turn()
+        turn = A.Turn(max_tool_rounds=TOOL_ROUNDS[flow], soft_deadline_s=config.SOFT_DEADLINE_S)
         A.TURN.set(turn)
+        rec = {"t0": turn.started, "first_text_ms": None, "held_preamble": 0, "leaked_preamble": 0, "retried": False,
+               "fallback": None, "dropped": 0, "dropped_kinds": [], "history_turns": 0, "status": "ok",
+               "cut_off": False, "highlight": False}
         try:
-            m = Moment(t, p, body.lang)
+            m = A.moment_of(state)
             counts = m.gate_counts()
             elig = sum(counts["eligible"].values())
             await emit("gate", {"p": round(p, 2), "eligible_total": elig,
                                 "locked_total": sum(counts["total"].values()) - elig})
-            sid = await CONVERSATIONS.get(user, p)
-            text = await _run_agent(user, sid, body.question.strip(), state, emit)
-            hits, rewritten = guard.violations(t.pack, text, p), False
-            if hits or not text:
-                # the bad draft must not stay in the conversation: retry in a fresh session
-                rewritten = True
-                log.warning("guard hit at p=%.1f: %s", p, [h["kind"] for h in hits])
-                sid = await CONVERSATIONS.get(user, p, fresh=True)
-                note = prompts.render("guard_retry", terms=", ".join(readable(h["term"]) for h in hits)) if hits else ""
-                text = await _run_agent(user, sid, f"{body.question.strip()}\n\n{note}".strip(), state, emit)
-                if not text or guard.violations(t.pack, text, p):
-                    text = FALLBACK[body.lang]
-                    await CONVERSATIONS.get(user, p, fresh=True)
-            await emit("answer", {"text": text, "evidence": turn.evidence, "frames": turn.frames,
-                                  "highlight": turn.highlight, "guard": {"checked": True, "rewritten": rewritten},
-                                  "latency_ms": int((time.monotonic() - started) * 1000)})
+            out = await FLOWS[flow](t, body, p, user, state, emit, turn, rec)
+            # the highlight only when the answer is about the tapped entity, so the box never contradicts the text
+            highlight = turn.highlight if turn.highlight and C.mentions(out["text"], out["terms"]) else None
+            total = int((time.monotonic() - turn.started) * 1000)
+            rec["highlight"] = highlight is not None
+            await emit("answer", {"text": out["text"], "evidence": turn.evidence, "frames": turn.frames,
+                                  "highlight": highlight,
+                                  "guard": {"checked": True, "rewritten": out["rewritten"], "dropped": rec["dropped"]},
+                                  "latency_ms": total, "usage": turn.usage(),
+                                  "timing": {"first_text_ms": rec["first_text_ms"], "total_ms": total}, "flow": flow})
         except Exception as e:                                     # noqa: BLE001 — report, never leak internals
-            log.exception("ask failed")
+            rec["status"] = "error"
+            if not isinstance(e, AskFailed):
+                log.exception("ask failed")
             await emit("error", {"message": "The assistant hit a problem answering this. Please try again."
                                  if not isinstance(e, HTTPException) else str(e.detail)})
         finally:
+            _log_question(flow, t, p, body, bench, turn, rec)
             await emit("done", {})
             await queue.put(None)
 
@@ -287,6 +533,17 @@ async def ask(body: Ask, request: Request):
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _log_question(flow: str, t, p: float, body: Ask, bench: bool, turn: A.Turn, rec: dict) -> None:
+    """One JSON line per question (no question text, no tokens or secrets)."""
+    rec = {k: v for k, v in rec.items() if k != "t0"}
+    log.info("ask %s", json.dumps({
+        "flow": flow, "title": t.id, "p": round(p, 2), "lang": body.lang, "tap": body.tap is not None, "bench": bench,
+        "model": config.MODEL, "tools": turn.tools, "search_mode": turn.search_mode, "usage": turn.usage(),
+        "timing": {"first_text_ms": rec.pop("first_text_ms"), "total_ms": int((time.monotonic() - turn.started) * 1000)},
+        "tools_stopped": turn.tools_stopped, "embed_down": A.EMBEDDER.last_error is not None
+        and time.monotonic() < A.EMBEDDER.down_until, **rec}, ensure_ascii=False))
 
 
 # Static front end last, so /api routes win.

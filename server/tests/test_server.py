@@ -3,35 +3,9 @@ import json
 
 import pytest
 
-from ingest import packdb
 from ingest.retrieval import Gate
-from ingest.tests.conftest import mini_pack
 from server import guard
 from server.knowledge import Moment, pick_entity
-from server.packs import Title
-
-
-@pytest.fixture
-def title(tmp_path):
-    p = mini_pack()
-    p["shot_captions"] = [
-        {"shot_caption_id": "sc000", "start_s": 0.0, "end_s": 50.0, "reveal_at_s": 50.0, "source": "t",
-         "caption_en": "A girl walks through a meadow.", "caption_zh": None, "review_state": "auto"},
-        {"shot_caption_id": "sc001", "start_s": 50.0, "end_s": 100.0, "reveal_at_s": 100.0, "source": "t",
-         "caption_en": "The wolf howls; it is Bob.", "caption_zh": None, "review_state": "auto"}]
-    p["shot_entities"] = [
-        {"shot_caption_id": "sc001", "seq": 0, "entity_type": "character", "character_id": "c03", "object_id": None,
-         "label_en": "the wolf", "label_zh": None, "position": "left", "bbox": "[100, 50, 600, 400]", "bbox_t_s": 60,
-         "action_en": "howling at Bob's house", "action_zh": None},
-        {"shot_caption_id": "sc001", "seq": 1, "entity_type": "character", "character_id": "c01", "object_id": None,
-         "label_en": "Alice", "label_zh": None, "position": "right", "bbox": "[100, 600, 900, 900]", "bbox_t_s": 60,
-         "action_en": None, "action_zh": None}]
-    p["recaps"] = [{"recap_id": "r01", "upto_scene_id": "s01", "upto_s": 50.0, "reveal_at_s": 50.0,
-                    "text_en": "Alice met the boy in a meadow.", "text_zh": None, "source": "t", "review_state": "auto"}]
-    root = tmp_path / "master"
-    root.mkdir()
-    packdb.write_db(packdb.normalize_pack(p), root / "pack.db")
-    return Title("mini", "ab" * 32, "Mini", "", "CC-BY-3.0", "", root)
 
 
 def test_labels_follow_name_visibility(title):
@@ -116,10 +90,99 @@ def test_http_surface(title, monkeypatch):
     assert c.post("/api/ask", json={"title_id": "mini", "p": 5, "question": "x" * 400}).status_code == 422
 
 
+def test_sanitize_replaces_hidden_names_with_the_label_at_p(title):
+    assert Moment(title, 10.5).sanitize("Alice waves at Bob.") == "Alice waves at the boy."
+    assert Moment(title, 10.5).sanitize("Bob's cap. Bob waves.") == "The boy's cap. The boy waves."
+    assert Moment(title, 10.5).sanitize("A bob of the head.") == "A bob of the head."  # common noun: case-sensitive
+    assert Moment(title, 11.0).sanitize("Alice waves at Bob.") == "Alice waves at Bob."      # visible from 11 s
+    assert Moment(title, 10.5, "zh").sanitize("爱丽丝和鲍勃") == "爱丽丝和男孩"
+    assert Moment(title, 20.0).sanitize("Bobby is up the tree.") == "Bob is up the tree."    # alias: 30 s, name: 11 s
+    assert Moment(title, 31.0).sanitize("Bobby is up the tree.") == "Bobby is up the tree."
+    assert Moment(title, 10.5).sanitize("Bobsleigh") == "Bobsleigh"                          # whole words only
+    story = json.dumps(Moment(title, 10.5).story_so_far())
+    assert "Alice waves at the boy." in story and "Bob" not in story
+
+
+def test_search_uses_one_track_and_skips_short_lines(title):
+    hits = Moment(title, 30.0).search("meadow")                     # no vectors in this pack: full-text ranking
+    lines = [h for h in hits if h.item_type == "cue"]
+    assert [h.item_id for h in lines] == ["en.official:003"]       # not once per subtitle track
+    assert not [h for h in Moment(title, 70.0).search("Bob") if h.text == "Bob?"]
+    assert "Bob climbs a tree" in " ".join(h.text for h in Moment(title, 25.0).search("tree"))   # alias → name at 25 s
+
+
+def test_recent_dialogue_falls_back_to_the_last_lines(title):
+    m = Moment(title, 50.0)
+    assert m.recent_dialogue(10) == []
+    assert [ln["at"] for ln in m.recent_dialogue(10, at_least=2)] == ["00:10", "00:20"]
+
+
+def test_speaker_withheld_while_identity_is_isolated(title):
+    line = lambda P: next(ln for ln in Moment(title, P).recent_dialogue(30) if ln["at"] == "00:57")  # noqa: E731
+    assert line(59.5)["speaker"] == "unknown speaker"              # attributing it to Bob would reveal the wolf
+    assert line(62.0)["speaker"] == "Bob"
+
+
+def test_evidence_dedup():
+    from server.agent import Turn
+    t = Turn()
+    t.add_evidence("shot_caption", 1.0, 2.0, "A girl.")
+    t.add_evidence("shot_caption", 1.0, 2.0, "A girl.")
+    t.add_evidence("character_fact", 5.0, 5.0, "Alice: fact one")
+    t.add_evidence("character_fact", 5.0, 5.0, "Alice: fact two")
+    assert [e["text"] for e in t.evidence] == ["A girl.", "Alice: fact one", "Alice: fact two"]
+
+
+def _views(m: Moment) -> tuple[list, list]:
+    """Everything the agent can read at P as (texts, search hits)."""
+    texts = [json.dumps(m.story_so_far(), ensure_ascii=False), json.dumps(m.recent_dialogue(60, at_least=4)),
+             json.dumps(m.on_screen({"x": 0.2, "y": 0.3}), ensure_ascii=False), json.dumps(m.known_characters())]
+    hits = [h for q in ("Bob", "wolf", "meadow", "Hello Bob", "tree", "Bobby") for h in m.search(q)]
+    return texts + [h.text or "" for h in hits], hits
+
+
+@pytest.mark.parametrize("lang", ["en", "zh"])
+def test_sweep_views_never_leak(title, lang):
+    for i in range(0, 200):
+        P = i / 2
+        m = Moment(title, P, lang)
+        texts, hits = _views(m)
+        for text in texts:
+            assert guard.violations(m.pack, text, P) == [], (P, text)
+        ok = {(it.item_type, it.item_id) for it in Gate(m.pack, P, allow_auto=True).eligible()}
+        assert all((h.item_type, h.item_id) in ok for h in hits), P
+
+
 def test_limiter(monkeypatch):
     from server import config, main
     monkeypatch.setattr(config, "ASK_PER_MINUTE", 2)
     lim = main.Limiter()
     assert lim.check("1.2.3.4") is None and lim.check("1.2.3.4") is None
-    assert lim.check("1.2.3.4") is not None
+    hit = lim.check("1.2.3.4")
+    assert hit["limit"] == "per_minute" and hit["scope"] == "ip" and 1 <= hit["retry_after_s"] <= 60
     assert lim.check("5.6.7.8") is None
+    monkeypatch.setattr(config, "ASK_PER_MINUTE", 100)
+    monkeypatch.setattr(config, "ASK_PER_DAY_TOTAL", 3)
+    hit = lim.check("9.9.9.9")
+    assert hit["limit"] == "daily" and hit["scope"] == "total"
+
+
+def test_429_names_the_limit_and_bench_token_skips_it(title, monkeypatch):
+    from server import config, main
+    from server.tests.conftest import wire
+    w = wire(monkeypatch, title)
+    w.ctx.script = [{"text": "Alice, in her red coat."}]
+    monkeypatch.setattr(config, "ASK_PER_MINUTE", 0)
+    c = w.client
+    body = {"title_id": "mini", "p": 30, "question": "Who is that?"}
+    r = c.post("/api/ask", json=body)
+    assert r.status_code == 429 and r.json()["limit"] == "per_minute" and r.headers["retry-after"]
+    assert c.post("/api/ask", json=body, headers={main.BENCH_HEADER: "anything"}).status_code == 429   # no token set
+    monkeypatch.setattr(config, "BENCH_TOKEN", "s3cret")
+    assert c.post("/api/ask", json=body, headers={main.BENCH_HEADER: "wrong"}).status_code == 429
+    r = c.post("/api/ask", json=body, headers={main.BENCH_HEADER: "s3cret"})
+    assert r.status_code == 200 and "event: answer" in r.text
+    # bench requests may pick the flow
+    w.tools.script = [{"text": "Alice, in her red coat."}]
+    r = c.post("/api/ask", json=body, headers={main.BENCH_HEADER: "s3cret", "x-watch-flow": "tools"})
+    assert '"flow": "tools"' in r.text and not w.tools.script

@@ -80,14 +80,64 @@ checks in `server/guard.py`.
 
 ## 4a. The web demo service (`server/`)
 
-The demo in this repository follows this guide: an ADK `LlmAgent` on Gemini 3.8 Flash (Agent Platform) with five tools
-(`story_so_far`, `search_moments`, `recent_dialogue`, `on_screen`, `look_closer`), all built on `server/knowledge.py`
-(gate-first views at P). The server writes P, title, language and tap into session state with `state_delta`; tools read
-it from `ToolContext.state`, so the model has no parameter that could move P. `look_closer` sends the current frame plus
-stills from the 30 s before P (every 3 s, all `≤ floor(P)`); the `gs://` clip mode is optional (`WATCH_LOOK_VIDEO=1`)
-because clipping a whole-film URI adds tens of seconds. If an answer trips a guard, the draft is discarded and the
-question is re-asked once in a fresh session with a note; a second hit returns a fixed safe reply. Seeking backwards
-also starts a fresh session. HTTP contract: [web-api.md](web-api.md).
+The demo in this repository follows this guide: an ADK `LlmAgent` on Gemini 3.8 Flash (Agent Platform, `WATCH_MODEL`)
+over `server/knowledge.py` (gate-first views at P). P, title, language and tap come only from the request, on the
+server; tools read them from `ToolContext.state`, so the model has no parameter that could move P. HTTP contract:
+[web-api.md](web-api.md).
+
+**Context first, tools second** (`WATCH_FLOW=context`, the default). Measured on the live demo, most tool calls were
+local lookups that cost nothing to compute but one model round trip (≈1.5 s) each. So the server runs them itself for
+every question, `server/context.py`:
+
+- the current shot's entities (labels at P, looks, facts, boxes with the keyframe time) and, for a tap, the point on
+  the 0–1000 grid and the entity it geometrically falls on;
+- the lines of the last 60 s with speakers, or the last few lines before that if the last minute was silent;
+- the story so far: the latest recap and the events / scenes after it;
+- the paused frame `thumb(floor(P))` as an image, with a ring drawn at the tap. Only the ring is drawn: the boxes come
+  from a keyframe that can be seconds older than the paused frame, so the prompt tells the model the ring is
+  authoritative.
+
+An ADK `before_model_callback` puts this context, plus the conversation so far, in front of the question in every
+model request of the question. Nothing of it is written to the ADK session (each question runs in a throwaway session),
+so stale context cannot pile up. Only `search_moments` (anything earlier the summary does not cover) and `look_closer`
+(movement across the last 30 s) stay callable. The step trace still shows the server-run lookups (`ctx-1`…`ctx-3`).
+
+**Conversation memory.** Per browser session the server keeps (P, question, answer exactly as sent). A question at P gets
+only the turns asked at or before P (at most `WATCH_HISTORY_TURNS`): eligibility is monotone in P, so all of it is still
+eligible; after a seek backwards the later turns are hidden, and they come back once the viewer passes that point again.
+A dropped sentence or a tool payload never enters this memory.
+
+**Streaming through the guard.** The run streams (`StreamingMode.SSE`). Model text is cut into sentences (English and
+Chinese punctuation, `server/answer.py`). Each finished sentence is checked by the §7 guards together with everything
+already sent, so terms spanning a sentence boundary are caught too. It is sent as a `delta` only if it passes; a failing
+sentence is dropped and logged. A model call's first sentence is held back until a second one starts or the call ends
+without a function call, so a "let me check" written before a tool call never reaches the viewer (counted as
+`held_preamble`). If nothing survives, the question is asked once more, not streamed, with a note listing the terms to
+avoid; if that fails too, a fixed reply is sent. No unguarded text leaves the server.
+
+**Budgets and deadlines** (`server/config.py`, all overridable):
+
+| What | Default | On expiry |
+|---|---|---|
+| Query embedding (`search_moments`) | 1.5 s, one attempt, no retry loop | full-text ranking; embeddings paused for 60 s |
+| `look_closer` nested call | 10 s | the tool returns a note; the model answers without it |
+| Tool rounds per question | 2 (3 in the `tools` flow) | function calls are switched off (`FunctionCallingConfig` `NONE`) and the model is told to answer |
+| Soft deadline | 9 s | same as above |
+| Silence from the agent run | 12 s | the run is stopped |
+| Whole question | 25 s | the run is stopped; complete sentences already sent stand, else a "took too long" reply |
+
+**Observability.** The `answer` event carries `usage` (input / output / thought tokens, model calls) and `timing`
+(time to first text, total). Each question also writes one JSON log line (`ask {…}`) with the flow, P, tools called,
+search mode, usage, timing, sentences dropped and their guard kinds, held preambles, retry, fallback and whether the
+highlight was kept. The log line never contains the question text or the bench token.
+
+**The earlier flow** (`WATCH_FLOW=tools`) stays available for benchmarking: five tools (`story_so_far`,
+`search_moments`, `recent_dialogue`, `on_screen`, `look_closer`) and a routing-table instruction. Its ADK session
+carries the conversation and is replaced after a seek backwards or a guard rewrite. The whole answer is guarded at
+once and sent as a single `delta`.
+
+`look_closer` sends the current frame plus stills from the 30 s before P (every 3 s, all `≤ floor(P)`). The `gs://` clip
+mode is optional (`WATCH_LOOK_VIDEO=1`) because clipping a whole-film URI adds tens of seconds.
 
 ## 5. Gemini backends
 
