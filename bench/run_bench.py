@@ -121,13 +121,17 @@ class Client:
         return res
 
     def _once(self, body: dict) -> dict:
+        """One request. Records the HTTP status, the SSE `error` event, and how the stream ended (`stream_end`:
+        `done` / `eof` (closed without `done`) / `exception` / `http_error`), so a failed case says what happened."""
         t0 = time.monotonic()
         ms = lambda: round((time.monotonic() - t0) * 1000)  # noqa: E731
         events, deltas = [], []
         first = {"event": None, "tool": None, "delta": None, "answer": None}
+        status = None
         try:
             with urllib.request.urlopen(self._request(body), timeout=self.timeout) as r:
                 status = r.status
+                end = "eof"
                 for ev, raw in iter_sse(r):
                     t = ms()
                     data = _json(raw)
@@ -139,16 +143,20 @@ class Client:
                         continue                                 # deltas are summarised, not stored one by one
                     events.append({"event": ev, "data": data, "ms": t})
                     if ev == "done":
+                        end = "done"
                         break
         except urllib.error.HTTPError as e:
             msg = e.read().decode("utf-8", "replace")[:500]
             d = _json(msg)
             if isinstance(d, dict) and (d.get("message") or d.get("detail")):
                 msg = str(d.get("message") or d.get("detail"))
-            return _error(f"HTTP {e.code}: {msg}", ms(), http_status=e.code)
+            return {**_error(f"HTTP {e.code}: {msg}", ms(), http_status=e.code), "stream_end": "http_error"}
         except Exception as e:                                   # timeout / connection reset: record, keep going
-            return {**_error(f"{type(e).__name__}: {e}", ms()), **_partial(events, deltas, first)}
-        out = _partial(events, deltas, first)
+            out = _partial(events, deltas, first, "exception")
+            out.update(status="error", http_status=status, t_total_ms=ms(),
+                       error=f"{type(e).__name__}: {e} (after {len(events) + len(deltas)} events, {ms()} ms)")
+            return out
+        out = _partial(events, deltas, first, end)
         out["http_status"] = status
         out["t_total_ms"] = ms()
         return out
@@ -159,7 +167,7 @@ def _error(msg: str, total_ms: int, http_status: int | None = None) -> dict:
             "tools": [], "server_tools": [], "model_tools": [], "t_total_ms": total_ms}
 
 
-def _partial(events: list, deltas: list, first: dict) -> dict:
+def _partial(events: list, deltas: list, first: dict, end: str | None = None) -> dict:
     ans = next((e["data"] for e in events if e["event"] == "answer"), None)
     err = next((e["data"] for e in events if e["event"] == "error"), None)
     tools = [e["data"] for e in events if e["event"] == "tool"]
@@ -168,9 +176,20 @@ def _partial(events: list, deltas: list, first: dict) -> dict:
     evidence = (ans or {}).get("evidence") or []
     streamed = "".join(deltas)
     first_text = first["delta"] if first["delta"] is not None else first["answer"]
+    sse_error = ((err or {}).get("message") or json.dumps(err, ensure_ascii=False)[:300]) if err is not None else None
+    seen = [e["event"] for e in events]
+    if ans:
+        error = None
+    elif sse_error:
+        error = f"error event: {sse_error}"
+    else:
+        last = f"last event '{seen[-1]}' at {events[-1]['ms']} ms" if seen else "no events"
+        how = {"done": "done without an answer", "eof": "stream closed without done"}.get(end or "", end or "?")
+        error = f"no answer event ({how}; {len(seen)} events + {len(deltas)} deltas, {last})"
     return {
         "status": "ok" if ans else "error",
-        "error": None if ans else ((err or {}).get("message") or "no answer event"),
+        "error": error, "sse_error": sse_error, "stream_end": end,
+        "events_seen": seen, "t_last_event_ms": events[-1]["ms"] if events else None,
         "answer": (ans or {}).get("text") or "",
         "evidence_text": [e.get("text") for e in evidence if isinstance(e, dict) and e.get("text")],
         "tools": [t.get("name") for t in tools], "server_tools": server, "model_tools": model,

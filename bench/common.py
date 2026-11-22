@@ -127,26 +127,47 @@ def _word(ch: str) -> bool:
     return bool(ch) and ch.isalnum() and not has_cjk(ch)
 
 
-def find_term(term: str, text: str, case_sensitive: bool = False, whole_word: bool = True, prefix: bool = False) -> bool:
+Span = tuple  # (folded text, start, end): where a term matched, for reports
+
+
+def find_span(term: str, text: str, case_sensitive: bool = False, whole_word: bool = True,
+              prefix: bool = False) -> Span | None:
+    """First match of `term` in `text` after folding both (None: no match). Latin terms match whole words; a CJK
+    character is never a word character, so a Latin term right next to Chinese text still matches. CJK terms match
+    as substrings."""
     t, x = N(term, case_sensitive), N(text, case_sensitive)
     if not t:
-        return False
+        return None
     ww = whole_word and not has_cjk(t)
     start = 0
     while (i := x.find(t, start)) >= 0:
         before = x[i - 1] if i else ""
         after = x[i + len(t)] if i + len(t) < len(x) else ""
         if not ww or (not _word(before) and (prefix or not _word(after))):
-            return True
+            return x, i, i + len(t)
         start = i + 1
-    return False
+    return None
+
+
+def find_term(term: str, text: str, case_sensitive: bool = False, whole_word: bool = True, prefix: bool = False) -> bool:
+    return find_span(term, text, case_sensitive, whole_word, prefix) is not None
+
+
+def _regex_span(pattern: str, text: str, flags: int) -> Span | None:
+    x = N(text, True)
+    m = re.search(pattern, x, flags)
+    return (x, m.start(), m.end()) if m else None
+
+
+def marker_span(marker, text: str) -> Span | None:
+    m = {"term": marker} if isinstance(marker, str) else marker
+    if "regex" in m:
+        return _regex_span(m["regex"], text, re.IGNORECASE if m.get("ignore_case") else 0)
+    return find_span(m["term"], text, bool(m.get("case_sensitive")), m.get("whole_word", True))
 
 
 def marker_hits(marker, text: str) -> bool:
-    m = {"term": marker} if isinstance(marker, str) else marker
-    if "regex" in m:
-        return re.search(m["regex"], N(text, True), re.IGNORECASE if m.get("ignore_case") else 0) is not None
-    return find_term(m["term"], text, bool(m.get("case_sensitive")), m.get("whole_word", True))
+    return marker_span(marker, text) is not None
 
 
 def marker_label(marker) -> str:
@@ -158,15 +179,26 @@ def hits(markers, text: str) -> list[str]:
     return [marker_label(m) for m in markers or [] if marker_hits(m, text)]
 
 
-def canary_hits(row: dict, text: str) -> bool:
+def canary_span(row: dict, text: str) -> Span | None:
     """Canary row (spec §7.2): match = word | phrase | regex; a word / phrase ending in `*` is a prefix match."""
     cs = bool(row.get("case_sensitive"))
     term = row["term"]
     if row.get("match") == "regex":
-        return re.search(term, N(text, True), 0 if cs else re.IGNORECASE) is not None
+        return _regex_span(term, text, 0 if cs else re.IGNORECASE)
     if term.endswith("*") and len(term) > 1:
-        return find_term(term[:-1], text, cs, True, prefix=True)
-    return find_term(term, text, cs, True)
+        return find_span(term[:-1], text, cs, True, prefix=True)
+    return find_span(term, text, cs, True)
+
+
+def canary_hits(row: dict, text: str) -> bool:
+    return canary_span(row, text) is not None
+
+
+def snippet(span: Span, pad: int = 24) -> str:
+    """The matched part in brackets with some context, from the folded text: `…she [stabs] the…`."""
+    x, i, j = span
+    a, b = max(0, i - pad), min(len(x), j + pad)
+    return ("…" if a else "") + x[a:i] + "[" + x[i:j] + "]" + x[j:b] + ("…" if b < len(x) else "")
 
 
 def name_case_sensitive(name: str) -> bool:
@@ -214,6 +246,31 @@ class PackView:
         self.blocklist = data.get("blocklist", [])
         self.canaries = data.get("canaries", [])
         self.title_info = data.get("title_info", [])
+        self.zh = self._zh_texts(data)
+
+    @staticmethod
+    def _zh_texts(d: dict) -> dict:
+        """(item_type, item_id) → the Chinese text of a gate item (the gate itself carries the English text only)."""
+        out = {}
+        for r in d.get("scenes", []):
+            out[("scene", r["scene_id"])] = r.get("summary_zh")
+        for r in d.get("events", []):
+            out[("event", r["event_id"])] = r.get("text_zh")
+        for r in d.get("objects", []):
+            out[("object", r["object_id"])] = ": ".join(x for x in (r.get("name_zh"), r.get("description_zh")) if x)
+        for r in d.get("character_facts", []):
+            out[("character_fact", r["fact_id"])] = r.get("text_zh")
+        for r in d.get("shot_captions", []):
+            out[("shot_caption", r["shot_caption_id"])] = r.get("caption_zh")
+        for r in d.get("shot_entities", []):
+            k = ("shot_caption", r["shot_caption_id"])
+            extra = " ".join(x for x in (r.get("label_zh"), r.get("action_zh"), r.get("label_en"), r.get("action_en"))
+                             if x)
+            if extra:
+                out[k] = ((out.get(k) or "") + "\n" + extra).strip()
+        for r in d.get("recaps", []):
+            out[("recap", r["recap_id"])] = r.get("text_zh")
+        return {k: v for k, v in out.items() if v}
 
     @staticmethod
     def reviewed_ok(state) -> bool:
