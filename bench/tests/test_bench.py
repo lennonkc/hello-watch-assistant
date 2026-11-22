@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import http.server
 import json
+import socket
 import threading
 
 import pytest
@@ -74,7 +75,40 @@ def test_canaries_real_names_and_case_terms(packs):
 def test_canary_that_also_describes_eligible_text_is_only_a_suspect(packs, monkeypatch):
     monkeypatch.setattr(J, "eligible_text", lambda c: "Alice turns out the lights.")
     r = J.rule_check(case(P=20.0), "It turns out fine.")
-    assert "canary:turns out" in r["suspects"] and "canary:turns out" not in r["rule_leaks"]
+    assert "canary:turns out (already eligible)" in r["suspects"] and r["rule_leaks"] == []
+
+
+@pytest.fixture
+def zh_packs(tmp_path, monkeypatch):
+    """The mini pack with a Chinese text on an early event that uses the canary word 原来 innocently."""
+    p = copy.deepcopy(mini_pack())
+    p["events"][0]["text_zh"] = "爱丽丝向鲍勃打招呼,原来他们早就认识。"
+    root = tmp_path / "packs"
+    packdb.write_db(packdb.normalize_pack(p), root / SHA / "master" / "pack.db")
+    monkeypatch.setattr(J, "PACKS", root)
+    C._PACKS.clear()
+    yield root
+    C._PACKS.clear()
+
+
+def test_zh_canary_in_eligible_chinese_text_is_not_a_leak(zh_packs):
+    """Regression: the "already eligible" test used the English texts only, so a zh canary word inside an eligible
+    item's Chinese text (sent back as evidence with a zh answer) was reported as a leak."""
+    c = case(P=20.0, lang="zh", question="这是谁?")
+    evidence = ["爱丽丝向鲍勃打招呼,原来他们早就认识。"]
+    r = J.rule_check(c, "这是爱丽丝（Alice）。", evidence)
+    assert r["rule_leaks"] == [] and r["suspects"] == ["canary:原来 (already eligible) @evidence"]
+    assert r["rule_hits"] == [{"rule": "canary:原来 (already eligible) @evidence", "where": "evidence",
+                               "match": "爱丽丝向鲍勃打招呼,[原来]他们早就认识。"}]
+
+
+def test_rule_hits_say_where_and_what_matched(packs):
+    c = case(P=20.0, lang="zh", question="这是谁?", must_not_include=["森林"])
+    r = J.rule_check(c, "这是爱丽丝。", ["后来狼在嚎叫"], streamed="她走进森林")
+    assert r["rule_leaks"] == ["canary:嚎 @evidence", "must_not_include:森林 @streamed"]
+    assert {h["where"] for h in r["rule_hits"]} == {"evidence", "streamed"}
+    assert [h["match"] for h in r["rule_hits"]] == ["后来狼在[嚎]叫", "她走进[森林]"]
+    assert C.snippet(C.find_span("Scales", "史科尔斯（Scales）是一条龙", True)) == "史科尔斯([Scales])是一条龙"
 
 
 def test_future_and_known_facts(packs):
@@ -155,7 +189,7 @@ def test_report_side_by_side(tmp_path):
     assert (tmp_path / "scorecard.md").read_text() == md
     assert len(md.splitlines()) < 300
     summary = (tmp_path / "summary.md").read_text()
-    assert "## Failing cases" in summary and "leak (1): r2" in summary and "## Tool usage" not in summary
+    assert "## Failing cases" in summary and "leak (rule gate) (1): r2" in summary and "## Tool usage" not in summary
     assert len(summary.splitlines()) < 120
 
 
@@ -253,6 +287,18 @@ class FakeServer(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         ev = lambda e, d: self.wfile.write(f"event: {e}\ndata: {json.dumps(d)}\n\n".encode()) or self.wfile.flush()  # noqa: E731
         ev("gate", {"p": body["p"], "eligible_total": 3, "locked_total": 4})
+        if body["question"] == "error event":
+            ev("error", {"message": "The assistant hit a problem answering this."})
+            ev("done", {})
+            return
+        if body["question"] == "cut short":                   # the stream ends without answer / done
+            ev("tool", {"id": "ctx-1", "name": "context"})
+            return
+        if body["question"] == "reset":                       # a chunked body that stops mid-way
+            self.wfile.write(b"event: tool\ndata: {\"id\": \"ctx-1\"")
+            self.wfile.flush()
+            self.connection.shutdown(socket.SHUT_RDWR)
+            return
         ev("tool", {"id": "ctx-1", "name": "context"})
         ev("tool", {"id": "fc-1", "name": "search_moments"})
         ev("tool_result", {"id": "fc-1", "name": "search_moments", "summary": "2 hits"})
@@ -273,6 +319,20 @@ def fake():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_address[1]}"
     srv.shutdown()
+
+
+def test_client_records_how_a_failed_stream_ended(fake):
+    cl = R.Client(fake)
+    e = cl.turn("mini", 5.0, "error event", "en", "s1")
+    assert e["status"] == "error" and e["stream_end"] == "done" and e["http_status"] == 200
+    assert e["sse_error"] == "The assistant hit a problem answering this."
+    assert e["error"] == "error event: The assistant hit a problem answering this."
+    cut = cl.turn("mini", 5.0, "cut short", "en", "s1")
+    assert cut["status"] == "error" and cut["stream_end"] == "eof" and cut["events_seen"] == ["gate", "tool"]
+    assert cut["error"].startswith("no answer event (stream closed without done; 2 events + 0 deltas, last event 'tool'")
+    reset = cl.turn("mini", 5.0, "reset", "en", "s1")
+    assert reset["status"] == "error" and reset["stream_end"] in ("eof", "exception")
+    assert reset["error"] and reset["error"] != "no answer event"
 
 
 def test_client_records_timings_tools_and_usage(fake):

@@ -78,6 +78,18 @@ report `base` and `new` separately.
 | `usage`, `timing`, `flow` | copied from the `answer` event: `usage = {input_tokens, output_tokens (incl. thinking), thought_tokens, model_calls}`, `timing = {first_text_ms, total_ms}` |
 | `guard_dropped` | `answer.guard.dropped`: sentences the output guard withheld |
 | `streamed_text` | the concatenated `delta` text, kept only when it differs from the final answer |
+| `http_status`, `stream_end`, `sse_error`, `events_seen` | how a request ended: `done`, `eof` (closed without `done`), `exception` (timeout / reset: `error` keeps the exception and how far the stream got), `http_error`; the `error` event's message. Failed cases are never retried automatically (`--retry-errors` re-asks them on purpose) |
+
+## Known limits of the cases
+
+- `ed-h04`: forbade the single character for "hit", which also matches the everyday word for making a phone call;
+  since 2026-11-22 it forbids phrases for beating someone (a regex marker) instead.
+- `c5:sintel-g08`: the "innocent blood" line ends earlier on the generated English track than on the official one,
+  so the words can be eligible at `P` = 116.5 although the official cue is not; since 2026-11-22 they are suspects
+  (`flag_if_any`), not leaks. The positive check still assumes the service quotes the official track.
+- Term matching is folding plus whole words for Latin terms (a CJK character never counts as a word character, so
+  `Scales` right after Chinese text still matches) and substrings for CJK terms: a one- or two-character CJK term can
+  match inside an unrelated word. Prefer phrases or regex markers for those.
 
 ## Grading (`judge.py`)
 
@@ -86,15 +98,20 @@ report `base` and `new` separately.
 | accuracy | LLM judge against reference / key terms / notes: correct = 1, partial = 0.5; excludes spoiler probes and `expect: decline` cases |
 | appropriate behaviour | the judge's view of whether the behaviour matches `expect` |
 | key-term hit | at least one `must_include_any` term in the answer (coarse cross-check of the judge) |
-| spoiler leak | rule gate ∪ LLM judge |
+| spoiler leak | rule gate ∪ LLM judge; counted as cases with a rule-gate hit and cases only the judge flagged |
 | · rule gate | master pack at `P` (review relaxed like the demo, `allow_auto`): names not yet visible and aliases not yet known (echoes of the viewer's own words are suspects), active canaries (suspects when the word also describes something already eligible), the case's `must_not_include` |
 | · LLM judge | gets the next 30 future items after `P` plus pending names / identities, and decides whether the answer states or implies them |
 | real names | `blocklist` hits, reported separately |
-| latency | p50 / p90 / p95 (nearest rank) of client total, client first text, server `timing.first_text_ms`, first tool, server `latency_ms` |
+| latency | p50 / p90 / p95 (nearest rank); server-side first (`latency_ms`, `timing.first_text_ms`), then the client's measurements, which add the network between the bench host and the service |
+| errors | cases without an answer, on their own line; they are graded as non-answers (the viewer saw the error) |
 | tools | calls per answer, split server-run / model-called, and usage by tool name |
 | tokens, cost | from `answer.usage`: input and output (incl. thinking) tokens per answer p50 / p90, model calls per answer, estimated cost per answer (list prices from `ingest/ledger.py`); answers per flow |
 
-Checked text = answer + evidence text (+ streamed text that differs from the final answer: the viewer saw it).
+Checked text = answer + evidence text (+ streamed text that differs from the final answer: the viewer saw it). Every
+rule hit is listed in `judged.jsonl` (`rule_hits`: rule, where it matched — answer / evidence / streamed — and the
+matched part in brackets with some context); labels of hits outside the answer end in ` @evidence` / ` @streamed`.
+"Already eligible" (a canary that only makes a suspect) is judged against the English and Chinese texts of every item
+eligible at `P`, character looks already shown, visible names and title info.
 LLM grades are cached per (case id, answer hash, prompt hash) in `runs/<run>/judged.jsonl`, so re-grading is free
 and `--no-llm` still reuses them.
 

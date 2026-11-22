@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
+import contextvars
 import datetime as dt
 import functools
 import hmac
@@ -19,7 +20,7 @@ import time
 import uuid
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from google.adk.agents.invocation_context import LlmCallsLimitExceededError
 from google.adk.agents.run_config import RunConfig, StreamingMode
@@ -27,6 +28,7 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pydantic import BaseModel, Field
+from starlette.requests import HTTPConnection
 
 from server import agent as A
 from server import config, guard, prompts
@@ -58,61 +60,149 @@ session_service = InMemorySessionService()
 
 # ── catalog, media and gate ─────────────────────────────────────────
 
+# True while the request carries a valid access code (cookie `watch_access`): private preview titles exist for it.
+UNLOCKED: contextvars.ContextVar[bool] = contextvars.ContextVar("watch_unlocked", default=False)
+PRIVATE_HEADERS = {"Cache-Control": "private, no-store"}
+
+
+class AccessMiddleware:
+    """Puts "unlocked" into `UNLOCKED` for the whole request (sync endpoints and tasks started by it inherit it), so
+    `_title()` can hide private preview titles from every endpoint, the question endpoint included."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        token = UNLOCKED.set(STORE.unlocked(HTTPConnection(scope).cookies.get(config.ACCESS_COOKIE)))
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            UNLOCKED.reset(token)
+
+
+app.add_middleware(AccessMiddleware)
+
+
+class _RedactUnlock(logging.Filter):
+    """Access logs show `/api/unlock` without its query string (the access code)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and str(args[2]).startswith("/api/unlock"):
+            record.args = args[:2] + ("/api/unlock",) + args[3:]
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_RedactUnlock())
+
+
 def _title(title_id: str):
-    try:
-        return STORE.get(title_id)
-    except KeyError:
+    t = STORE.titles.get(title_id)
+    if t is None or (t.hidden and not UNLOCKED.get()):
         raise HTTPException(404, "unknown title")
+    return t
 
 
 @app.get("/healthz")
 @app.get("/api/health")                                # Cloud Run reserves /healthz on its front end
 def healthz():
-    return {"ok": True, "titles": len(STORE.titles)}
+    return {"ok": True, "titles": sum(1 for t in STORE.titles.values() if not t.hidden)}
 
 
 @app.get("/api/titles")
 def titles():
     out = []
-    # the featured film first: the front end preselects the first title
-    for t in sorted(STORE.titles.values(), key=lambda t: (t.title != config.FEATURED_TITLE, t.title)):
+    unlocked = UNLOCKED.get()
+    # the featured film first: the front end preselects the first title; private preview titles after the public ones
+    for t in sorted(STORE.titles.values(), key=lambda t: (t.hidden, t.title != config.FEATURED_TITLE, t.title)):
+        if t.hidden and not unlocked:
+            continue
         a = t.pack["asset"]
         poster = int(a["story_start_s"] + min(90.0, (a["story_end_s"] - a["story_start_s"]) * 0.12))
-        out.append({"id": t.id, "title": t.title, "duration_s": a["duration_s"], "story_start_s": a["story_start_s"],
-                    "story_end_s": a["story_end_s"], "poster_t": poster, "license": t.license,
-                    "attribution": t.attribution, "synopsis": t.synopsis})
-    return out
+        item = {"id": t.id, "title": t.title, "duration_s": a["duration_s"], "story_start_s": a["story_start_s"],
+                "story_end_s": a["story_end_s"], "poster_t": poster, "license": t.license,
+                "attribution": t.attribution, "synopsis": t.synopsis, "playback": t.playback}
+        if t.hidden:
+            item["private"] = True
+        out.append(item)
+    return JSONResponse(out, headers=PRIVATE_HEADERS if unlocked else None)
+
+
+@app.get("/api/unlock")
+def unlock(request: Request, code: str = ""):
+    """Access code → 204 with the `watch_access` cookie (30 days), or 404. At most `UNLOCK_PER_MINUTE` attempts per IP
+    and minute (429 after that), so codes cannot be guessed quickly."""
+    if wait := UNLOCKS.check(client_ip(request)):
+        return JSONResponse({"message": "Too many attempts. Try again in a minute.", "retry_after_s": wait},
+                            status_code=429, headers={"Retry-After": str(wait), **PRIVATE_HEADERS})
+    if not STORE.unlocked(code):
+        raise HTTPException(404, "not found")
+    r = Response(status_code=204, headers=PRIVATE_HEADERS)
+    r.set_cookie(config.ACCESS_COOKIE, code, max_age=config.ACCESS_COOKIE_DAYS * 86400, path="/", secure=True,
+                 httponly=True, samesite="lax")
+    return r
+
+
+class Attempts:
+    """Sliding one-minute window per IP."""
+
+    def __init__(self, per_minute: int) -> None:
+        self.per_minute = per_minute
+        self.seen: collections.OrderedDict[str, collections.deque] = collections.OrderedDict()
+
+    def check(self, ip: str) -> int:
+        """0 = allowed (and counted), else seconds to wait."""
+        now = time.monotonic()
+        q = self.seen.setdefault(ip, collections.deque())
+        self.seen.move_to_end(ip)
+        while q and now - q[0] > 60:
+            q.popleft()
+        if len(q) >= self.per_minute:
+            return max(1, math.ceil(60 - (now - q[0])))
+        q.append(now)
+        while len(self.seen) > 10_000:
+            self.seen.popitem(last=False)
+        return 0
+
+
+UNLOCKS = Attempts(config.UNLOCK_PER_MINUTE)
 
 
 @app.get("/api/titles/{title_id}/frames/{t}.jpg")
 def frame(title_id: str, t: int):
-    p = _title(title_id).thumb(t)
+    title = _title(title_id)
+    p = title.thumb(t)
     if not p.exists():
         raise HTTPException(404, "no frame")
-    return FileResponse(p, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=86400"})
+    headers = PRIVATE_HEADERS if title.hidden else {"Cache-Control": "public, max-age=86400"}
+    return FileResponse(p, media_type="image/jpeg", headers=headers)
 
 
 @app.get("/api/titles/{title_id}/video")
 def video(title_id: str):
     t = _title(title_id)
+    headers = PRIVATE_HEADERS if t.hidden else None
     if f := STORE.video_file(t):
-        return FileResponse(f, media_type="video/mp4")
+        return FileResponse(f, media_type="video/mp4", headers=headers)
     if not config.ASSET_BUCKET:
         raise HTTPException(503, "no video source configured")
-    return RedirectResponse(_signed_url(t.sha, int(time.time() // 3000)), status_code=302)
+    return RedirectResponse(_signed_url(t.video_object, int(time.time() // 3000)), status_code=302, headers=headers)
 
 
 @functools.lru_cache(maxsize=16)
-def _signed_url(sha: str, _epoch: int) -> str:
-    """V4 signed URL valid for 2 h, re-issued every 50 min (the cache key changes). Signs through the IAM API with the
-    service's own identity, so no key file is needed (requires roles/iam.serviceAccountTokenCreator on itself)."""
+def _signed_url(object_name: str, _epoch: int) -> str:
+    """V4 signed URL of a bucket object, valid for 2 h, re-issued every 50 min (the cache key changes). Signs through
+    the IAM API with the service's own identity, so no key file is needed (requires
+    roles/iam.serviceAccountTokenCreator on itself)."""
     import google.auth
     from google.auth.transport.requests import Request as AuthRequest
     from google.cloud import storage
 
     creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
     creds.refresh(AuthRequest())
-    blob = storage.Client(credentials=creds).bucket(config.ASSET_BUCKET).blob(f"assets/{sha}.mp4")
+    blob = storage.Client(credentials=creds).bucket(config.ASSET_BUCKET).blob(object_name)
     return blob.generate_signed_url(version="v4", expiration=dt.timedelta(hours=2), method="GET",
                                     service_account_email=getattr(creds, "service_account_email", None),
                                     access_token=creds.token)

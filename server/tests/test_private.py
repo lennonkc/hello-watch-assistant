@@ -1,0 +1,270 @@
+"""Private preview titles: loading the titles file, on-demand thumbnails, access codes, hidden everywhere unless
+unlocked (no network: a fake bucket on local disk)."""
+import collections
+import copy
+import hashlib
+import json
+import shutil
+import threading
+import time
+
+import pytest
+from fastapi.testclient import TestClient
+
+from ingest import packdb
+from ingest.build import AUTO_OK, device_view
+from ingest.tests.conftest import SHA, mini_pack
+from server import config, packs
+
+PSHA = "cd" * 32
+CODE = "open-sesame-42"
+
+
+class FakeBucket:
+    """The bucket as a directory: object name = relative path."""
+
+    def __init__(self, root):
+        self.root = root
+        self.reads = collections.Counter()
+        self.lock = threading.Lock()
+        self.delay = 0.0
+
+    def names(self, prefix):
+        return sorted(n for n in (str(p.relative_to(self.root)) for p in self.root.rglob("*") if p.is_file())
+                      if n.startswith(prefix))
+
+    def download_many(self, prefix, rel, dest):
+        for r in rel:
+            (dest / r).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(self.root / (prefix + r), dest / r)
+            with self.lock:
+                self.reads[prefix + r] += 1
+
+    def read(self, name):
+        time.sleep(self.delay)
+        with self.lock:
+            self.reads[name] += 1
+        p = self.root / name
+        return p.read_bytes() if p.is_file() else None
+
+
+def _write_pack(d, pack, thumbs=range(0, 5)):
+    d.mkdir(parents=True, exist_ok=True)
+    packdb.write_db(pack, d / "pack.db")
+    (d / "MANIFEST.json").write_text(json.dumps({"distribution": pack["pack_meta"]["distribution"]}))
+    (d / "thumbs").mkdir(exist_ok=True)
+    for t in thumbs:
+        (d / "thumbs" / f"t{t:05d}.jpg").write_bytes(b"\xff\xd8jpeg%d" % t)
+
+
+def _device_auto(sha):
+    p = copy.deepcopy(mini_pack())
+    p["asset"]["asset_sha256"] = sha
+    p["asset"]["content_id"] = "secret"
+    d = device_view(p, AUTO_OK)
+    d["pack_meta"] = {**p["pack_meta"], "asset_sha256": sha, "distribution": "device-auto"}
+    return d
+
+
+@pytest.fixture
+def world(tmp_path, monkeypatch):
+    """A bucket with one public film (master) and one private preview title (device-auto) under `packs/`, the private
+    titles file under `priv/`, and a one-film catalog."""
+    gcs = tmp_path / "gcs"
+    _write_pack(gcs / "packs" / SHA / "master", mini_pack())
+    _write_pack(gcs / "packs" / PSHA / "device-auto", _device_auto(PSHA), thumbs=range(0, 101))
+    doc = {"access_sha256": [hashlib.sha256(CODE.encode()).hexdigest(), "not-hex"],
+           "titles": [{"id": "pv1", "sha": PSHA, "title": "Preview One", "synopsis": "s", "license": "private",
+                       "attribution": "Private preview for evaluation. Not for redistribution.", "dist": "device-auto",
+                       "video_object": f"previews/{PSHA}-640.mp4"},
+                      {"id": "bad", "sha": "xyz", "title": "t"},
+                      {"id": "nopack", "sha": "ef" * 32, "title": "t"}]}
+    (gcs / "priv").mkdir()
+    (gcs / "priv" / "titles.json").write_text(json.dumps(doc))
+    cat = tmp_path / "cat"
+    (cat / "catalog").mkdir(parents=True)
+    (cat / "ingest" / "titles").mkdir(parents=True)
+    (cat / "catalog" / "catalog.json").write_text(json.dumps({"items": [{"id": "mini", "title": "Mini"}]}))
+    (cat / "ingest" / "titles" / "mini.json").write_text(json.dumps({"expected_asset_sha256": [SHA],
+                                                                     "license": "CC-BY-3.0"}))
+    bucket = FakeBucket(gcs)
+    monkeypatch.setattr(packs, "bucket_for", lambda name: bucket)
+    monkeypatch.setattr(config, "CATALOG_ROOT", cat)
+    monkeypatch.setattr(config, "PACKS_DIR", None)
+    monkeypatch.setattr(config, "PACKS_GCS", "gs://bkt/packs")
+    monkeypatch.setattr(config, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(config, "PRIVATE_TITLES", "gs://bkt/priv/titles.json")
+    return bucket
+
+
+def test_store_loads_private_titles_hidden_with_pack_only(world, caplog):
+    caplog.set_level("INFO")
+    store = packs.Store().load()
+    pub, pv = store.get("mini"), store.get("pv1")
+    assert not pub.hidden and pub.playback == "standard" and pub.video_object == f"assets/{SHA}.mp4"
+    assert pv.hidden and pv.dist == "device-auto" and pv.playback == "preview"
+    assert pv.video_object == f"previews/{PSHA}-640.mp4" and pv.root.parts[-2:] == (PSHA, "device-auto")
+    assert sorted(store.titles) == ["mini", "pv1"]              # bad sha and missing pack skipped
+    # public: everything copied at startup; private: only pack.db + MANIFEST.json, thumbnails on demand
+    assert (pub.root / "thumbs" / "t00003.jpg").exists()
+    assert not (pv.root / "thumbs" / "t00003.jpg").exists()
+    assert world.reads[f"packs/{PSHA}/device-auto/pack.db"] == 1
+    assert world.reads[f"packs/{PSHA}/device-auto/MANIFEST.json"] == 1
+    assert pv.pack["pack_meta"]["distribution"] == "device-auto"
+    assert store.unlocked(CODE) and not store.unlocked("open-sesame-43") and not store.unlocked("")
+    text = caplog.text
+    assert "Preview One" not in text and PSHA[:12] not in text and "private preview titles: 1 loaded" in text
+
+
+@pytest.mark.parametrize("content", [None, "{not json", json.dumps({"titles": "x"})])
+def test_missing_or_broken_private_file_is_a_warning(world, content, caplog):
+    f = world.root / "priv" / "titles.json"
+    if content is None:
+        f.unlink()
+    else:
+        f.write_text(content)
+    store = packs.Store().load()
+    assert sorted(store.titles) == ["mini"] and not store.access
+    assert "private titles: not loaded" in caplog.text
+
+
+def test_thumbnails_on_demand_negative_cache_eviction_and_prefetch(tmp_path):
+    src = tmp_path / "gcs"
+    (src / "p" / "thumbs").mkdir(parents=True)
+    for t in range(10):
+        (src / "p" / "thumbs" / f"t{t:05d}.jpg").write_bytes(b"j%d" % t)
+    b = FakeBucket(src)
+    rt = packs.RemoteThumbs(b, "p/thumbs", tmp_path / "local", max_files=3)
+    assert rt.ensure(1).read_bytes() == b"j1" and rt.ensure(1).exists()
+    assert b.reads["p/thumbs/t00001.jpg"] == 1                       # second call served locally
+    assert not rt.ensure(50).exists() and not rt.ensure(50).exists()
+    assert b.reads["p/thumbs/t00050.jpg"] == 1                       # a miss is remembered
+    for t in (2, 3, 4):
+        rt.ensure(t)
+    assert sorted(int(p.stem[1:]) for p in (tmp_path / "local").glob("t*.jpg")) == [2, 3, 4]   # 1 evicted
+    rt.ensure(2)                                                     # touch 2: 3 is now the oldest
+    rt.ensure(5)
+    assert sorted(int(p.stem[1:]) for p in (tmp_path / "local").glob("t*.jpg")) == [2, 4, 5]
+    rt2 = packs.RemoteThumbs(b, "p/thumbs", tmp_path / "local2", max_files=100)
+    assert rt2.prefetch([6, 7, 8, 99, -1]) == [6, 7, 8]
+
+
+def test_concurrent_requests_share_one_download(tmp_path):
+    src = tmp_path / "gcs"
+    (src / "thumbs").mkdir(parents=True)
+    (src / "thumbs" / "t00007.jpg").write_bytes(b"seven")
+    b = FakeBucket(src)
+    b.delay = 0.2
+    rt = packs.RemoteThumbs(b, "thumbs", tmp_path / "local")
+    got = []
+    threads = [threading.Thread(target=lambda: got.append(rt.ensure(7).read_bytes())) for _ in range(6)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert got == [b"seven"] * 6 and b.reads["thumbs/t00007.jpg"] == 1
+
+
+def test_fetch_errors_do_not_fail_and_retry_later(tmp_path):
+    class Broken:
+        calls = 0
+
+        def read(self, name):
+            Broken.calls += 1
+            raise OSError("network")
+
+    rt = packs.RemoteThumbs(Broken(), "x", tmp_path / "l", error_ttl_s=0.0)
+    assert not rt.ensure(3).exists()
+    assert not rt.ensure(3).exists() and Broken.calls == 2          # error TTL 0: asked again
+
+
+@pytest.fixture
+def client(world, monkeypatch):
+    from server import main
+    store = packs.Store().load()
+    monkeypatch.setattr(packs, "STORE", store)
+    monkeypatch.setattr(main, "STORE", store)
+    monkeypatch.setattr(main, "UNLOCKS", main.Attempts(config.UNLOCK_PER_MINUTE))
+    monkeypatch.setattr(main, "_signed_url", lambda obj, _e: f"https://signed.example/{obj}")
+    monkeypatch.setattr(config, "ASSET_BUCKET", "bkt")
+    monkeypatch.setattr(config, "VIDEO_DIR", None)
+    return TestClient(main.app)
+
+
+COOKIE = {"Cookie": f"watch_access={CODE}"}
+
+
+def test_hidden_everywhere_without_the_cookie(client):
+    assert [t["id"] for t in client.get("/api/titles").json()] == ["mini"]
+    assert client.get("/api/titles").json()[0]["playback"] == "standard"
+    assert client.get("/api/health").json() == {"ok": True, "titles": 1}
+    for url in ("/api/titles/pv1/frames/3.jpg", "/api/titles/pv1/video", "/api/titles/pv1/gate?p=10"):
+        r = client.get(url, follow_redirects=False)
+        assert r.status_code == 404 and r.json() == {"detail": "unknown title"}, url
+    r = client.post("/api/ask", json={"title_id": "pv1", "p": 10, "question": "Who is that?"})
+    assert r.status_code == 404
+    bad = {"Cookie": "watch_access=wrong"}
+    assert client.get("/api/titles/pv1/gate?p=10", headers=bad).status_code == 404
+
+
+def test_unlocked_titles_frames_and_video(client, world):
+    items = client.get("/api/titles", headers=COOKIE)
+    assert items.headers["cache-control"] == "private, no-store"
+    pv = [t for t in items.json() if t["id"] == "pv1"][0]
+    assert pv["private"] is True and pv["playback"] == "preview" and items.json()[0]["id"] == "mini"
+    r = client.get("/api/titles/pv1/frames/3.jpg", headers=COOKIE)
+    assert r.status_code == 200 and r.content == b"\xff\xd8jpeg3" and r.headers["cache-control"] == "private, no-store"
+    assert world.reads[f"packs/{PSHA}/device-auto/thumbs/t00003.jpg"] == 1
+    assert client.get("/api/titles/pv1/frames/999.jpg", headers=COOKIE).status_code == 404
+    v = client.get("/api/titles/pv1/video", headers=COOKIE, follow_redirects=False)
+    assert v.status_code == 302 and v.headers["location"] == f"https://signed.example/previews/{PSHA}-640.mp4"
+    assert v.headers["cache-control"] == "private, no-store"
+    pub = client.get("/api/titles/mini/video", follow_redirects=False)
+    assert pub.headers["location"].endswith(f"assets/{SHA}.mp4") and "cache-control" not in pub.headers
+    assert client.get("/api/titles/mini/frames/3.jpg").headers["cache-control"] == "public, max-age=86400"
+    g = client.get("/api/titles/pv1/gate?p=53", headers=COOKIE).json()
+    assert g["eligible"]["scene"] == 1                               # the device-auto pack gates like master
+
+
+def test_unlock_sets_the_cookie_and_limits_attempts(client):
+    r = client.get("/api/unlock", params={"code": CODE})
+    assert r.status_code == 204
+    c = r.headers["set-cookie"]
+    for part in (f"watch_access={CODE}", "HttpOnly", "Max-Age=2592000", "Path=/", "SameSite=lax", "Secure"):
+        assert part in c
+    assert r.headers["cache-control"] == "private, no-store"
+    assert client.get("/api/unlock", params={"code": "nope"}).status_code == 404
+    assert client.get("/api/unlock").status_code == 404
+    codes = [client.get("/api/unlock", params={"code": f"guess{i}"}).status_code for i in range(10)]
+    assert codes[:7] == [404] * 7 and codes[7:] == [429] * 3        # 10 attempts per minute, the first 3 above
+    assert client.get("/api/unlock", params={"code": CODE}).status_code == 429
+
+
+def test_unlock_query_is_redacted_from_access_logs():
+    import logging
+
+    from server import main
+    rec = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d',
+                            ("1.2.3.4:5", "GET", f"/api/unlock?code={CODE}", "1.1", 204), None)
+    main._RedactUnlock().filter(rec)
+    assert CODE not in rec.getMessage() and "/api/unlock" in rec.getMessage()
+
+
+def test_check_pack_reports_what_the_service_would_miss(tmp_path):
+    p = mini_pack()
+    packdb.write_db(p, tmp_path / "pack.db")
+    issues = packs.check_pack(tmp_path / "pack.db")
+    assert any(i.startswith("no rows in:") and "embeddings" in i for i in issues)
+    d = _device_auto(PSHA)
+    packdb.write_db(d, tmp_path / "d.db")
+    assert not any("review_log" in i or "missing tables" in i for i in packs.check_pack(tmp_path / "d.db"))
+
+
+def test_private_spec_validation():
+    ok = packs.private_spec({"id": "a", "sha": "AB" * 32, "title": "T"})
+    assert ok["sha"] == "ab" * 32 and ok["dist"] == "master" and ok["video_object"] == f"assets/{'ab' * 32}.mp4"
+    for bad in ({"id": "a", "sha": "ab" * 32, "title": "T", "dist": "device"},
+                {"id": "a", "sha": "ab" * 32, "title": "T", "video_object": "../x.mp4"},
+                {"id": "a/b", "sha": "ab" * 32, "title": "T"}, {"id": "a", "sha": "ab" * 32}):
+        with pytest.raises(ValueError):
+            packs.private_spec(bad)
