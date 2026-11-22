@@ -363,10 +363,9 @@ class Moment:
 
     def evidence_frame(self, start_s: float, end_s: float) -> int | None:
         t = min(int((start_s + end_s) / 2), self.fp)
-        for cand in (t, int(start_s), self.fp):
-            if 0 <= cand <= self.fp and self.title.thumb(cand).exists():
-                return cand
-        return None
+        prefs = [c for c in (t, int(start_s), self.fp) if 0 <= c <= self.fp]
+        have = set(self.title.prefetch(prefs))                   # one concurrent fetch for on-demand titles
+        return next((c for c in prefs if c in have), None)
 
     def gate_counts(self) -> dict:
         total = retrieval.per_pack(self.pack, "gate_totals", lambda _p: dict(collections.Counter(

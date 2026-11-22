@@ -205,7 +205,7 @@ def build(m: Moment, tap: dict | None, turn: A.Turn) -> Context:
 
     story = m.story_so_far(limit=STORY_ITEMS)
     sections.append(_story(story))
-    lookups.append(Lookup("ctx-3", "story_so_far", A.TOOL_LABELS["story_so_far"], A.note_story(turn, m, story)))
+    lookups.append(Lookup("ctx-3", "story_so_far", A.TOOL_LABELS["story_so_far"], A.note_story(turn, m, story, frames=False)))
 
     return Context(text="\n\n".join(sections), frame=frame, frame_note=note, lookups=lookups,
                    tapped_terms=terms, highlight_fresh=box_fresh, subjects=focus(m, screen))

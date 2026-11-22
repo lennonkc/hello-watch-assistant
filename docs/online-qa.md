@@ -112,9 +112,17 @@ Chinese punctuation, `server/answer.py`). Each finished sentence is checked by t
 already sent, so terms spanning a sentence boundary are caught too. It is sent as a `delta` only if it passes; a failing
 sentence is dropped and logged. Besides spec §7 the guard applies the identity co-occurrence rule: while an identity
 link a = b is pending, no sentence may name both sides, and when the answer is about a (the tapped character, an
-on-screen a without b, or an a the question mentions) b's names may not appear at all. The evidence list goes through
-the same check, and so do the tool arguments the step trace shows (names not visible yet become labels; anything else
-the guard objects to is not shown).
+on-screen a without b, or an a the question mentions) b's names may not appear at all. The tool arguments the step
+trace shows go through the same check (names not visible yet become labels; anything else the guard objects to is not
+shown).
+
+**Sources shown with the answer** (`server/evidence.py`). The context is attached whether or not the answer uses it, so
+it is not the evidence list. The lookups and tools only offer candidates (recaps sentence by sentence, story items,
+lines, the tapped entity's facts, search hits); once the answer is final the server keeps those that share content
+words with it (two, or one for a fact about the tapped entity the answer talks about), at most four, with one frame
+each, the tapped entity's reference stills and the paused frame. Every line, frame caption and the highlight label
+passes the guard relative to the answer's subject: next to an answer about a (or naming a), nothing may name b, and the
+reverse. A refusal or a fallback shows no sources and no frames.
 
 The prompt forbids text before a tool call. A model call's first sentence is held back until a second one starts or the
 call ends without a function call, so a one-sentence "let me check" is never sent (`held_preamble`). A longer preamble

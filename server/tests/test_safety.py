@@ -220,3 +220,57 @@ def test_per_question_build_is_fast_on_a_long_film(title):
     assert worst < 0.15, worst
     assert "1:40:05" in C.build(Moment(title, 6005.3), None, A.Turn()).text
 
+
+
+# ── E1–E3: sources shown with the answer ─────────────────────────────
+
+def test_sources_are_what_the_answer_rests_on_and_pass_the_guard(title):
+    from server import evidence as E
+    m = Moment(title, 61.2)
+    links = guard.identity_links(m, question="Who is the wolf?")               # the answer is about the a-side
+    answer_text = "The wolf watches the meadow from the trees."
+    check = lambda s: guard.source_violations(m.pack, s, 61.2, links, answer_text)   # noqa: E731
+    cands = [E.Candidate("line", "line", 20, 20, "Bob: The wolf watches the meadow."),
+             E.Candidate("line", "line", 21, 21, "Alice: The wolf watches the meadow."),
+             E.Candidate("story", "event", 30, 30, "Alice crosses a river.", frame_at=30)]
+    assert [c.text for c in E.select(cands, answer_text, check)] == ["Alice: The wolf watches the meadow."]
+    many = [E.Candidate("line", "line", i, i, f"Alice sees the wolf by the meadow trees {i}.") for i in range(9)]
+    assert len(E.select(many, answer_text, check)) == E.CAP
+    assert E.select(cands, "The film hasn't shown that yet.", check) == []
+    assert E.frames(m, [], "The film hasn't shown that yet.", check) == []
+    # an answer naming the b-side: no source may refer to the a-side
+    about_b = "Bob climbed a tree in the meadow."
+    check_b = lambda s: guard.source_violations(m.pack, s, 61.2, guard.identity_links(m), about_b)   # noqa: E731
+    assert check_b("The wolf came out of the forest.") and not check_b("Alice climbed a tree in the meadow.")
+
+
+def test_who_is_this_a_side_on_screen_shows_no_b_side_source(wired):
+    # like c5:sintel-g03: only the a-side is identified as the subject; eligible lines name the b-side
+    wired.ctx.script = [{"text": "That is the wolf, grey and watchful, watching the meadow."}]
+    ev = wired.ask(61.2, "Who is this?")
+    a = answer(ev)
+    assert a["text"].startswith("That is the wolf") and "Bob" not in json.dumps(ev)
+
+
+def test_recap_sentence_not_whole_recap_and_no_linked_name(wired):
+    # like c5:tos-g04: "Who is the older man?" with a recap that names the b-side in another sentence
+    pack = main.STORE.get("mini").pack
+    recap = {"recap_id": "r02", "upto_scene_id": "s01", "upto_s": 58.0, "reveal_at_s": 58.0, "source": "t",
+             "text_en": "Alice met Bob in the meadow. Then a grey wolf came out of the dark forest.", "text_zh": None,
+             "review_state": "auto"}
+    pack["recaps"].append(recap)
+    try:
+        wired.ctx.script = [{"text": "That is the grey wolf that came out of the dark forest."}]
+        ev = wired.ask(61.2, "Who is the wolf?")
+        assert "Alice met Bob" in request_text(wired.ctx.requests[0])          # the model had the whole recap …
+        a = answer(ev)
+        assert [e["text"] for e in a["evidence"]] == ["Then a grey wolf came out of the dark forest."]   # … not shown
+        assert "Bob" not in json.dumps(ev)
+    finally:
+        pack["recaps"].remove(recap)
+
+
+def test_a_refusal_shows_no_sources(wired):
+    wired.ctx.script = [{"text": "The film hasn't shown that yet."}]
+    ev = wired.ask(61.2, "What happens to Alice later?")
+    assert answer(ev)["evidence"] == [] and answer(ev)["frames"] == []

@@ -33,6 +33,7 @@ from starlette.requests import HTTPConnection
 from server import agent as A
 from server import config, guard, prompts
 from server import context as C
+from server import evidence as E
 from server.answer import GuardedAnswer, split_ready
 from server.knowledge import Moment, ts
 from server.packs import STORE
@@ -531,14 +532,14 @@ def _checker(t, m, p: float, subjects, question: str, turn: A.Turn):
         return {} if check(" ".join(v for v in clean.values() if isinstance(v, str))) else clean
 
     turn.args_filter = args_filter
-    return check
+    return check, links
 
 
 async def flow_context(t, body: Ask, p: float, user: str, state: dict, emit, turn: A.Turn, rec: dict) -> dict:
     """Server-built context, then one streamed run; each finished sentence is guarded before it is sent."""
     m = A.moment_of(state)
     ctx = await asyncio.to_thread(C.build, m, state["tap"], turn)
-    check = await asyncio.to_thread(_checker, t, m, p, ctx.subjects, body.question, turn)
+    check, links = await asyncio.to_thread(_checker, t, m, p, ctx.subjects, body.question, turn)
     for lk in ctx.lookups:
         turn.tools.append(f"ctx:{lk.name}")
         await emit("tool", {"id": lk.id, "name": lk.name, "label": lk.label, "args": {}})
@@ -573,7 +574,7 @@ async def flow_context(t, body: Ask, p: float, user: str, state: dict, emit, tur
     else:
         HISTORY.add(user, p, question, text)
     rec["dropped"] = len(answer.dropped)
-    return {"text": text, "terms": ctx.tapped_terms, "check": check,
+    return {"text": text, "terms": ctx.tapped_terms, "links": links,
             "rewritten": bool(answer.dropped or rec["retried"] or rec["fallback"] or sink.preamble)}
 
 
@@ -582,7 +583,7 @@ async def flow_tools(t, body: Ask, p: float, user: str, state: dict, emit, turn:
     runner, deadline, question = RUNNERS["tools"], turn.started + config.ASK_DEADLINE_S, body.question.strip()
     m = A.moment_of(state)
     subjects = await asyncio.to_thread(lambda: C.focus(m, m.on_screen(state["tap"], refs=True)))
-    check = await asyncio.to_thread(_checker, t, m, p, subjects, body.question, turn)
+    check, links = await asyncio.to_thread(_checker, t, m, p, subjects, body.question, turn)
     sid = await CONVERSATIONS.get(user, p)
     text, status = await _run(runner, user, sid, question, emit, turn, deadline, None, False, state)
     hits, rewritten = check(text), False
@@ -605,7 +606,7 @@ async def flow_tools(t, body: Ask, p: float, user: str, state: dict, emit, turn:
     rec["first_text_ms"] = int((time.monotonic() - rec["t0"]) * 1000)
     await emit("delta", {"text": text})
     terms = await asyncio.to_thread(C.tapped_terms, A.moment_of(state), state["tap"])
-    return {"text": text, "terms": terms, "check": check, "rewritten": rewritten}
+    return {"text": text, "terms": terms, "links": links, "rewritten": rewritten}
 
 
 FLOWS = {"context": flow_context, "tools": flow_tools}
@@ -643,14 +644,10 @@ async def ask(body: Ask, request: Request):
             await emit("gate", {"p": round(p, 2), "eligible_total": elig,
                                 "locked_total": sum(counts["total"].values()) - elig})
             out = await FLOWS[flow](t, body, p, user, state, emit, turn, rec)
-            # the highlight only when the answer is about the tapped entity, so the box never contradicts the text
-            highlight = turn.highlight if turn.highlight and C.mentions(out["text"], out["terms"]) else None
+            evidence, frames, highlight = await asyncio.to_thread(_sources, flow, t, p, state, turn, out, rec)
             total = int((time.monotonic() - turn.started) * 1000)
-            rec["highlight"] = highlight is not None
-            # evidence rows are gated, but next to an answer about the a-side of a pending identity link even an
-            # eligible line naming the b-side would hint at it: the same guard decides what is listed
-            evidence = await asyncio.to_thread(lambda: [e for e in turn.evidence if not out["check"](e["text"] or "")])
-            await emit("answer", {"text": out["text"], "evidence": evidence, "frames": turn.frames,
+            rec["highlight"], rec["evidence"] = highlight is not None, len(evidence)
+            await emit("answer", {"text": out["text"], "evidence": evidence, "frames": frames,
                                   "highlight": highlight,
                                   "guard": {"checked": True, "rewritten": out["rewritten"], "dropped": rec["dropped"]},
                                   "latency_ms": total, "usage": turn.usage(),
@@ -678,6 +675,28 @@ async def ask(body: Ask, request: Request):
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _sources(flow: str, t, p: float, state: dict, turn: A.Turn, out: dict, rec: dict):
+    """(evidence, frames, highlight) to show with the final answer. Every evidence line, frame caption and the
+    highlight label goes through the guard relative to the answer's subject (`guard.source_violations`). In the
+    context flow only the sources the answer rests on are listed (`server.evidence`); a refusal or fallback lists
+    none. The highlight only when the answer is about the tapped entity, so the box never contradicts the text.
+    Blocking (frames may be fetched): call it in a worker thread."""
+    text = out["text"]
+
+    def check(s: str) -> list[dict]:
+        return guard.source_violations(t.pack, s or "", p, out["links"], text)
+
+    about_tapped = C.mentions(text, out["terms"])
+    highlight = turn.highlight if turn.highlight and about_tapped and not check(turn.highlight["label"]) else None
+    if flow != "context":
+        return ([e for e in turn.evidence if not check(e["text"])],
+                [f for f in turn.frames if not check(f["caption"])], highlight)
+    m, refusal = A.moment_of(state), bool(rec.get("fallback"))
+    kept = E.select(turn.support, text, check, about_tapped=about_tapped, refusal=refusal)
+    frames = E.frames(m, kept, text, check, ref_frames=turn.ref_frames if about_tapped else (), refusal=refusal)
+    return [c.row() for c in kept], frames, highlight
 
 
 def _log_question(flow: str, t, p: float, body: Ask, bench: bool, turn: A.Turn, rec: dict) -> None:

@@ -125,6 +125,8 @@ Order: `gate`, then the trace (`tool` / `tool_result`, possibly `highlight`), th
 - `highlight.bbox` is `[ymin, xmin, ymax, xmax]` normalised to 0–1000 on frame `frame_t` (≤ `P`, from the shot's
   keyframe). In `answer` it is `null` unless the answer text mentions the tapped entity, so the box never contradicts
   the text; the early `highlight` event is sent only when the box is fresh (within 1 s of `floor(P)`).
+- `evidence`: only what the answer rests on (at most four rows, a recap as the matching sentence), each checked by the
+  output guard; empty for a refusal or a fallback.
 - `frames[].t` → `/api/titles/{id}/frames/{t}.jpg`; every frame is at or before `P`.
 - `guard.rewritten = true` means the output guard caught something: `dropped` sentences were never sent, or the
   answer was regenerated (one retry) or replaced by a fixed reply.

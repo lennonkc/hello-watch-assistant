@@ -99,6 +99,26 @@ def _cooccurrence(links, text: str) -> list[dict]:
     return hits
 
 
+def _hit(terms, text: str) -> str | None:
+    return next((t for t, cs in terms if term_matches(t, text, "word", cs)), None)
+
+
+def source_violations(pack: dict, text: str, P: float, links, answer: str) -> list[dict]:
+    """A source shown next to `answer` (evidence line, frame caption, highlight label): rules 1–4 on its own text, and
+    rule 4 relative to the answer's subject — next to an answer about a (or naming a) no source may name b, and next
+    to an answer naming b no source may refer to a."""
+    hits = violations(pack, text, P, links)
+    for lk in links:
+        about_a = lk.focus or _hit(lk.a_terms, answer) is not None
+        about_b = _hit(lk.b_terms, answer) is not None
+        b_here, a_here = _hit(lk.b_terms, text), _hit(lk.a_terms, text)
+        if about_a and b_here:
+            hits.append({"kind": "identity_cooccurrence", "term": b_here})
+        elif about_b and a_here:
+            hits.append({"kind": "identity_cooccurrence", "term": a_here})
+    return hits
+
+
 def violations(pack: dict, text: str, P: float, links=()) -> list[dict]:
     """[{kind, term}] for every guard hit in `text` at P (empty = safe). Terms stay on the server. `links`: the pending
     identity links from `identity_links` (rule 4)."""

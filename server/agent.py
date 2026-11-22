@@ -28,6 +28,8 @@ from google.genai import types
 
 from ingest.retrieval import OnlineEmbedder
 from server import config, prompts
+from server.answer import split_sentences
+from server.evidence import Candidate
 from server.knowledge import TYPE_LABEL, Moment, secs, ts
 from server.packs import STORE
 
@@ -67,6 +69,8 @@ class Turn:
     thought_tokens: int = 0
     tools: list = dataclasses.field(default_factory=list)      # names, in call order, server-run lookups as "ctx:<name>"
     args_filter: object | None = None           # model-written tool arguments → what the step trace may show
+    support: list = dataclasses.field(default_factory=list)    # evidence.Candidate: sources the answer may rest on
+    ref_frames: list = dataclasses.field(default_factory=list) # (t, caption): the tapped entity's reference stills
 
     def add_frame(self, t: int | None, caption: str) -> None:
         if t is not None and all(f["t"] != t for f in self.frames) and len(self.frames) < 6:
@@ -117,19 +121,26 @@ def _summarise(tool_context: ToolContext, text: str) -> None:
 
 # ── bookkeeping shared by the tools and the server-built context ─────
 
-def note_story(turn: Turn, m: Moment, out: dict) -> str:
+def note_story(turn: Turn, m: Moment, out: dict, frames: bool = True) -> str:
+    """`frames=False` (context flow): sources and their frames are chosen after the answer (`server.evidence`)."""
     items = out.get("since_recap") or out.get("so_far") or []
     if "recap" in out:
         upto = secs(out["recap"]["up_to"])
         turn.add_evidence("recap", upto, upto, out["recap"]["text"])
-    for it in items[-3:]:
-        turn.add_frame(m.evidence_frame(secs(it["at"]), secs(it["at"])), f"Earlier: {it['at']}")
+        turn.support += [Candidate("recap", "recap", upto, upto, s.strip()) for s in split_sentences(out["recap"]["text"])]
+    for it in items:
+        at = secs(it["at"])
+        turn.support.append(Candidate("story", TYPE_LABEL.get(it["type"], it["type"]), at, at, it["text"], frame_at=at))
+    if frames:
+        for it in items[-3:]:
+            turn.add_frame(m.evidence_frame(secs(it["at"]), secs(it["at"])), f"Earlier: {it['at']}")
     return (f"Recap up to {out['recap']['up_to']} + " if "recap" in out else "") + f"{len(items)} later moments"
 
 
 def note_dialogue(turn: Turn, lines: list[dict]) -> str:
     for ln in lines[-3:]:
         turn.add_evidence("cue", ln["t"], ln["t"], f"{ln['speaker']}: {ln['text']}")
+    turn.support += [Candidate("line", "line", ln["t"], ln["t"], f"{ln['speaker']}: {ln['text']}") for ln in lines]
     return f"{len(lines)} lines" + (f" since {lines[0]['at']}" if lines else "")
 
 
@@ -142,9 +153,13 @@ def note_on_screen(turn: Turn, m: Moment, out: dict) -> str:
     for e in focus:
         for fact in e.get("facts", [])[-2:]:
             turn.add_evidence("character_fact", m.P, m.P, f"{e['label']}: {fact}")
+        turn.support += [Candidate("fact", "character", m.P, m.P, f"{e['label']}: {fact}") for fact in e.get("facts", [])]
     for e in focus:
         for t in e.get("reference_frames", []):
             turn.add_frame(t, f"{e['label']} at {ts(t)}")
+    if "tapped" in out:
+        e = ents[out["tapped"]]
+        turn.ref_frames = [(t, f"{e['label']} at {ts(t)}") for t in e.get("reference_frames", [])]
     if "tapped" in out:
         return f"Tapped: {ents[out['tapped']]['label']}"
     return f"{len(ents)} on screen" if ents else "Nothing identified on screen"
@@ -181,6 +196,8 @@ async def search_moments(query: str, tool_context: ToolContext) -> dict:
         results.append({"at": ts(h.start_s), "type": TYPE_LABEL.get(h.item_type, h.item_type), "text": h.text})
         if h.item_type != "cue":
             turn.add_evidence(h.item_type, h.start_s, h.end_s, h.text)
+        turn.support.append(Candidate("search", TYPE_LABEL.get(h.item_type, h.item_type), h.start_s, h.end_s, h.text,
+                                      frame_at=h.start_s if h.item_type in ("scene", "event", "shot_caption") else None))
     picks = [h for h in hits if h.item_type in ("scene", "event", "shot_caption")][:2]
     frames = await asyncio.to_thread(lambda: [m.evidence_frame(h.start_s, h.end_s) for h in picks])
     for h, f in zip(picks, frames):
@@ -224,7 +241,7 @@ async def look_closer(question: str, tool_context: ToolContext) -> dict:
     # apart), all ≤ floor(P), read concurrently
     step = max(3, math.ceil((win[1] - win[0]) / max(1, config.LOOK_STILLS - 1))) if win else 3
     wanted = [m.fp] + ([] if video or not win else list(range(int(win[1]), int(win[0]) - 1, -step))[::-1])
-    jpegs = await asyncio.gather(*(asyncio.to_thread(read_thumb, m.title, t) for t in wanted))
+    jpegs = await asyncio.to_thread(read_thumbs, m.title, wanted)
     frame, stills = jpegs[0], [(t, b) for t, b in zip(wanted[1:], jpegs[1:]) if b is not None]
     if video:
         # whole-film clip from Cloud Storage (has audio, but adds tens of seconds of latency)
@@ -256,8 +273,14 @@ async def look_closer(question: str, tool_context: ToolContext) -> dict:
 
 def read_thumb(title, t: int) -> bytes | None:
     """One thumbnail's bytes, or None. Blocking (may fetch from Cloud Storage): call it in a worker thread."""
-    path = title.thumb(t)
-    return path.read_bytes() if path.exists() else None
+    return read_thumbs(title, [t])[0]
+
+
+def read_thumbs(title, ts_: list[int]) -> list[bytes | None]:
+    """Several thumbnails' bytes (None where the film has no frame), fetched together: one `Title.prefetch` call
+    downloads the missing ones concurrently for on-demand titles. Blocking: call it in a worker thread."""
+    have = set(title.prefetch(ts_))
+    return [title.thumb(t).read_bytes() if int(t) in have else None for t in ts_]
 
 
 async def vision_generate(parts: list) -> types.GenerateContentResponse:

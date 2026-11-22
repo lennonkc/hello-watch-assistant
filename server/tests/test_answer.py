@@ -332,28 +332,31 @@ def test_blank_cues_never_count(wired):
         pack["cues"].remove(blank)
 
 
-def test_thumbnails_are_read_off_the_event_loop_and_stills_concurrently(wired, monkeypatch):
+def test_thumbnails_are_read_off_the_event_loop_and_stills_together(wired, monkeypatch):
     """`Title.thumb()` may block (on-demand fetch from Cloud Storage): no call on the ask path runs on the event loop,
-    and look_closer fetches its stills in parallel."""
-    import threading
-
+    and look_closer asks for the paused frame and all its stills in one `Title.prefetch` (concurrent downloads)."""
     from server import agent as A
     from server.packs import Title
-    real, on_loop, active, peak, lock = Title.thumb, [], [0], [0], threading.Lock()
+    real, real_prefetch, on_loop, batches = Title.thumb, Title.prefetch, [], []
 
-    def slow_thumb(self, t):
+    def on_the_loop() -> bool:
         try:
             asyncio.get_running_loop()
-            on_loop.append(t)
+            return True
         except RuntimeError:
-            pass
-        with lock:
-            active[0] += 1
-            peak[0] = max(peak[0], active[0])
-        time.sleep(0.02)
-        with lock:
-            active[0] -= 1
+            return False
+
+    def slow_thumb(self, t):
+        if on_the_loop():
+            on_loop.append(t)
+        time.sleep(0.005)
         return real(self, t)
+
+    def prefetch(self, ts_):
+        if on_the_loop():
+            on_loop.append(tuple(ts_))
+        batches.append(list(ts_))
+        return real_prefetch(self, ts_)
 
     class Seen:
         text, usage_metadata = "A wolf in the snow.", None
@@ -362,13 +365,14 @@ def test_thumbnails_are_read_off_the_event_loop_and_stills_concurrently(wired, m
         return Seen()
 
     monkeypatch.setattr(Title, "thumb", slow_thumb)
+    monkeypatch.setattr(Title, "prefetch", prefetch)
     monkeypatch.setattr(A, "vision_generate", vision)
     wired.ctx.script = [{"call": ("look_closer", {"question": "what is that"})},
                         {"call": ("search_moments", {"query": "wolf"})}, {"text": "That is the wolf."}]
     ev = wired.ask(61.2, "What is that?", tap=TAP_WOLF)
     assert [d["name"] for d in data(ev, "tool")][-2:] == ["look_closer", "search_moments"]
     assert answer(ev)["text"] == "That is the wolf." and answer(ev)["frames"]
-    assert on_loop == [] and peak[0] >= 4                     # 11 stills of the last 30 s, read side by side
+    assert on_loop == [] and max(len(b) for b in batches) >= 6            # frame + stills of the last 30 s at once
     monkeypatch.setattr(config, "FLOW", "tools")
     wired.tools.script = [{"call": ("story_so_far", {})}, {"call": ("on_screen", {})}, {"text": "A wolf."}]
     wired.ask(61.2, "What did I miss?", tap=TAP_WOLF)
