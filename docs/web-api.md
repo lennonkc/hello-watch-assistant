@@ -7,7 +7,7 @@
 
 | Path | Owner | What |
 |---|---|---|
-| `server/` | back end | FastAPI app, ADK agent, gate-aware tools, output guards, pack store |
+| `server/` | back end | FastAPI app, server-built context at P, ADK agent (one model call, two tools), sentence-level output guard, pack store with access-coded private titles |
 | `web/index.html` | front end | App shell: header, two tabs (`#experience`, `#architecture`), footer with film attribution |
 | `web/shared/tokens.css` | front end | Design tokens shared by both tabs (see below) |
 | `web/shared/motion.css`, `motion.js` | front end | Motion layer: entrances, tab / theme transitions, count-ups, ask-flow choreography; honours `prefers-reduced-motion` |

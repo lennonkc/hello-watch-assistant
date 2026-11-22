@@ -148,6 +148,17 @@ Human or automated review is applied as patches; `apply-patch` validates them, s
 Estimated at $0.75 / $3.75 per million tokens for 3.8 Flash and $2 / $12 for 3.5 Transcribe (thinking tokens billed as
 output); every call is recorded in `ledger.jsonl`.
 
+## Long films
+
+- This pipeline has no long-film mode: every film goes through the stages above as they are. Transcription is one
+  word-level pass over the whole audio track, diarization is one more pass with film-wide labels, `vision_full` sees the
+  whole film in one call, and recaps sit at scene ends only. It has been run on the three public films (11–15 min).
+- The private preview title (169 min) was ingested with a per-chunk variant of the transcription and speaker stages
+  that is not in this repository. Its pack has the same schema and is served like the others.
+- Known limits of that pack: speaker-cluster labels are per chunk, so a voice is not followed across chunk boundaries,
+  and the per-voice vote only sees that chunk's lines. Recaps are spaced by scene ends, up to about 30 minutes apart, so
+  a "what did I miss" late in a long gap starts from an older recap.
+
 ## Known limitations
 
 - Dissolves and rolling end credits have no cut; when a boundary cannot be snapped the model time is kept (`snapped = 0`, 5 s margin).
