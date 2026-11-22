@@ -12,6 +12,9 @@ from ingest.util import REPO
 
 WORDLISTS_DIR = REPO / "schema" / "wordlists"
 CJK = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
+# Characters that continue a Latin-script word. Only these bound a Latin term: CJK characters are \w in Python's
+# regex, so a `\b`-style boundary would miss "Bob" in "那是Bob。".
+LATIN_WORD = "0-9A-Za-z_\u00c0-\u024f"
 
 
 def _load_ref():
@@ -48,14 +51,20 @@ def has_cjk(s: str) -> bool:
     return bool(CJK.search(s or ""))
 
 
+def word_pattern(t: str, prefix: bool = False) -> str:
+    """Regex for a normalised term: CJK terms match as substrings; a Latin-script term must not be glued to another
+    Latin letter, digit or underscore on either side (on the left only, for a `prefix` match). Anything else —
+    spaces, punctuation, CJK — is a boundary, so "Bob" matches in "那是Bob。" and possessive "Bob's" matches too."""
+    if has_cjk(t):
+        return re.escape(t)
+    return rf"(?<![{LATIN_WORD}])" + re.escape(t) + ("" if prefix else rf"(?![{LATIN_WORD}])")
+
+
 @functools.lru_cache(maxsize=8192)
 def _compile(term: str, match: str, case_sensitive: bool) -> re.Pattern:
     if match == "regex":
         return re.compile(normalize(term, True), 0 if case_sensitive else re.IGNORECASE)
-    t = normalize(term, case_sensitive)
-    if has_cjk(t):
-        return re.compile(re.escape(t))  # CJK: substring match
-    return re.compile(r"(?<!\w)" + re.escape(t) + r"(?!\w)")  # Latin: whole word; possessive X's matches naturally
+    return re.compile(word_pattern(normalize(term, case_sensitive)))
 
 
 def term_matches(term: str, text: str, match: str = "word", case_sensitive: bool = False) -> bool:
