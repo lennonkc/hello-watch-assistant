@@ -18,9 +18,12 @@ from google.adk.models import Gemini
 from google.adk.tools import ToolContext
 from google.genai import types
 
+from ingest.retrieval import OnlineEmbedder
 from server import config, prompts
 from server.knowledge import TYPE_LABEL, Moment, ts
 from server.packs import STORE
+
+EMBEDDER = OnlineEmbedder(timeout_s=config.EMBED_TIMEOUT_S, cooldown_s=config.EMBED_COOLDOWN_S)
 
 LANG_NAME = {"en": "English", "zh": "Simplified Chinese"}
 TOOL_LABELS = {
@@ -39,15 +42,19 @@ class Turn:
     evidence: list = dataclasses.field(default_factory=list)
     frames: list = dataclasses.field(default_factory=list)
     highlight: dict | None = None
+    search_mode: str | None = None              # "vector" / "fts" for the last search_moments call
 
     def add_frame(self, t: int | None, caption: str) -> None:
         if t is not None and all(f["t"] != t for f in self.frames) and len(self.frames) < 6:
             self.frames.append({"t": t, "caption": caption})
 
     def add_evidence(self, typ: str, start_s: float, end_s: float, text: str | None) -> None:
-        if len(self.evidence) < 8 and all(e["start_s"] != start_s or e["type"] != typ for e in self.evidence):
-            self.evidence.append({"type": TYPE_LABEL.get(typ, typ), "start_s": round(start_s, 2),
-                                  "end_s": round(end_s, 2), "text": text})
+        """One row per (type, time, text): the same line found twice is shown once, two different facts stamped at
+        the same P are both kept."""
+        row = {"type": TYPE_LABEL.get(typ, typ), "start_s": round(start_s, 2), "end_s": round(end_s, 2), "text": text}
+        key = (row["type"], row["start_s"], text)
+        if len(self.evidence) < 8 and all((e["type"], e["start_s"], e["text"]) != key for e in self.evidence):
+            self.evidence.append(row)
 
 
 TURN: contextvars.ContextVar[Turn] = contextvars.ContextVar("turn")
@@ -95,8 +102,10 @@ async def search_moments(query: str, tool_context: ToolContext) -> dict:
     """Search everything the viewer has already seen (scenes, events, shots, character facts, objects and spoken
     lines) for a topic, person or thing. Write the query in English. Returns results with timestamps."""
     m = moment_of(tool_context.state)
-    hits = await asyncio.to_thread(m.search, query)
+    qvec = await EMBEDDER.vector(query)                   # bounded, no retries; None → full-text ranking
+    hits = await asyncio.to_thread(m.search, query, qvec)
     turn = _turn()
+    turn.search_mode = "vector" if qvec is not None else "fts"
     results = []
     for h in hits:
         results.append({"at": ts(h.start_s), "type": TYPE_LABEL.get(h.item_type, h.item_type), "text": h.text})
@@ -181,7 +190,7 @@ async def look_closer(question: str, tool_context: ToolContext) -> dict:
                                            thinking_config=types.ThinkingConfig(thinking_level="LOW")))
     _turn().add_frame(m.fp if frame.exists() else None, f"Paused frame {ts(m.P)}")
     _summarise(tool_context, f"Looked at the {span}")
-    return {"observation": (r.text or "").strip(), "looked_at": span}
+    return {"observation": m.sanitize((r.text or "").strip()), "looked_at": span}
 
 
 def _secs(mmss: str) -> float:

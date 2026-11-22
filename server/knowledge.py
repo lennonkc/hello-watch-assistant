@@ -3,15 +3,23 @@
 Everything the agent can read goes through `Moment`, which is built from `ingest.retrieval.Gate` (spec §5) with
 `allow_auto=True` (the v1.1 rows in the demo packs are all `auto`; time conditions are unchanged). Nothing here returns
 an item before it is eligible, and character references always use the label that is valid at P (spec §6).
+
+Defence in depth: every text a view returns goes through `Moment.sanitize`, which replaces any character name or
+non-generic alias that is not yet visible at P with that character's current label. The builder checks (§10) should
+make this a no-op; it is here so that one mislabelled row cannot put a name in front of the model or the viewer.
 """
 from __future__ import annotations
 
+import dataclasses
 import functools
 import json
 import math
+import re
 
 from ingest import retrieval
+from ingest.checks import name_terms
 from ingest.retrieval import EPS
+from ingest.textnorm import has_cjk, normalize, term_matches
 from ingest.util import mmss
 from server.packs import Title
 
@@ -19,10 +27,22 @@ BAD = {"flagged", "rejected"}
 EVIDENCE_TYPES = {"scene", "event", "recap", "shot_caption", "character_fact", "object"}
 TYPE_LABEL = {"scene": "scene", "event": "event", "recap": "recap", "shot_caption": "shot", "character_fact": "character",
               "object": "object", "cue": "line"}
+CUE_K = 3                       # dialogue lines per search, ranked separately from the other evidence
+MIN_CUE_WORDS = 3               # shorter lines ("A dragon!") hijack the ranking (docs/online-qa.md §2)
+MIN_CUE_CJK = 4
+_SENTENCE_START = re.compile(r"(?:^|[.!?。！？]\s*)$")
 
 
 def ts(t: float) -> str:
     return mmss(t)[:5]
+
+
+def long_enough(text: str | None) -> bool:
+    if not text:
+        return False
+    if has_cjk(text):
+        return len(re.findall(r"[㐀-鿿]", text)) >= MIN_CUE_CJK
+    return len(text.split()) >= MIN_CUE_WORDS
 
 
 class Moment:
@@ -71,9 +91,47 @@ class Moment:
                             "first_seen": ts(c["first_appears_s"]), "name_known": self.name_visible(c)})
         return out
 
+    # ── name sanitising (defence in depth, spec §6) ─────────────────
+
+    @functools.cached_property
+    def _hidden_names(self) -> list[tuple[str, bool, re.Pattern, str]]:
+        """(term, case_sensitive, pattern on case-preserving normalised text, replacement label) for every name / alias
+        that is not visible at P; longest first so "Bob Smith" is replaced before "Bob"."""
+        mr = self.m["gate_margin_reviewed_reveal_s"]
+        out = []
+        for cid, term, known_at, cs in name_terms(self.pack):
+            if cid not in self.chars or self.P + EPS >= known_at + mr:
+                continue
+            label = self.label(cid, "zh" if has_cjk(term) else "en")
+            t = normalize(term, True)
+            if not t or normalize(t) == normalize(label):
+                continue
+            body = re.escape(t) if has_cjk(t) else r"(?<!\w)" + re.escape(t) + r"(?!\w)"
+            out.append((term, bool(cs), re.compile(body, 0 if cs else re.IGNORECASE), label))
+        return sorted(out, key=lambda x: -len(x[0]))
+
+    def sanitize(self, text: str | None) -> str | None:
+        """Replace not-yet-visible names / aliases with the character's label at P (whole words; CJK as substrings)."""
+        if not text:
+            return text
+        hidden = [h for h in self._hidden_names if term_matches(h[0], text, "word", h[1])]
+        if not hidden:
+            return text
+        s = normalize(text, True)
+
+        def sub(label: str):
+            def f(mo: re.Match) -> str:
+                start = _SENTENCE_START.search(mo.string[:mo.start()]) is not None
+                return label[:1].upper() + label[1:] if start and label[:1].isalpha() else label
+            return f
+
+        for _term, _cs, pat, label in hidden:
+            s = pat.sub(sub(label), s)
+        return s
+
     # ── long-range memory: latest recap + what happened after it ────
 
-    def story_so_far(self) -> dict:
+    def story_so_far(self, limit: int = 24) -> dict:
         recaps = [it for it in self.eligible if it.item_type == "recap"]
         latest = max(recaps, key=lambda it: (it.start_s, it.item_id), default=None)
         since = latest.start_s if latest else -1.0
@@ -83,21 +141,39 @@ class Moment:
         out = {"position": ts(self.P), "phase": self.phase}
         if latest:
             row = next(r for r in self.pack["recaps"] if r["recap_id"] == latest.item_id)
-            out["recap"] = {"up_to": ts(latest.start_s), "text": row["text_zh"] if self.lang == "zh" and row.get("text_zh")
-                            else row["text_en"]}
+            out["recap"] = {"up_to": ts(latest.start_s), "text": self.sanitize(
+                row["text_zh"] if self.lang == "zh" and row.get("text_zh") else row["text_en"])}
         out["since_recap" if latest else "so_far"] = [
-            {"at": ts(it.start_s), "type": it.item_type, "text": it.text} for it in after[-24:]]
+            {"at": ts(it.start_s), "type": it.item_type, "text": self.sanitize(it.text)} for it in after[-limit:]]
         return out
 
     # ── semantic search, gate first ─────────────────────────────────
 
-    def search(self, query: str, k: int = 6) -> list[retrieval.Hit]:
-        """Vector search over eligible evidence; dialogue lines are ranked separately so very short lines can't crowd
-        out scenes and events (known issue in docs/online-qa.md §2)."""
+    @functools.cached_property
+    def _cue_rows(self) -> dict:
+        return {c["cue_id"]: c for c in self.pack["cues"]}
+
+    def _searchable_line(self, it: retrieval.Item) -> bool:
+        c = self._cue_rows.get(it.item_id)
+        return bool(c) and c["track"] == self._cue_track() and c["kind"] == "dialogue" and long_enough(c["text"])
+
+    def search(self, query: str, qvec=None, k: int = 6) -> list[retrieval.Hit]:
+        """Gate-first search over eligible evidence: cosine ranking when a query vector is given, full text otherwise
+        (or when the pack has no vectors). Dialogue lines are ranked separately, from one subtitle track and without
+        very short lines, so a line cannot fill the top 3 once per language and "A dragon!" cannot crowd out scenes
+        and events (docs/online-qa.md §2)."""
         db = self.title.db_path
-        hits = retrieval.search(db, self.P, query, k=k, mode="vector", allow_auto=True, types=EVIDENCE_TYPES)
-        lines = retrieval.search(db, self.P, query, k=3, mode="vector", allow_auto=True, types={"cue"})
-        return hits + [h for h in lines if h.text and len(h.text.split()) >= 3]
+
+        def run(mode: str) -> list[retrieval.Hit]:
+            hits = retrieval.search(db, self.P, query, k=k, mode=mode, allow_auto=True, types=EVIDENCE_TYPES, qvec=qvec)
+            lines = retrieval.search(db, self.P, query, k=CUE_K, mode=mode, allow_auto=True, types={"cue"}, qvec=qvec,
+                                     keep=self._searchable_line)
+            return hits + lines
+
+        hits = run("vector") if qvec is not None else []
+        if not hits:
+            hits = run("fts")
+        return [dataclasses.replace(h, text=self.sanitize(h.text)) for h in hits]
 
     # ── near-window dialogue with speakers ──────────────────────────
 
@@ -105,37 +181,59 @@ class Moment:
         tracks = sorted(self.pack["subtitle_tracks"], key=lambda t: (not t["lang"].startswith("en"), t["priority"]))
         return tracks[0]["track"] if tracks else None
 
-    def recent_dialogue(self, seconds: float = 90.0) -> list[dict]:
-        track, m = self._cue_track(), self.m["gate_margin_cue_s"]
-        speakers = {s["cue_id"]: s for s in self.pack.get("cue_speakers", []) if s["review_state"] not in BAD}
-        out = []
-        for c in sorted(self.pack["cues"], key=lambda c: c["start_s"]):
-            if c["track"] != track or c["kind"] != "dialogue":
-                continue
-            if c["end_s"] + m > self.P + EPS or c["start_s"] < self.P - seconds:
-                continue
-            sp = speakers.get(c["cue_id"])
-            who = self.label(sp["character_id"], "en") if sp and self.char_ok(sp["character_id"]) else "unknown speaker"
-            out.append({"at": ts(c["start_s"]), "t": c["start_s"], "speaker": who, "text": c["text"]})
-        return out
+    def speaker(self, cue: dict) -> str:
+        """Speaker label at P, or "unknown speaker" if the attribution is not usable yet (character not eligible, or
+        attaching the line to them would break identity isolation)."""
+        sp = self._speakers.get(cue["cue_id"])
+        cid = sp["character_id"] if sp else None
+        if not cid or not self.char_ok(cid) or self.gate.char_isolated(cid, cue["start_s"], cue["end_s"]):
+            return "unknown speaker"
+        return self.label(cid, "en")
+
+    @functools.cached_property
+    def _speakers(self) -> dict:
+        return {s["cue_id"]: s for s in self.pack.get("cue_speakers", [])
+                if self.gate.pre(s["review_state"]) and s.get("character_id")}
+
+    def _lines(self) -> list[dict]:
+        """Eligible dialogue cues on the chosen track, oldest first."""
+        track, ok = self._cue_track(), {it.item_id for it in self.eligible if it.item_type == "cue"}
+        return sorted((c for c in self.pack["cues"] if c["cue_id"] in ok and c["track"] == track and c["kind"] == "dialogue"),
+                      key=lambda c: c["start_s"])
+
+    def recent_dialogue(self, seconds: float = 90.0, at_least: int = 0) -> list[dict]:
+        """Lines that started in the last `seconds` before P (a line still on screen is excluded, §5.2); if fewer than
+        `at_least`, the last `at_least` lines before P instead, whenever they were."""
+        lines = self._lines()
+        out = [c for c in lines if c["start_s"] >= self.P - seconds]
+        if len(out) < at_least:
+            out = lines[-at_least:]
+        return [{"at": ts(c["start_s"]), "t": c["start_s"], "speaker": self.speaker(c), "text": self.sanitize(c["text"])}
+                for c in out]
 
     # ── current shot: who / what is on screen (spec §5.2 current-shot rule) ──
 
     def _facts(self, cid: str) -> list[str]:
         owner = {f["fact_id"]: f["character_id"] for f in self.pack["character_facts"]}
-        return [it.text for it in self.eligible if it.item_type == "character_fact" and owner.get(it.item_id) == cid]
+        return [self.sanitize(it.text) for it in self.eligible
+                if it.item_type == "character_fact" and owner.get(it.item_id) == cid]
 
     def _look(self, cid: str) -> str | None:
         mr = self.m["gate_margin_reviewed_reveal_s"]
-        looks = [lk for lk in self.pack["character_looks"]
-                 if lk["character_id"] == cid and self.gate.reviewed(lk["review_state"])
-                 and lk["from_s"] <= self.P + EPS and lk["reveal_at_s"] + mr <= self.P + EPS]
-        best = max(looks, key=lambda lk: lk["from_s"], default=None)
-        return best["description_en"] if best else None
+        looks = []
+        for lk in self.pack["character_looks"]:
+            vis = max(lk["reveal_at_s"], lk["from_s"])
+            if (lk["character_id"] == cid and self.gate.reviewed(lk["review_state"]) and lk["from_s"] <= self.P + EPS
+                    and vis + mr <= self.P + EPS
+                    and not self.gate.char_isolated(cid, min(lk["from_s"], lk["reveal_at_s"]), vis)):
+                looks.append(lk)
+        best = max(looks, key=lambda lk: (lk["from_s"], lk["reveal_at_s"], lk["look_id"]), default=None)
+        return self.sanitize(best["description_en"]) if best else None
 
     def exemplars(self, cid: str, limit: int = 2) -> list[int]:
         rows = [e for e in self.pack.get("character_exemplars", [])
-                if e["character_id"] == cid and e["review_state"] not in BAD and e["t_s"] <= self.fp]
+                if e["character_id"] == cid and self.gate.reviewed(e["review_state"]) and 0 <= e["t_s"] <= self.fp
+                and not self.gate.char_isolated(cid, e["t_s"], e["t_s"])]
         return [e["t_s"] for e in sorted(rows, key=lambda e: -e["t_s"])[:limit]]
 
     def _object_ok(self, oid: str | None) -> bool:
@@ -168,7 +266,7 @@ class Moment:
             ent = {"position": e["position"], "bbox": json.loads(e["bbox"]), "frame_t": e["bbox_t_s"]}
             if e["entity_type"] == "character":
                 cid = e.get("character_id")
-                if self.char_ok(cid):
+                if self.char_ok(cid) and not self.gate.char_isolated(cid, e["bbox_t_s"], e["bbox_t_s"]):
                     c = self.chars[cid]
                     ent.update(kind="character", label=self.label(cid, "en"), name_known=self.name_visible(c),
                                look=self._look(cid), facts=self._facts(cid)[-6:], reference_frames=self.exemplars(cid))
@@ -178,7 +276,7 @@ class Moment:
                 oid = e.get("object_id")
                 if self._object_ok(oid):
                     o = next(o for o in self.pack["objects"] if o["object_id"] == oid)
-                    ent.update(kind="object", label=o["name_en"], description=o["description_en"])
+                    ent.update(kind="object", label=self.sanitize(o["name_en"]), description=self.sanitize(o["description_en"]))
                 else:
                     ent.update(kind="object", label="an object (not described yet)")
             out_entities.append(ent)

@@ -28,6 +28,26 @@ def title(tmp_path):
          "action_en": None, "action_zh": None}]
     p["recaps"] = [{"recap_id": "r01", "upto_scene_id": "s01", "upto_s": 50.0, "reveal_at_s": 50.0,
                     "text_en": "Alice met the boy in a meadow.", "text_zh": None, "source": "t", "review_state": "auto"}]
+    # a row that names Bob before his name is visible (11 s): eligible at 10 s, must reach the model as "the boy"
+    p["events"].append({"event_id": "e003", "t_s": 6.0, "reveal_at_s": 7.0, "kind": "action",
+                        "text_en": "Alice waves at Bob.", "text_zh": None, "spoiler_critical": 0, "review_state": "reviewed",
+                        "source": "test"})
+    p["item_characters"] += [{"item_type": "event", "item_id": "e003", "character_id": c, "relation": "present"}
+                             for c in ("c01", "c02")]
+    p["character_aliases"] = [{"character_id": "c02", "alias": "Bobby", "lang": "en", "alias_known_at_s": 30.0, "generic": 0}]
+    p["events"].append({"event_id": "e004", "t_s": 20.0, "reveal_at_s": 21.0, "kind": "action",
+                        "text_en": "Bobby climbs a tree in the meadow.", "text_zh": None, "spoiler_critical": 0,
+                        "review_state": "reviewed", "source": "test"})
+    # a second subtitle track repeating the lines, and a longer line on both
+    p["subtitle_tracks"].append({**p["subtitle_tracks"][0], "track": "zh.official", "lang": "zh", "priority": 1})
+    p["cues"].append({"cue_id": "en.official:003", "track": "en.official", "start_s": 20.0, "end_s": 23.0,
+                      "text": "Look at the meadow from up here!", "kind": "dialogue", "speaker_raw": None})
+    # spoken by Bob while the wolf is on screen and before "the wolf is Bob" is revealed (60.5 s)
+    p["cues"].append({"cue_id": "en.official:004", "track": "en.official", "start_s": 57.0, "end_s": 58.0,
+                      "text": "Who is out there in the dark?", "kind": "dialogue", "speaker_raw": None})
+    p["cues"] += [{**c, "cue_id": c["cue_id"].replace("en.", "zh."), "track": "zh.official"} for c in list(p["cues"])]
+    p["cue_speakers"] = [{"cue_id": f"en.official:00{i}", "character_id": "c02", "diar_label": "S1", "confidence": 0.9,
+                          "method": "t", "review_state": "auto"} for i in (2, 3, 4)]
     root = tmp_path / "master"
     root.mkdir()
     packdb.write_db(packdb.normalize_pack(p), root / "pack.db")
@@ -114,6 +134,69 @@ def test_http_surface(title, monkeypatch):
     assert c.get("/api/titles/mini/gate", params={"p": 53}).json()["eligible"]["scene"] == 1
     assert c.get("/api/titles/nope/gate", params={"p": 1}).status_code == 404
     assert c.post("/api/ask", json={"title_id": "mini", "p": 5, "question": "x" * 400}).status_code == 422
+
+
+def test_sanitize_replaces_hidden_names_with_the_label_at_p(title):
+    assert Moment(title, 10.5).sanitize("Alice waves at Bob.") == "Alice waves at the boy."
+    assert Moment(title, 10.5).sanitize("Bob's cap. Bob waves.") == "The boy's cap. The boy waves."
+    assert Moment(title, 10.5).sanitize("A bob of the head.") == "A bob of the head."  # common noun: case-sensitive
+    assert Moment(title, 11.0).sanitize("Alice waves at Bob.") == "Alice waves at Bob."      # visible from 11 s
+    assert Moment(title, 10.5, "zh").sanitize("爱丽丝和鲍勃") == "爱丽丝和男孩"
+    assert Moment(title, 20.0).sanitize("Bobby is up the tree.") == "Bob is up the tree."    # alias: 30 s, name: 11 s
+    assert Moment(title, 31.0).sanitize("Bobby is up the tree.") == "Bobby is up the tree."
+    assert Moment(title, 10.5).sanitize("Bobsleigh") == "Bobsleigh"                          # whole words only
+    story = json.dumps(Moment(title, 10.5).story_so_far())
+    assert "Alice waves at the boy." in story and "Bob" not in story
+
+
+def test_search_uses_one_track_and_skips_short_lines(title):
+    hits = Moment(title, 30.0).search("meadow")                     # no vectors in this pack: full-text ranking
+    lines = [h for h in hits if h.item_type == "cue"]
+    assert [h.item_id for h in lines] == ["en.official:003"]       # not once per subtitle track
+    assert not [h for h in Moment(title, 70.0).search("Bob") if h.text == "Bob?"]
+    assert "Bob climbs a tree" in " ".join(h.text for h in Moment(title, 25.0).search("tree"))   # alias → name at 25 s
+
+
+def test_recent_dialogue_falls_back_to_the_last_lines(title):
+    m = Moment(title, 50.0)
+    assert m.recent_dialogue(10) == []
+    assert [ln["at"] for ln in m.recent_dialogue(10, at_least=2)] == ["00:10", "00:20"]
+
+
+def test_speaker_withheld_while_identity_is_isolated(title):
+    line = lambda P: next(ln for ln in Moment(title, P).recent_dialogue(30) if ln["at"] == "00:57")  # noqa: E731
+    assert line(59.5)["speaker"] == "unknown speaker"              # attributing it to Bob would reveal the wolf
+    assert line(62.0)["speaker"] == "Bob"
+
+
+def test_evidence_dedup():
+    from server.agent import Turn
+    t = Turn()
+    t.add_evidence("shot_caption", 1.0, 2.0, "A girl.")
+    t.add_evidence("shot_caption", 1.0, 2.0, "A girl.")
+    t.add_evidence("character_fact", 5.0, 5.0, "Alice: fact one")
+    t.add_evidence("character_fact", 5.0, 5.0, "Alice: fact two")
+    assert [e["text"] for e in t.evidence] == ["A girl.", "Alice: fact one", "Alice: fact two"]
+
+
+def _views(m: Moment) -> tuple[list, list]:
+    """Everything the agent can read at P as (texts, search hits)."""
+    texts = [json.dumps(m.story_so_far(), ensure_ascii=False), json.dumps(m.recent_dialogue(60, at_least=4)),
+             json.dumps(m.on_screen({"x": 0.2, "y": 0.3}), ensure_ascii=False), json.dumps(m.known_characters())]
+    hits = [h for q in ("Bob", "wolf", "meadow", "Hello Bob", "tree", "Bobby") for h in m.search(q)]
+    return texts + [h.text or "" for h in hits], hits
+
+
+@pytest.mark.parametrize("lang", ["en", "zh"])
+def test_sweep_views_never_leak(title, lang):
+    for i in range(0, 200):
+        P = i / 2
+        m = Moment(title, P, lang)
+        texts, hits = _views(m)
+        for text in texts:
+            assert guard.violations(m.pack, text, P) == [], (P, text)
+        ok = {(it.item_type, it.item_id) for it in Gate(m.pack, P, allow_auto=True).eligible()}
+        assert all((h.item_type, h.item_id) in ok for h in hits), P
 
 
 def test_limiter(monkeypatch):
