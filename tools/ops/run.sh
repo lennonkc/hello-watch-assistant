@@ -455,13 +455,18 @@ mode_tests() {
 }
 
 # gs:// URL of PACKS_PREFIX (a path inside the service's own bucket; bucket names are never committed)
-packs_url() {
-  local prefix=${PACKS_PREFIX#/}
+# gs://<bucket>/<path> for a path parameter (PACKS_PREFIX, PRIVATE_PREFIX): a path inside the service's bucket
+bucket_url() {
+  local name=$1 prefix=${2#/}
   case "$prefix" in
-    gs://*|*..*|"") die "PACKS_PREFIX must be a path inside the bucket, e.g. demo-packs-next (got '$PACKS_PREFIX')" ;;
+    gs://*|*..*|"") die "$name must be a path inside the bucket, e.g. demo-packs-next (got '$2')" ;;
   esac
-  if [ -z "${BUCKET:-}" ]; then die "PACKS_PREFIX needs the service's CEDAR_INGEST_BUCKET"; fi
+  if [ -z "${BUCKET:-}" ]; then die "$name needs the service's CEDAR_INGEST_BUCKET"; fi
   printf 'gs://%s/%s\n' "$BUCKET" "${prefix%/}"
+}
+
+packs_url() {
+  bucket_url PACKS_PREFIX "${PACKS_PREFIX:-}"
 }
 
 refresh_service() {
@@ -472,7 +477,7 @@ refresh_service() {
 # Build the image of this commit and deploy it as a NEW revision that takes no traffic, tagged $TAG. Production
 # traffic is never moved (--no-traffic pins any "latest" traffic to the current revision first).
 mode_deploy_staging() {
-  local image token envs url out rc pu
+  local image token envs url out rc pu pv
   cloud_discover
   if [ -z "${BUCKET:-}" ]; then die "the service has no CEDAR_INGEST_BUCKET env var"; fi
   git rev-parse HEAD >/dev/null 2>&1 || die "deploy-staging needs a git checkout (the image is built with git archive)"
@@ -497,11 +502,16 @@ mode_deploy_staging() {
     pu=$(packs_url) || exit 1
     envs="$envs,WATCH_PACKS_GCS=$pu"
   fi
+  if [ -n "${PRIVATE_PREFIX:-}" ]; then
+    pv=$(bucket_url PRIVATE_PREFIX "$PRIVATE_PREFIX") || exit 1
+    envs="$envs,WATCH_PRIVATE_TITLES=$pv/titles.json"
+  fi
   if [ -n "${STAGING_ENV:-}" ]; then
     envs="$envs,$STAGING_ENV"
   fi
   hr "deploy (no traffic, tag $TAG)"
-  say "packs: ${PACKS_PREFIX:-(unchanged)}; extra env: ${STAGING_ENV:-(none)}; WATCH_BENCH_TOKEN: fresh (in .cache/bench_token)"
+  say "packs: ${PACKS_PREFIX:-(unchanged)}; private titles: ${PRIVATE_PREFIX:-(unchanged)}; extra env: ${STAGING_ENV:-(none)}"
+  say "WATCH_BENCH_TOKEN: fresh (in .cache/bench_token)"
   # the agent prompts ship in the image now: drop the prompt-secret variable on the new revision
   out=$(mktemp)
   if gcloud run deploy "$SERVICE" --project "$PROJECT" --region "$REGION" --image "$image" \

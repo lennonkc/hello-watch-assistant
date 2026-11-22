@@ -27,6 +27,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = pathlib.Path(os.environ.get("OPS_ROOT") or pathlib.Path(__file__).resolve().parents[2])
 WORK = ROOT / ".cache" / "ops-work"
@@ -230,6 +231,7 @@ def health(path: pathlib.Path) -> dict:
     db = open_db(path)
     ph = collections.Counter()
     where = collections.Counter()
+    braces: list[tuple[str, str, str]] = []           # (table.column, token, context) of other {…} tokens
     for t in db_tables(db):
         if t in SKIP_TABLES or t == "text_fts":
             continue
@@ -237,7 +239,7 @@ def health(path: pathlib.Path) -> dict:
         if not cols:
             continue
         for row in db.execute(f"SELECT {','.join(cols)} FROM {t}"):
-            for v in row:
+            for col, v in zip(cols, row):
                 if not v or "{" not in v:
                     continue
                 hit = 0
@@ -245,9 +247,12 @@ def health(path: pathlib.Path) -> dict:
                     n = len(rx.findall(v))
                     ph[k] += n
                     hit += n
-                n_any = len(ANY_BRACE.findall(v)) - hit
-                if n_any > 0:
-                    ph["{…}"] += n_any
+                others = [m for m in ANY_BRACE.finditer(v)
+                          if not any(rx.fullmatch(m.group(0)) for rx in PLACEHOLDERS.values())]
+                ph["{…}"] += len(others)
+                for m in others:
+                    a, b = max(0, m.start() - 30), min(len(v), m.end() + 30)
+                    braces.append((f"{t}.{col}", m.group(0), v[a:b].replace("\n", " ")))
                 if hit:
                     where[t] += hit
     blank = noword = inv = 0
@@ -266,7 +271,27 @@ def health(path: pathlib.Path) -> dict:
             last[r["track"]] = r["start_s"]
     m = meta(db)
     db.close()
-    return {"ph": ph, "where": where, "blank": blank, "noword": noword, "inversions": inv, "meta": m}
+    return {"ph": ph, "where": where, "blank": blank, "noword": noword, "inversions": inv, "meta": m,
+            "braces": braces}
+
+
+# Columns the online service never puts into an answer, evidence or the model's context (ids, provenance, geometry)
+INTERNAL_COLS = re.compile(r"(^|_)(id|source|bbox|path|sha256|method|diar_label|review_state|field|models|url|"
+                           r"alignment_note|license|track|kind|lang|match|term|person_ref|ref_type|ref_id)$")
+
+
+def brace_lines(h: dict, limit: int = 4) -> list[str]:
+    """Where the other {…} tokens are and whether a viewer could see them."""
+    by = collections.Counter((col, tok) for col, tok, _ctx in h["braces"])
+    out = []
+    for (col, tok), n in by.most_common(limit):
+        ctx = next(c for cc, t, c in h["braces"] if cc == col and t == tok)
+        seen = "internal column, never shown" if INTERNAL_COLS.search(col.split(".", 1)[1]) else \
+            "text the service can show (answers / evidence)"
+        out.append(f"    {tok} ×{n} in {col} ({seen}): …{ctx}…")
+    if len(by) > limit:
+        out.append(f"    … {len(by) - limit} more kinds")
+    return out
 
 
 def _cue_no(cue_id: str):
@@ -677,6 +702,336 @@ def _work() -> pathlib.Path:
     return WORK
 
 
+# ── uploads ──────────────────────────────────────────────────────────
+
+def upload_tree(local: pathlib.Path, dest: str, rels: list[str], last: tuple[str, ...] = ("pack.json", "MANIFEST.json",
+                                                                                         "pack.db")) -> dict:
+    """Upload `local/<rel>` → `dest/<rel>` for every rel whose object is missing or has another size (resumable).
+    Files named in `last` go after everything else, pack.db at the very end, so a server that finds pack.db finds
+    the rest too. Returns {"uploaded", "bytes", "skipped", "dest_files", "dest_bytes", "mismatch"}."""
+    have = {url[len(dest) + 1:]: size for size, _d, url in gls(dest + "/")}
+    size = {r: (local / r).stat().st_size for r in rels}
+    todo = [r for r in rels if have.get(r) != size[r]]
+    groups: dict[str, list[str]] = collections.defaultdict(list)
+    tail = []
+    for r in todo:
+        (tail if r in last else groups[str(pathlib.PurePosixPath(r).parent)]).append(r)
+    batches = [(d, rs) for d, rs in sorted(groups.items())] + [
+        (str(pathlib.PurePosixPath(r).parent), [r]) for r in sorted(tail, key=last.index)]
+    for d, rs in batches:
+        target = dest + "/" + ("" if d == "." else d + "/")
+        r = subprocess.run(["gcloud", "storage", "cp", "--no-user-output-enabled", "-I", target], text=True,
+                           input="\n".join(str(local / x) for x in rs) + "\n", capture_output=True, timeout=4 * 3600)
+        if r.returncode:
+            raise OpsError(f"upload to {target} failed: {_err(r)}")
+    after = {url[len(dest) + 1:]: sz for sz, _d, url in gls(dest + "/")}
+    mismatch = [r for r in rels if after.get(r) != size[r]]
+    return {"uploaded": len(todo), "bytes": sum(size[r] for r in todo), "skipped": len(rels) - len(todo),
+            "dest_files": len(after), "dest_bytes": sum(after.values()), "mismatch": mismatch}
+
+
+def upload_line(u: dict) -> str:
+    ok = "matches local" if not u["mismatch"] else f"MISMATCH {len(u['mismatch'])}: {', '.join(u['mismatch'][:3])}"
+    return (f"uploaded {u['uploaded']} files ({human(u['bytes'])}), {u['skipped']} already there · destination "
+            f"{u['dest_files']} objects, {human(u['dest_bytes'])} · {ok}")
+
+
+def pack_files(d: pathlib.Path) -> list[str]:
+    rels = [n for n in ("pack.db", "MANIFEST.json", "pack.json") if (d / n).is_file()]
+    if (d / "thumbs").is_dir():
+        rels += [f"thumbs/{p.name}" for p in sorted((d / "thumbs").glob("t*.jpg"))]
+    return rels
+
+
+def sa_can_read(b: str) -> str:
+    """Whether the service's account has a bucket-wide read role (covers every prefix)."""
+    sa = env("SERVICE_ACCOUNT")
+    if not sa:
+        return "service account unknown"
+    r = gcloud("storage", "buckets", "get-iam-policy", f"gs://{b}", "--format=json")
+    if r.returncode:
+        return f"cannot read the bucket policy ({_err(r)})"
+    roles = sorted({x["role"] for x in json.loads(r.stdout or "{}").get("bindings", [])
+                    if f"serviceAccount:{sa}" in x.get("members", []) and not x.get("condition")})
+    readers = {"roles/storage.objectViewer", "roles/storage.objectAdmin", "roles/storage.admin",
+               "roles/storage.legacyObjectReader"}
+    return (f"yes ({', '.join(r for r in roles if r in readers)}, bucket-wide)" if readers & set(roles)
+            else f"NO bucket-wide read role (has: {', '.join(roles) or 'none'})")
+
+
+# ── publish-public-packs ─────────────────────────────────────────────
+
+def publish_public_packs() -> int:
+    """The ingest cache's master pack of each public film (pack.db, MANIFEST.json, pack.json, thumbs/) →
+    gs://<bucket>/<PACKS_PREFIX>/<sha>/master/, if it has no raw placeholders. Never the live prefix."""
+    b, prefix = bucket(), prefix_param("PACKS_PREFIX")
+    bad = 0
+    for f in public_films():
+        sha = f["sha"]
+        wd = cache_wd(sha)
+        src = wd / "master" if wd else None
+        if src is None or not (src / "pack.db").exists():
+            say(f"{f['title']} {sha[:12]}: no master pack in the ingest cache — skipped")
+            bad += 1
+            continue
+        h = health(src / "pack.db")
+        man = read_manifest(src)
+        raw = h["ph"]["{oNN}"] + h["ph"]["{other}"] + h["ph"]["{cNN}"]
+        say(f"{f['title']} {sha[:12]}: cache master {health_line(h)}")
+        say(f"  manifest v{man.get('pack_version')} built {man.get('built_at')} · {len(man.get('files', []))} files listed")
+        for line in brace_lines(h):
+            say(line)
+        if raw or h["blank"]:
+            say(f"  NOT published: {raw} raw placeholders, {h['blank']} blank cues (re-export first)")
+            bad += 1
+            continue
+        rels = pack_files(src)
+        listed = {x["path"] for x in man.get("files", [])}
+        missing = sorted(listed - set(rels))
+        if missing:
+            say(f"  NOT published: {len(missing)} files of the manifest are missing locally ({', '.join(missing[:3])})")
+            bad += 1
+            continue
+        u = upload_tree(src, f"gs://{b}/{prefix}/{sha}/master", rels)
+        say(f"  → {prefix}/{sha[:12]}/master: {upload_line(u)}")
+        bad += bool(u["mismatch"])
+    say(f"service account can read gs://{b}/{prefix}/: {sa_can_read(b)}")
+    return 1 if bad else 0
+
+
+# ── publish-private-title ────────────────────────────────────────────
+
+ATTRIBUTION = "Private preview for evaluation. Not for redistribution."
+PREVIEW = {"width": 640, "video_kbps": 400, "audio_kbps": 64, "gop_s": 2}
+SENTENCE_END = re.compile(r"[.!?](?=\s|$)|[\u3002\uff01\uff1f]")      # . ! ? before a space; 。！？
+
+
+def short_synopsis(text: str, limit: int = 260) -> str:
+    """The synopsis cut at the last sentence end within `limit` characters (else at a word, with …)."""
+    t = " ".join((text or "").split())
+    if len(t) <= limit:
+        return t
+    ends = [m.end() for m in SENTENCE_END.finditer(t[:limit])]
+    if ends and ends[-1] >= 40:
+        return t[:ends[-1]].strip()
+    cut = t[:limit - 1].rsplit(" ", 1)[0]
+    return cut.rstrip(",;:") + "…"
+
+
+def local_catalog_entry(sha: str, content_id: str | None) -> dict:
+    """Title and synopsis of a private preview title from the Mac's local catalog (never from this repo): the
+    `ingest/titles/<catalog id>.json` whose expected_asset_sha256 lists `sha` (its `title`), and that id's item in
+    `catalog/catalog.json` (`synopsis_full`). `license_note` is never read."""
+    for root in repo_roots():
+        if root.resolve() == ROOT.resolve():
+            continue
+        tdir = root / "ingest" / "titles"
+        spec, cid = None, None
+        if content_id and (tdir / f"{content_id}.json").is_file():
+            cid, spec = content_id, json.loads((tdir / f"{content_id}.json").read_text(encoding="utf-8"))
+        elif tdir.is_dir():
+            for p in sorted(tdir.glob("*.json")):
+                try:
+                    d = json.loads(p.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if sha in (d.get("expected_asset_sha256") or []):
+                    cid, spec = d.get("catalog_id") or p.stem, d
+                    break
+        if not spec or not spec.get("title"):
+            continue
+        syn = ""
+        cat = root / "catalog" / "catalog.json"
+        if cat.is_file():
+            items = json.loads(cat.read_text(encoding="utf-8")).get("items", [])
+            it = next((i for i in items if i.get("id") == cid), None)
+            syn = (it or {}).get("synopsis_full") or ""
+        return {"title": spec["title"], "synopsis": short_synopsis(syn), "catalog_id": cid, "root": root}
+    raise OpsError("no local catalog entry for this sha (looked for ingest/titles/*.json next to the ingest cache "
+                   "and the device packs)")
+
+
+def best_private_pack(sha: str) -> tuple[str, pathlib.Path, dict]:
+    """The newest servable pack (device-auto or master) among the device packs dir and the ingest cache."""
+    cands = []
+    for d in device_pack_dirs(sha):
+        cands.append(("device packs dir", d))
+    wd = cache_wd(sha)
+    for dist in ("device-auto", "master"):
+        if wd and (wd / dist / "pack.db").exists():
+            cands.append((f"ingest cache/{dist}", wd / dist))
+    best = None
+    for where, d in cands:
+        m = read_manifest(d)
+        if m.get("distribution") not in ("device-auto", "master"):
+            continue
+        key = (int(m.get("pack_version") or 0), str(m.get("built_at") or ""))
+        if best is None or key > best[0]:
+            best = (key, where, d, m)
+    if best is None:
+        raise OpsError("no device-auto or master pack found (device packs dir, ingest cache)")
+    return best[1], best[2], best[3]
+
+
+def ffprobe_json(path: pathlib.Path) -> dict:
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)],
+                       capture_output=True, text=True, timeout=300)
+    if r.returncode:
+        raise OpsError(f"ffprobe failed: {_err(r)}")
+    return json.loads(r.stdout)
+
+
+def _fps(stream: dict) -> float:
+    num, _, den = str(stream.get("avg_frame_rate") or stream.get("r_frame_rate") or "24/1").partition("/")
+    try:
+        return float(num) / float(den or 1) or 24.0
+    except (ValueError, ZeroDivisionError):
+        return 24.0
+
+
+def preview_cmd(src: pathlib.Path, out: pathlib.Path, fps: float) -> list[str]:
+    """640 px wide H.264 (about 400 kbps, a keyframe every 2 s, no scene-cut keyframes in between) + 64 kbps stereo
+    AAC, faststart; container metadata, chapters and subtitle / data streams dropped (no title in the file)."""
+    g = max(1, round(PREVIEW["gop_s"] * fps))
+    v = PREVIEW["video_kbps"]
+    return ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-i", str(src),
+            "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-map_metadata", "-1", "-map_chapters", "-1",
+            "-vf", f"scale={PREVIEW['width']}:-2", "-c:v", "libx264", "-preset", "medium", "-profile:v", "high",
+            "-pix_fmt", "yuv420p", "-b:v", f"{v}k", "-maxrate", f"{int(v * 1.5)}k", "-bufsize", f"{v * 2}k",
+            "-g", str(g), "-keyint_min", str(g), "-sc_threshold", "0",
+            "-c:a", "aac", "-b:a", f"{PREVIEW['audio_kbps']}k", "-ac", "2",
+            "-movflags", "+faststart", "-f", "mp4", "-progress", "pipe:1", "-nostats", str(out)]
+
+
+def make_preview(sha: str, src: pathlib.Path, duration: float) -> pathlib.Path:
+    out = _work() / f"{sha}-640.mp4"
+    if out.exists():
+        try:
+            d = float(ffprobe_json(out)["format"]["duration"])
+            if abs(d - duration) < 5:
+                say(f"  preview: reusing the local encode ({human(out.stat().st_size)})")
+                return out
+        except (OpsError, KeyError, ValueError):
+            pass
+    probe = ffprobe_json(src)
+    vs = next((x for x in probe["streams"] if x.get("codec_type") == "video"), None)
+    if vs is None:
+        raise OpsError("the film file has no video stream")
+    fps = _fps(vs)
+    est = (PREVIEW["video_kbps"] + PREVIEW["audio_kbps"]) * 1000 / 8 * duration
+    say(f"  preview: source {vs.get('width')}x{vs.get('height')} {fps:.3f} fps · target {PREVIEW['width']} px, "
+        f"~{PREVIEW['video_kbps']}+{PREVIEW['audio_kbps']} kbps, keyframe every {PREVIEW['gop_s']} s · "
+        f"estimate {human(est)}")
+    part = out.with_name(out.name + ".part")
+    t0 = time.monotonic()
+    proc = subprocess.Popen(preview_cmd(src, part, fps), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    err_tail = collections.deque(maxlen=8)
+    import threading
+    threading.Thread(target=lambda: [err_tail.append(x.rstrip()) for x in proc.stderr], daemon=True).start()
+    next_pct = 25
+    for line in proc.stdout:
+        if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
+            try:
+                done = int(line.split("=", 1)[1]) / 1e6
+            except ValueError:
+                continue
+            pct = 100 * done / max(duration, 1)
+            if pct >= next_pct:
+                el = time.monotonic() - t0
+                say(f"    {next_pct}% after {el / 60:.1f} min ({done / max(el, 1e-6):.1f}× real time)")
+                next_pct += 25
+    if proc.wait() != 0:
+        raise OpsError("ffmpeg failed: " + " | ".join(list(err_tail)[-3:]))
+    os.replace(part, out)
+    p = ffprobe_json(out)
+    v = next(x for x in p["streams"] if x.get("codec_type") == "video")
+    a = next((x for x in p["streams"] if x.get("codec_type") == "audio"), {})
+    dur = float(p["format"]["duration"])
+    say(f"  preview: {v.get('width')}x{v.get('height')} {v.get('codec_name')} · {human(out.stat().st_size)} · "
+        f"{8 * out.stat().st_size / dur / 1000:.0f} kbps overall (video {int(v.get('bit_rate') or 0) // 1000}, "
+        f"audio {int(a.get('bit_rate') or 0) // 1000} kbps {a.get('channels', '?')} ch) · "
+        f"{hms(dur)} · encoded in {(time.monotonic() - t0) / 60:.1f} min")
+    tags = {k.lower() for k in (p["format"].get("tags") or {})} - {"major_brand", "minor_version",
+                                                                  "compatible_brands", "encoder"}
+    if tags:
+        say(f"  WARNING: container tags left in the preview: {', '.join(sorted(tags))}")
+    return out
+
+
+def publish_private_title() -> int:
+    """For each sha in PRIVATE_TITLE_SHAS: its pack (newest device-auto / master) with the thumbnails next to it →
+    gs://<bucket>/<PACKS_PREFIX>/<sha>/<dist>/; a low-bitrate preview → gs://<bucket>/previews/<sha>-640.mp4; then
+    the private titles file gs://<bucket>/<PRIVATE_PREFIX>/titles.json. Resumable."""
+    b = bucket()
+    packs_prefix, private_prefix = prefix_param("PACKS_PREFIX"), prefix_param("PRIVATE_PREFIX")
+    shas = private_shas()
+    if not shas:
+        raise OpsError("set PRIVATE_TITLE_SHAS")
+    codes = [h.strip().lower() for h in env("PRIVATE_ACCESS_SHA256").split(",") if h.strip()]
+    if not codes or not all(HEX64.match(h) for h in codes):
+        raise OpsError("PRIVATE_ACCESS_SHA256 must be one or more sha256 hex digests, comma-separated")
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        raise OpsError("ffmpeg / ffprobe not found")
+    entries = []
+    for i, sha in enumerate(shas, 1):
+        say(f"== private preview title #{i} {sha[:12]}")
+        where, d, man = best_private_pack(sha)
+        dist = man["distribution"]
+        db = open_db(d / "pack.db")
+        n_thumb_rows = db.execute("SELECT count(*) FROM thumbnails").fetchone()[0]
+        a = dict(db.execute("SELECT * FROM asset").fetchone())
+        db.close()
+        rels = pack_files(d)
+        n_thumbs = sum(1 for r in rels if r.startswith("thumbs/"))
+        say(f"  pack: {where} · {dist} v{man.get('pack_version')} {str(man.get('built_at', ''))[:10]} · "
+            f"thumbnails {n_thumbs} files / {n_thumb_rows} rows · {hms(a['duration_s'])}")
+        issues = compat_issues(d / "pack.db")
+        say(f"  server compat: {'; '.join(issues)}")
+        if n_thumbs < 0.99 * max(n_thumb_rows, 1):
+            raise OpsError(f"only {n_thumbs} thumbnail files for {n_thumb_rows} rows: not published")
+        u = upload_tree(d, f"gs://{b}/{packs_prefix}/{sha}/{dist}", rels)
+        say(f"  → {packs_prefix}/{sha[:12]}/{dist}: {upload_line(u)}")
+        if u["mismatch"]:
+            raise OpsError("pack upload incomplete")
+        cat = local_catalog_entry(sha, a.get("content_id"))
+        say(f"  catalog: {cat['root']} (title from ingest/titles, synopsis from catalog/catalog.json synopsis_full)")
+        say(f"  synopsis ({len(cat['synopsis'])} chars): {cat['synopsis'] or '(empty)'}")
+        target = f"gs://{b}/previews/{sha}-640.mp4"
+        have = gls(target)
+        local_out = WORK / f"{sha}-640.mp4"
+        if have and env("PREVIEW_REBUILD") != "1" and (not local_out.exists() or local_out.stat().st_size == have[0][0]):
+            say(f"  preview: already uploaded ({human(have[0][0])} {have[0][1]})")
+        else:
+            asset = gls(f"gs://{b}/assets/{sha}.mp4")
+            film, how = find_film(sha, asset[0][0] if asset else None)
+            say(f"  film file: {how}")
+            if film is None:
+                raise OpsError("film file not found locally; not downloading the original")
+            out = make_preview(sha, film, float(a["duration_s"]))
+            u2 = upload_tree(out.parent, f"gs://{b}/previews", [out.name], last=())
+            say(f"  → previews/{sha[:12]}-640.mp4: {upload_line(u2)}")
+        entries.append({"id": f"pv-{sha[:12]}", "sha": sha, "title": cat["title"], "synopsis": cat["synopsis"],
+                        "license": "private-preview", "attribution": ATTRIBUTION, "dist": dist,
+                        "video_object": f"previews/{sha}-640.mp4", "playback": "preview"})
+    doc_url = f"gs://{b}/{private_prefix}/titles.json"
+    old = {}
+    tmp = _work() / "titles.json"
+    try:
+        gcp(doc_url, str(tmp))
+        old = {e.get("sha"): e for e in json.loads(tmp.read_text(encoding="utf-8")).get("titles", [])}
+    except (OpsError, ValueError, OSError):
+        pass
+    merged = {**old, **{e["sha"]: e for e in entries}}
+    doc = {"access_sha256": codes, "titles": list(merged.values())}
+    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
+    gcp(str(tmp), doc_url)
+    tmp.unlink()
+    say(f"titles file: {private_prefix}/titles.json · {len(merged)} title(s) ({len(old)} before) · "
+        f"{len(codes)} access hash(es)")
+    say(f"service account can read the bucket: {sa_can_read(b)}")
+    return 0
+
+
 # ── bench-show ───────────────────────────────────────────────────────
 
 def _clip(s, n: int) -> str:
@@ -835,7 +1190,8 @@ def logs() -> int:
     return 0
 
 
-JOBS = {"inspect-packs": inspect_packs, "bench-show": bench_show, "logs": logs}
+JOBS = {"inspect-packs": inspect_packs, "publish-public-packs": publish_public_packs,
+        "publish-private-title": publish_private_title, "bench-show": bench_show, "logs": logs}
 
 
 def main(argv: list[str]) -> int:

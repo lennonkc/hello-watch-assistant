@@ -48,16 +48,18 @@ on `:root`, overridden under `@media (prefers-color-scheme: dark)` and `:root[da
 ```
 
 - `playback`: `standard` (the film as ingested) or `preview` (a low-bitrate copy, 640 px wide: the UI may say so).
-- Private preview titles are listed only while the browser holds a valid access code (see `GET /api/unlock`), after
+- Private preview titles are listed only while the browser holds a valid access code (see `POST /api/unlock`), after
   the public films, with `"private": true`; the response is then `Cache-Control: private, no-store`.
 
-### `GET /api/unlock?code=…`
+### `POST /api/unlock`
 
-Access code for the private preview titles. `204` with the cookie `watch_access` (HttpOnly, Secure, SameSite=Lax,
-Path=/, 30 days) when the code is valid, else `404`; at most 10 attempts per minute and IP (`429`, `Retry-After`).
-Afterwards reload `/api/titles`. Without the cookie every endpoint answers `404 unknown title` for a private title, the
-question endpoint included; with it, frames and the video redirect of a private title are `Cache-Control: private,
-no-store`.
+Access code for the private preview titles, as a JSON body `{"code": "…"}` (never in a URL, so it reaches no log).
+`204` with the cookie `watch_access` (HttpOnly, Secure, SameSite=Lax, Path=/, 30 days) when the code is valid, else
+`404`; at most 10 attempts per minute and IP, malformed ones included (`429`, `Retry-After`). A shared link carries the
+code in the URL fragment (`/#code=…`, which browsers never send): the page reads it, POSTs it, removes it from the
+address bar and reloads `/api/titles`. Without the cookie every endpoint answers `404 unknown title` for a private
+title, the question endpoint included; with it, frames and the video redirect of a private title are
+`Cache-Control: private, no-store`.
 
 ### `GET /api/titles/{id}/video`
 
