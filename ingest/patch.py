@@ -25,7 +25,9 @@ ITEM_TYPE = {"characters": "character", "character_aliases": "character_alias", 
              "character_facts": "character_fact", "identity_links": "identity_link", "appearances": "appearance",
              "scenes": "scene", "events": "event", "objects": "object", "object_sightings": "object_sighting",
              "title_info": "title_info", "canaries": "canary", "blocklist": "blocklist", "item_characters": "item_character",
-             "item_cues": "item_cue", "asset": "asset", "cues": "cue", "subtitle_tracks": "subtitle_track"}
+             "item_cues": "item_cue", "asset": "asset", "cues": "cue", "subtitle_tracks": "subtitle_track",
+             "cue_speakers": "cue_speaker", "shot_captions": "shot_caption", "shot_entities": "shot_entity",
+             "character_exemplars": "character_exemplar", "recaps": "recap"}
 NO_KEY_FALLBACK = {"appearances": ["character_id", "start_s"]}
 EDITABLE_TABLES = set(ITEM_TYPE)
 
@@ -151,6 +153,14 @@ def apply_patch(pack: dict, patch: dict) -> dict:
         elif kind == "delete":
             if table == "asset":
                 raise PatchError("cannot delete asset")
+            if table == "cues":                  # delete its speaker / link rows first (in the same patch)
+                cue_id = row["cue_id"]
+                dependents = [x for x in pack.get("cue_speakers", []) if x["cue_id"] == cue_id]
+                dependents += [x for x in pack.get("item_cues", []) if x["cue_id"] == cue_id]
+                dependents += [x for x in pack.get("item_characters", [])
+                               if x["item_type"] == "cue" and x["item_id"] == cue_id]
+                if dependents:
+                    raise PatchError(f"op {n}: cue {cue_id} still has dependent rows")
             pack[table].remove(row)
             L(table, iid, "*", row, None, "reject", op, row)
         else:

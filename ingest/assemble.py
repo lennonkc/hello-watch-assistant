@@ -425,9 +425,11 @@ class Assembler:
             rows.append({"scene_id": sid, "start_s": r3(start), "end_s": r3(end), "start_s_model": S, "end_s_model": E,
                          "snapped": int(ss and es), "reveal_at_s": r3(end), "location_en": s.get("location") or None,
                          "summary_en": s["summary_en"], "summary_zh": None, "review_state": "auto", "source": self.src_full})
+            seen = set()                     # the model may list one character twice (two names / aliases)
             for n in s.get("characters", []):
                 cid = self.cid(n)
-                if cid:
+                if cid and cid not in seen:
+                    seen.add(cid)
                     ic.append({"item_type": "scene", "item_id": sid, "character_id": cid, "relation": "present"})
         self.pack["scenes"] = rows
 

@@ -221,6 +221,14 @@ def check_names(pack) -> list[dict]:
 
 def check_cues(pack) -> list[dict]:
     iss = []
+    generated = {t["track"] for t in pack["subtitle_tracks"] if t["source"] == "generated"}
+    for c in pack["cues"]:                       # transcription output: blank lines or runaway timestamps
+        if c["track"] not in generated:
+            continue
+        if not c["text"].strip():
+            iss.append(_issue(f"generated cue {c['cue_id']} is blank", "cue", c["cue_id"]))
+        elif c["end_s"] - c["start_s"] > 15.0:
+            iss.append(_issue(f"generated cue {c['cue_id']} lasts {c['end_s'] - c['start_s']:.2f}s", "cue", c["cue_id"]))
     cue_end = {c["cue_id"]: c["end_s"] for c in pack["cues"]}
     for it, rows, key, cond in (("event", pack["events"], "event_id", lambda r: r["kind"] == "dialogue"),
                                 ("character_fact", pack["character_facts"], "fact_id", lambda r: r["basis"] == "dialogue")):
@@ -445,6 +453,8 @@ def check_cards(pack) -> list[dict]:
 def _item_of(it, iid):
     if it == "character_alias":
         return "character", iid.split("/")[0]
+    if it == "shot_entity":                      # '<shot_caption_id>/<seq>': flag the caption the entity belongs to
+        return "shot_caption", iid.split("/")[0]
     return it, iid
 
 

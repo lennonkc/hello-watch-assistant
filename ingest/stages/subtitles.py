@@ -114,8 +114,8 @@ def align_official(cues: list[dict], words: list[dict]) -> dict:
 
 def words_from_transcript(raw: dict) -> list[dict]:
     ws = [a for s in raw.get("steps", []) for c in s.get("content", []) or [] for a in c.get("annotations", []) or []
-          if a.get("type") == "word_info"]
-    return [{"s": float(w["start_offset"].rstrip("s")), "e": float(w["end_offset"].rstrip("s")), "text": w["text"],
+          if a.get("type") == "word_info" and str(a.get("text", "")).strip()]
+    return [{"s": float(w["start_offset"].rstrip("s")), "e": float(w["end_offset"].rstrip("s")), "text": w["text"].strip(),
              "speaker": w.get("speaker")} for w in ws]
 
 
@@ -134,15 +134,32 @@ def _join(a: str, b: str) -> str:
 def generated_cues(words: list[dict]) -> list[dict]:
     out, cur = [], None
     for w in words:
+        if not w["text"].strip():
+            continue
         brk = (cur is None or w["s"] - cur["end_s"] > 0.6 or re.search(r"[.?!。？！]$", cur["text"])
                or w["e"] - cur["start_s"] > 6)
         if brk:
             cur = {"start_s": w["s"], "end_s": w["e"], "text": w["text"], "kind": "dialogue"}
             out.append(cur)
         else:
-            cur["end_s"] = w["e"]
+            cur["end_s"] = max(cur["end_s"], w["e"])     # word timestamps are not always monotone
             cur["text"] = _join(cur["text"], w["text"])
     return out
+
+
+MAX_GENERATED_CUE_S = 15.0
+
+
+def validate_generated_cues(cues: list[dict]) -> list[dict]:
+    """A generated track must not ship blank, empty-length or runaway cues (check 4 flags the same in a pack)."""
+    for c in cues:
+        if not c["text"].strip():
+            raise ValueError(f"blank generated cue at {c['start_s']}")
+        if c["end_s"] <= c["start_s"]:
+            raise ValueError(f"non-positive generated cue at {c['start_s']}")
+        if c["end_s"] - c["start_s"] > MAX_GENERATED_CUE_S:
+            raise ValueError(f"generated cue lasts {c['end_s'] - c['start_s']:.2f}s at {c['start_s']}")
+    return cues
 
 
 def plain_text(raw: dict) -> str:
@@ -200,7 +217,7 @@ def merge_plain(words: list[dict], plain: str) -> tuple[list[dict], dict]:
 
 
 @stage("align", deps=("subtitles", "transcribe"),
-       inputs=lambda ctx: {"tol": ALIGN_TOL_S, "v": 2,
+       inputs=lambda ctx: {"tol": ALIGN_TOL_S, "v": 3,
                            **({"plain": ctx.load("transcribe_plain")["_fingerprint"], "v3": 1}
                               if ctx.stage_path("transcribe_plain").exists() else {})})
 def run_align(ctx: Ctx) -> dict:
@@ -244,5 +261,5 @@ def run_align(ctx: Ctx) -> dict:
             note += (f"; plain pass added {len(extra)} cue(s) without own timestamps (time = gap between word-timed "
                      f"neighbours, review)")
         gen = {"track": f"{lang}.generated", "lang": lang, "source": "generated", "source_url": None,
-               "license": None, "sha256": None, "cues": cues, "note": note}
+               "license": None, "sha256": None, "cues": validate_generated_cues(cues), "note": note}
     return {"report": report, "corrections": corrections, "generated_track": gen}

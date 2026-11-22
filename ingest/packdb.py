@@ -84,7 +84,10 @@ def normalize_pack(pack: dict) -> dict:
         if t in ("pack_meta", "asset") or t in NO_JSON:
             continue
         rows = [_row(t, r) for r in pack.get(t, [])]
-        out[t] = sorted(rows, key=_sort_key(t))
+        if t == "cues":                  # time order, ids unchanged ('…:1009' would sort before '…:101' as text)
+            out[t] = sorted(rows, key=lambda r: (r["start_s"], r["end_s"], r["track"], r["cue_id"]))
+        else:
+            out[t] = sorted(rows, key=_sort_key(t))
     return out
 
 

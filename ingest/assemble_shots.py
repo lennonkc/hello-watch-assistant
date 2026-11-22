@@ -276,8 +276,9 @@ def shot_rows(asm, vs: dict, g: Guard) -> tuple[list[dict], list[dict]]:
             if cid:
                 l_en, l_zh = label_for(chars[cid], reveal, "en"), label_for(chars[cid], reveal, "zh", g.rend.get(cid))
             else:
-                l_en = g.clean(x.get("descriptor_en"), reveal, "en") or "someone"
-                l_zh = g.clean(x.get("descriptor_zh"), reveal, "zh")
+                # descriptors can carry tokens too ("person behind {c13}"): render them like captions
+                l_en = g.clean(fill_tokens(x.get("descriptor_en"), text("en", reveal)), reveal, "en") or "someone"
+                l_zh = g.clean(fill_tokens(x.get("descriptor_zh"), text("zh", reveal)), reveal, "zh")
             seq += 1
             ents.append({"shot_caption_id": scid, "seq": seq, "entity_type": "character", "character_id": cid, "object_id": None,
                          "label_en": l_en, "label_zh": l_zh, "position": x.get("position"),
