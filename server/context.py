@@ -145,7 +145,8 @@ def mentions(text: str, terms: list[str]) -> bool:
 
 
 def build(m: Moment, tap: dict | None, turn: A.Turn) -> Context:
-    """Run the three lookups (bookkeeping into `turn` exactly as the tools do) and render the context."""
+    """Run the three lookups (bookkeeping into `turn` exactly as the tools do) and render the context. Blocking (pack
+    reads, thumbnails that may come from Cloud Storage): the server calls it in a worker thread."""
     pos = ts(m.P)
     phase = {"story": "during the story", "before_story": "before the story has started",
              "credits": "the end credits are rolling; the story is over"}[m.phase]
@@ -157,8 +158,7 @@ def build(m: Moment, tap: dict | None, turn: A.Turn) -> Context:
     clean = {**screen, "entities": [{k: v for k, v in e.items() if k != "ref"} for e in ents]}
     lookups = [Lookup("ctx-1", "on_screen", A.TOOL_LABELS["on_screen"], A.note_on_screen(turn, m, clean))]
     frame, ringed, note = None, False, ""
-    if m.phase == "story" and m.title.thumb(m.fp).exists():
-        frame = m.title.thumb(m.fp).read_bytes()
+    if m.phase == "story" and (frame := A.read_thumb(m.title, m.fp)) is not None:
         if tap and (marked := mark_tap(frame, tap)):
             frame, ringed = marked, True
         note = (f"PAUSED FRAME at {pos} (exactly what the viewer sees now)"

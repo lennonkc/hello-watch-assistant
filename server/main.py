@@ -402,7 +402,7 @@ class AskFailed(Exception):
 async def flow_context(t, body: Ask, p: float, user: str, state: dict, emit, turn: A.Turn, rec: dict) -> dict:
     """Server-built context, then one streamed run; each finished sentence is guarded before it is sent."""
     m = A.moment_of(state)
-    ctx = C.build(m, state["tap"], turn)
+    ctx = await asyncio.to_thread(C.build, m, state["tap"], turn)
     for lk in ctx.lookups:
         turn.tools.append(f"ctx:{lk.name}")
         await emit("tool", {"id": lk.id, "name": lk.name, "label": lk.label, "args": {}})
@@ -462,7 +462,8 @@ async def flow_tools(t, body: Ask, p: float, user: str, state: dict, emit, turn:
         await CONVERSATIONS.get(user, p, fresh=True)
     rec["first_text_ms"] = int((time.monotonic() - rec["t0"]) * 1000)
     await emit("delta", {"text": text})
-    return {"text": text, "terms": C.tapped_terms(A.moment_of(state), state["tap"]), "rewritten": rewritten}
+    terms = await asyncio.to_thread(C.tapped_terms, A.moment_of(state), state["tap"])
+    return {"text": text, "terms": terms, "rewritten": rewritten}
 
 
 FLOWS = {"context": flow_context, "tools": flow_tools}
@@ -495,8 +496,7 @@ async def ask(body: Ask, request: Request):
                "fallback": None, "dropped": 0, "dropped_kinds": [], "history_turns": 0, "status": "ok",
                "cut_off": False, "highlight": False}
         try:
-            m = A.moment_of(state)
-            counts = m.gate_counts()
+            counts = await asyncio.to_thread(lambda: A.moment_of(state).gate_counts())
             elig = sum(counts["eligible"].values())
             await emit("gate", {"p": round(p, 2), "eligible_total": elig,
                                 "locked_total": sum(counts["total"].values()) - elig})

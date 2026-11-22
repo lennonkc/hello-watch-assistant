@@ -150,12 +150,19 @@ def note_on_screen(turn: Turn, m: Moment, out: dict) -> str:
 
 # ── tools ────────────────────────────────────────────────────────────
 
-def story_so_far(tool_context: ToolContext) -> dict:
+# Every tool does its pack reads and thumbnail lookups in a worker thread: `Title.thumb()` may fetch from Cloud Storage
+# on demand, and nothing on the answer path may block the event loop (other viewers' streams share it).
+
+async def story_so_far(tool_context: ToolContext) -> dict:
     """Recap of the story up to the viewer's pause point: the latest "story so far" recap plus every scene and event
     after it. Use it for "what did I miss / what's going on" questions and to orient yourself before answering."""
-    m = moment_of(tool_context.state)
-    out = m.story_so_far()
-    _summarise(tool_context, note_story(_turn(), m, out))
+    m, turn = moment_of(tool_context.state), _turn()
+
+    def run():
+        out = m.story_so_far()
+        return out, note_story(turn, m, out)
+    out, summary = await asyncio.to_thread(run)
+    _summarise(tool_context, summary)
     return out
 
 
@@ -172,28 +179,30 @@ async def search_moments(query: str, tool_context: ToolContext) -> dict:
         results.append({"at": ts(h.start_s), "type": TYPE_LABEL.get(h.item_type, h.item_type), "text": h.text})
         if h.item_type != "cue":
             turn.add_evidence(h.item_type, h.start_s, h.end_s, h.text)
-    for h in [h for h in hits if h.item_type in ("scene", "event", "shot_caption")][:2]:
-        turn.add_frame(m.evidence_frame(h.start_s, h.end_s), f"Earlier: {ts(h.start_s)}")
+    picks = [h for h in hits if h.item_type in ("scene", "event", "shot_caption")][:2]
+    frames = await asyncio.to_thread(lambda: [m.evidence_frame(h.start_s, h.end_s) for h in picks])
+    for h, f in zip(picks, frames):
+        turn.add_frame(f, f"Earlier: {ts(h.start_s)}")
     _summarise(tool_context, f"{len(results)} matches, all before {ts(m.P)}")
     return {"query": query, "results": results}
 
 
-def recent_dialogue(seconds: int, tool_context: ToolContext) -> dict:
+async def recent_dialogue(seconds: int, tool_context: ToolContext) -> dict:
     """Lines spoken in the last `seconds` seconds before the pause (use 60 unless the viewer asks about something
     further back; at most 240), with who said each line when known."""
     m = moment_of(tool_context.state)
-    lines = m.recent_dialogue(min(max(int(seconds or 60), 10), 240))
+    lines = await asyncio.to_thread(m.recent_dialogue, min(max(int(seconds or 60), 10), 240))
     _summarise(tool_context, note_dialogue(_turn(), lines))
     return {"lines": [{k: v for k, v in ln.items() if k != "t"} for ln in lines]}
 
 
-def on_screen(tool_context: ToolContext) -> dict:
+async def on_screen(tool_context: ToolContext) -> dict:
     """Who and what is in the frame at the pause point, with their screen position, what is known about each
     character so far, and — if the viewer tapped the frame — which entity they tapped (`tapped` is an index into
     `entities`)."""
     state = tool_context.state
     m = moment_of(state)
-    out = m.on_screen(state.get("tap"))
+    out = await asyncio.to_thread(m.on_screen, state.get("tap"))
     _summarise(tool_context, note_on_screen(_turn(), m, out))
     return out
 
@@ -207,26 +216,27 @@ async def look_closer(question: str, tool_context: ToolContext) -> dict:
     lang = LANG_NAME.get(m.lang, "English")
     text = prompts.render("look_closer", position=ts(m.P), characters=chars, question=question, lang=lang)
     parts = [types.Part.from_text(text=text)]
-    frame = m.title.thumb(m.fp)
     win = m.near_window(config.NEAR_WINDOW_S)
-    if win and config.LOOK_VIDEO and config.ASSET_BUCKET:
+    video = bool(win and config.LOOK_VIDEO and config.ASSET_BUCKET)
+    # the paused frame and (without the video clip) stills every 3 s of the window, all ≤ floor(P), read concurrently
+    wanted = [m.fp] + ([] if video or not win else list(range(int(win[0]), int(win[1]) + 1, 3)))
+    jpegs = await asyncio.gather(*(asyncio.to_thread(read_thumb, m.title, t) for t in wanted))
+    frame, stills = jpegs[0], [(t, b) for t, b in zip(wanted[1:], jpegs[1:]) if b is not None]
+    if video:
         # whole-film clip from Cloud Storage (has audio, but adds tens of seconds of latency)
         parts.append(types.Part(
             file_data=types.FileData(file_uri=f"gs://{config.ASSET_BUCKET}/assets/{m.title.sha}.mp4", mime_type="video/mp4"),
             video_metadata=types.VideoMetadata(start_offset=f"{win[0]:.1f}s", end_offset=f"{win[1]:.1f}s", fps=1)))
         span = f"frame + video {ts(win[0])}–{ts(win[1])}"
     elif win:
-        # the same window as stills from the per-second thumbnails (all ≤ floor(P)); fast and local
-        stills = [t for t in range(int(win[0]), int(win[1]) + 1, 3) if m.title.thumb(t).exists()]
-        for t in stills:
-            parts += [types.Part.from_text(text=f"[{ts(t)}]"),
-                      types.Part.from_bytes(data=m.title.thumb(t).read_bytes(), mime_type="image/jpeg")]
+        for t, jpeg in stills:
+            parts += [types.Part.from_text(text=f"[{ts(t)}]"), types.Part.from_bytes(data=jpeg, mime_type="image/jpeg")]
         span = f"frame + {len(stills)} stills {ts(win[0])}–{ts(win[1])}"
     else:
         span = "current frame"
-    if frame.exists():
+    if frame is not None:
         parts += [types.Part.from_text(text=f"[{ts(m.P)}] current frame"),
-                  types.Part.from_bytes(data=frame.read_bytes(), mime_type="image/jpeg")]
+                  types.Part.from_bytes(data=frame, mime_type="image/jpeg")]
     turn = _turn()
     turn.model_calls += 1
     try:
@@ -235,9 +245,15 @@ async def look_closer(question: str, tool_context: ToolContext) -> dict:
         _summarise(tool_context, "Could not look closer in time")
         return {"observation": "", "note": f"looking closer failed ({type(e).__name__}); answer from what you have"}
     turn.add_usage(r.usage_metadata)
-    turn.add_frame(m.fp if frame.exists() else None, f"Paused frame {ts(m.P)}")
+    turn.add_frame(m.fp if frame is not None else None, f"Paused frame {ts(m.P)}")
     _summarise(tool_context, f"Looked at the {span}")
     return {"observation": m.sanitize((r.text or "").strip()), "looked_at": span}
+
+
+def read_thumb(title, t: int) -> bytes | None:
+    """One thumbnail's bytes, or None. Blocking (may fetch from Cloud Storage): call it in a worker thread."""
+    path = title.thumb(t)
+    return path.read_bytes() if path.exists() else None
 
 
 async def vision_generate(parts: list) -> types.GenerateContentResponse:
