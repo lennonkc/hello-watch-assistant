@@ -237,7 +237,8 @@ def test_rejudge_grades_stored_results_without_asking(tmp_path, monkeypatch, cap
             "notes": "Generated spoiler probe."}
     (gen / "gen-abab.jsonl").write_text(json.dumps(case) + "\n")
     (run / "results.jsonl").write_text(json.dumps({"id": case["id"], "status": "ok", "answer": "That is Bob.",
-                                                   "evidence_text": [], "t_total_ms": 10}) + "\n")
+                                                   "evidence_text": [], "t_total_ms": 10, "flow": "tools"}) + "\n")
+    (run / "run.json").write_text(json.dumps({"run_id": "r1", "base": "http://x", "flow": "tools"}))  # an older run
     monkeypatch.setattr(J, "ROOT", tmp_path)
     monkeypatch.setenv("BENCH_REJUDGE_RUNS", "r1")
     monkeypatch.setenv("BENCH_LLM", "0")
@@ -245,7 +246,8 @@ def test_rejudge_grades_stored_results_without_asking(tmp_path, monkeypatch, cap
     assert J.rejudge() == 0
     judged = [json.loads(x) for x in (run / "judged.jsonl").read_text().splitlines()]
     assert judged[0]["rule_leaks"] == ["canary:Bob", "hidden_name:Bob"]
-    assert "Benchmark scorecard" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "Benchmark scorecard" in out and "answer flow `tools`" in out
     monkeypatch.setenv("BENCH_REJUDGE_RUNS", "nope")
     with pytest.raises(J.OpsError, match="no stored run"):
         J.rejudge()

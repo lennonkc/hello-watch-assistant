@@ -1241,7 +1241,7 @@ def bench_show(max_lines: int = 118) -> int:
             t = r.get("timing") or {}
             block.append(f"  time: server {r.get('server_latency_ms')} ms (first text {t.get('first_text_ms')}) · "
                          f"client {r.get('t_total_ms')} ms (first text {r.get('t_first_text_ms')}) · tools "
-                         f"{', '.join(r.get('tools') or []) or '-'} · flow {r.get('flow')}")
+                         f"{', '.join(r.get('tools') or []) or '-'}")
         if lines + len(block) > max_lines:
             say(f"... {len(want) - n} more case(s): {', '.join(want[n:])[:300]}")
             break

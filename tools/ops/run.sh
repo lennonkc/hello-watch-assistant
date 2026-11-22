@@ -369,7 +369,7 @@ mode_info() {
   else
     say "Gemini key file: not present"
   fi
-  say "REGION=$REGION SERVICE=$SERVICE TAG=$TAG PACKS_PREFIX=${PACKS_PREFIX:-(from the service)} BENCH_FLOW=${BENCH_FLOW:-(server default)}"
+  say "REGION=$REGION SERVICE=$SERVICE TAG=$TAG PACKS_PREFIX=${PACKS_PREFIX:-(from the service)}"
 
   hr "tools"
   say "bash: $BASH_VERSION"
@@ -426,7 +426,7 @@ mode_info() {
   say "service URL: $SERVICE_URL"
   say "bucket (CEDAR_INGEST_BUCKET): ${BUCKET:-(unset)}"
   say "packs prefix (WATCH_PACKS_GCS): ${PACKS_GCS:-(unset)}"
-  for k in WATCH_MODEL WATCH_FLOW WATCH_ASK_PER_MINUTE WATCH_ASK_PER_DAY_PER_IP CEDAR_GEMINI_BACKEND; do
+  for k in WATCH_MODEL WATCH_ASK_PER_MINUTE WATCH_ASK_PER_DAY_PER_IP CEDAR_GEMINI_BACKEND; do
     v=$(svc_q env "$k")
     if [ -n "$v" ]; then say "latest revision env $k=$v"; fi
   done
@@ -638,9 +638,6 @@ mode_bench() {
   run_id=${BENCH_RUN_ID:-}
   if [ -z "$run_id" ]; then
     run_id="$(date -u '+%m%d-%H%M')-$TAG"
-    if [ -n "${BENCH_FLOW:-}" ]; then
-      run_id="$run_id-$BENCH_FLOW"
-    fi
     if [ -n "${BENCH_GENERATE:-}" ]; then
       run_id="$run_id-gen"
     fi
@@ -678,9 +675,6 @@ mode_bench() {
   fi
   if [ -n "${BENCH_ONLY:-}" ]; then
     set -- "$@" --only "$BENCH_ONLY"
-  fi
-  if [ -n "${BENCH_FLOW:-}" ]; then
-    set -- "$@" --flow "$BENCH_FLOW"               # X-Watch-Flow header; honoured only with the bench token
   fi
   if [ -n "$gen_dir" ]; then
     set -- "$@" --cases "$gen_dir"                 # a generated set is its own run, never mixed with hand-written cases

@@ -8,7 +8,6 @@ or any deployed revision (for example a tagged Cloud Run revision that takes no 
 # 1. ask (resumable; --only filters by case-id prefix, --workers 1 keeps latency clean)
 python bench/run_bench.py --base http://127.0.0.1:8080 --run-id local-1
 python bench/run_bench.py --base https://next---<service-url> --token-file .cache/bench_token --run-id next-1
-python bench/run_bench.py --base https://next---<service-url> --token-file .cache/bench_token --flow tools  # A/B
 
 # 2. grade + scorecard (runs/<run>/scorecard.{md,json}); two runs side by side → runs/compare-A-vs-B/
 python bench/judge.py next-1 --packs .cache/packs
@@ -21,9 +20,7 @@ python bench/judge.py next-1 --no-llm --no-rules
 
 The public demo is rate limited per IP (6 questions a minute, 80 a day): use `--sleep 11 --limit N` there. A
 deployment can let the benchmark past the limiter with a shared token, sent as the `X-Watch-Bench-Token` header
-(`--token`, `--token-file`, or env `BENCH_TOKEN`; header name via `--token-header`). With a valid token, `--flow
-context|tools` asks the server for that answer flow (`X-Watch-Flow` header), so one revision serves both arms of an
-A/B run; the flow goes into the run id, `run.json` and the scorecard header.
+(`--token`, `--token-file`, or env `BENCH_TOKEN`; header name via `--token-header`).
 
 A run does not start when `GET /api/health` fails, and stops at the first HTTP 429 when a token was sent (the target
 does not accept it).
@@ -31,13 +28,14 @@ does not accept it).
 ## Results
 
 <!-- results:start round 3; replace this block with the final run's numbers (same layout) -->
-**Round 3, 2026-11-22: one staged Cloud Run revision, both answer flows asked on the same revision.** Films: the
-three public short films (11–15 min) and a private preview title (169 min). Grading: an LLM judge (Gemini) on the
-answer text, plus a rule gate over everything the viewer received (definitions below, under Grading).
+**Round 3, 2026-11-22: one staged Cloud Run revision, both answer flows asked on the same revision (the commit
+before the tools flow was removed).** Films: the three public short films (11–15 min) and a private preview title
+(169 min). Grading: an LLM judge (Gemini) on the answer text, plus a rule gate over everything the viewer received
+(definitions below, under Grading).
 
 Hand-written cases (97, three public films):
 
-| | Shipped flow: server-built context, one model call (a tool round only when needed) | Earlier tool-calling flow |
+| | Shipped flow: server-built context, one model call (a tool round only when needed) | Earlier tool-calling flow (measured on the commit before its removal) |
 |---|---|---|
 | accuracy (LLM judge) | 91.9 % (n 62) | 89.5 % |
 | cases with a rule-gate leak | 0 of 97 | 1 of 97 |
@@ -134,7 +132,7 @@ and reports show their ids and numbers only (`--show-private` for everything).
 | `server_latency_ms` | `latency_ms` of the `answer` event |
 | `server_tools` / `model_tools` | tool events split by id: `ctx-…` = run by the server before the model, the rest called by the model |
 | `guard_rewritten`, `guard_fallback` | `answer.guard.rewritten` / `.fallback` (when the server sends it; otherwise the judge recognises the fixed replies of `server/main.py`) |
-| `usage`, `timing`, `flow` | copied from the `answer` event: `usage = {input_tokens, output_tokens (incl. thinking), thought_tokens, model_calls}`, `timing = {first_text_ms, total_ms}` |
+| `usage`, `timing` | copied from the `answer` event: `usage = {input_tokens, output_tokens (incl. thinking), thought_tokens, model_calls}`, `timing = {first_text_ms, total_ms}` |
 | `guard_dropped` | `answer.guard.dropped`: sentences the output guard withheld |
 | `streamed_text` | the concatenated `delta` text, kept only when it differs from the final answer |
 | `raw` | every event but the deltas, and the full `answer` (evidence rows with times, frames, highlight): what the leak check reads |
@@ -175,7 +173,7 @@ and reports show their ids and numbers only (`--show-private` for everything).
 | latency | p50 / p90 / p95, interpolated between ranks, with n; p95 only from n ≥ 20; server-side first (`latency_ms`, `timing.first_text_ms`), then the client's measurements, which add the network between the bench host and the service |
 | errors | cases without an answer, on their own line; they are graded as non-answers (the viewer saw the error) |
 | tools | calls per answer, split server-run / model-called, and usage by tool name |
-| tokens, cost | from `answer.usage`: input and output (incl. thinking) tokens per answer p50 / p90, model calls per answer, estimated cost per answer (list prices from `ingest/ledger.py`); answers per flow |
+| tokens, cost | from `answer.usage`: input and output (incl. thinking) tokens per answer p50 / p90, model calls per answer, estimated cost per answer (list prices from `ingest/ledger.py`) |
 
 Graded text = the answer alone. Leak-checked = everything the viewer received: answer, evidence rows, frame captions,
 highlight labels, tool arguments and summaries, streamed text that differs from the final answer, and the answers of
@@ -186,8 +184,9 @@ Chinese text, cues of English / Chinese tracks only, a look already shown, title
 Grades are cached in `runs/<run>/judged.jsonl` per (case id, case content, what was received, pack sha and version,
 judge prompt, judge model), so re-grading costs nothing until one of them changes, and old runs can be re-graded
 from their `results.jsonl` without asking the service again. `run_bench.py` refuses to resume a run against another
-base, flow, bench commit, server revision or set of packs, and stops when the server answers with a flow other than
-the one requested.
+base, bench commit, server revision or set of packs, or one made with the removed tools flow (older `run.json` and
+`results.jsonl` files with a `flow` field still load for grading and comparison; the scorecard header names that
+flow).
 
 The judge needs, on the machine that runs it: the master packs (`--packs DIR` or `BENCH_PACKS_DIR`, layout
 `<asset_sha>/master/pack.db`) and a Gemini key (`CEDAR_GEMINI_KEY_FILE`, developer API) or

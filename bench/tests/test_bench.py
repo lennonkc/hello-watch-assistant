@@ -189,13 +189,13 @@ def test_usage_summary_contract_and_cost():
     assert J.usage_summary(None) is None and J.usage_summary([]) is None
 
 
-def test_summarize_tokens_flow_and_server_first_text():
+def test_summarize_tokens_and_server_first_text():
     rows = [row(i, total=1000 + i, usage=J.usage_summary({"input_tokens": 1000 * i, "output_tokens": 10 * i,
                                                           "thought_tokens": 0, "model_calls": 1 + i % 2}),
-                server_first_text_ms=100 * i, flow="context" if i < 4 else "tools") for i in range(1, 6)]
+                server_first_text_ms=100 * i, flow="tools" if i > 3 else None) for i in range(1, 6)]   # old rows
     s = J.summarize(rows)
     assert (s["tokens_in_p50"], s["tokens_in_p90"], s["tokens_out_p50"]) == (3000, 4600, 30)
-    assert s["model_calls_per_answer"] == 1.6 and s["flow_mix"] == "context 3, tools 2"
+    assert s["model_calls_per_answer"] == 1.6 and "flow_mix" not in s
     assert s["latency_server_first_text_ms"]["p50"] == 300
 
 
@@ -293,7 +293,7 @@ class FakeServer(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         FakeServer.calls.append({"body": body, "token": self.headers.get("X-Watch-Bench-Token"),
-                                 "flow": self.headers.get("X-Watch-Flow")})
+                                 "flow_header": self.headers.get("X-Watch-Flow")})
         if FakeServer.fail_first_with_429:
             FakeServer.fail_first_with_429 = False
             data = json.dumps({"message": "slow down"}).encode()
@@ -329,9 +329,7 @@ class FakeServer(http.server.BaseHTTPRequestHandler):
         ev("answer", {"text": "Hello there.", "evidence": [{"text": "cue 1"}],
                       "guard": {"checked": True, "rewritten": False, "dropped": 0}, "latency_ms": 42,
                       "usage": {"input_tokens": 100, "output_tokens": 10, "thought_tokens": 4, "model_calls": 1},
-                      "timing": {"first_text_ms": 30, "total_ms": 40},
-                      "flow": (self.headers.get("X-Watch-Flow") if self.headers.get("X-Watch-Bench-Token") else None)
-                      or "context"})
+                      "timing": {"first_text_ms": 30, "total_ms": 40}, "flow": "context"})
         ev("done", {})
 
 
@@ -366,10 +364,11 @@ def test_client_records_timings_tools_and_usage(fake):
     assert r["streamed"] and r["n_delta"] == 2 and r["streamed_text"] is None             # same as the final text
     assert r["t_first_tool_ms"] <= r["t_first_text_ms"] <= r["t_answer_ms"] <= r["t_total_ms"]
     assert r["server_latency_ms"] == 42 and r["usage"]["input_tokens"] == 100 and r["timing"]["first_text_ms"] == 30
-    assert r["flow"] == "context" and r["guard_dropped"] == 0
+    assert "flow" not in r and r["guard_dropped"] == 0
     assert r["guard_rewritten"] is False and r["gate"]["eligible_total"] == 3
     call = FakeServer.calls[-1]
     assert call["token"] == "t0ken" and call["body"]["tap"] == {"x": 0.4, "y": 0.6}
+    assert call["flow_header"] is None                                        # no answer flow is asked for
     assert call["body"]["title_id"] == "mini" and call["body"]["session_id"].startswith("bench-")
 
 
@@ -411,26 +410,18 @@ def test_run_bench_main_resumes(fake, tmp_path, monkeypatch):
     assert meta["base"] == fake and meta["token"] is False
 
 
-def test_flow_header_run_id_and_meta(fake, tmp_path, monkeypatch):
+def test_run_id_and_meta_carry_no_flow(fake, tmp_path, monkeypatch):
     monkeypatch.setattr(R, "RUNS_DIR", tmp_path)
     cases = tmp_path / "cases.jsonl"
     cases.write_text(json.dumps({k: v for k, v in case(id="t1").items() if k != "_file"}) + "\n")
-    assert R.main(["--base", fake, "--cases", str(cases), "--flow", "tools", "--token", "tk"]) == 0
-    assert FakeServer.calls[-1]["flow"] == "tools" and FakeServer.calls[-1]["token"] == "tk"
+    assert R.main(["--base", fake, "--cases", str(cases), "--token", "tk"]) == 0
     (run,) = [p for p in tmp_path.iterdir() if p.is_dir()]
-    assert run.name.endswith("-tools") and json.loads((run / "run.json").read_text())["flow"] == "tools"
+    assert "flow" not in json.loads((run / "run.json").read_text()) and FakeServer.calls[-1]["flow_header"] is None
+    with pytest.raises(SystemExit):
+        R.main(["--base", fake, "--cases", str(cases), "--flow", "tools"])         # the option is gone
 
 
-def test_a_run_fails_when_the_server_ignores_the_requested_flow(fake, tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(R, "RUNS_DIR", tmp_path)
-    cases = tmp_path / "cases.jsonl"
-    cases.write_text(json.dumps({k: v for k, v in case(id="t1").items() if k != "_file"}) + "\n")
-    assert R.main(["--base", fake, "--cases", str(cases), "--flow", "tools", "--run-id", "f"]) == 2   # no token
-    assert "answered by flow 'context'" in capsys.readouterr().err
-    assert C.read_jsonl(tmp_path / "f" / "results.jsonl") == []
-
-
-def test_resume_refuses_another_revision_or_flow(fake, tmp_path, monkeypatch, capsys):
+def test_resume_refuses_another_revision_or_a_tools_flow_run(fake, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(R, "RUNS_DIR", tmp_path)
     cases = tmp_path / "cases.jsonl"
     rows = [{k: v for k, v in case(id=f"t{i}").items() if k != "_file"} for i in range(2)]
@@ -440,8 +431,13 @@ def test_resume_refuses_another_revision_or_flow(fake, tmp_path, monkeypatch, ca
     assert R.main(["--base", fake, "--cases", str(cases), "--run-id", "x"]) == 2
     assert "revision ('rev-1' → 'rev-2')" in capsys.readouterr().err
     monkeypatch.setattr(FakeServer, "revision", "rev-1")
-    assert R.main(["--base", fake, "--cases", str(cases), "--run-id", "x", "--flow", "tools", "--token", "t"]) == 2
-    assert json.loads((tmp_path / "x" / "run.json").read_text())["revision"] == "rev-1"
+    mpath = tmp_path / "x" / "run.json"
+    assert json.loads(mpath.read_text())["revision"] == "rev-1"
+    mpath.write_text(json.dumps({**json.loads(mpath.read_text()), "flow": "context"}))   # an older run: same flow
+    assert R.main(["--base", fake, "--cases", str(cases), "--run-id", "x", "--limit", "0"]) == 0
+    mpath.write_text(json.dumps({**json.loads(mpath.read_text()), "flow": "tools"}))     # the removed flow
+    assert R.main(["--base", fake, "--cases", str(cases), "--run-id", "x"]) == 2
+    assert "flow ('tools' → None)" in capsys.readouterr().err
 
 
 def test_refuses_to_start_when_health_fails(fake, tmp_path, monkeypatch, capsys):

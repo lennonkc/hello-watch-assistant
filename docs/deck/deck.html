@@ -471,7 +471,7 @@ strong { font-weight: 700; }
     <figure class="shot shot--contain" data-label="docs/images/live-demo-miss.jpg"><img src="../images/live-demo-miss.jpg" alt="Live demo: what did I miss, with the spoiler shield counts" onerror="this.remove()"><figcaption>Live demo · Sintel, paused at 07:11</figcaption></figure>
     <ul class="feat">
       <li><span class="ico ok-ico">✓</span><div><b>The gate runs first</b>At 07:11, 215 facts are unlocked and 150 are kept away from the model.</div></li>
-      <li><span class="ico">≡</span><div><b>Story so far</b>The latest recap plus what happened since, read by the agent’s story_so_far tool.</div></li>
+      <li><span class="ico">≡</span><div><b>Story so far</b>The latest recap plus what happened since, looked up by the server before the model is called.</div></li>
       <li><span class="ico">▣</span><div><b>Evidence you can check</b>“Based on” shows the recap time and frames from earlier in the film.</div></li>
       <li><span class="ico ok-ico">⛨</span><div><b>Checked before you see it</b>The spoiler guard passed before the answer appeared; this one took 12.5 s.</div></li>
     </ul>
@@ -510,11 +510,11 @@ strong { font-weight: 700; }
       <div class="arrow">→</div>
       <div class="step step--gate"><b>Spoiler gate</b><span>Eligible set: reveal + margin ≤ P</span></div>
       <div class="arrow">→</div>
-      <div class="step" style="--c:var(--gc-gemini); flex:1.4"><b>ADK agent + 5 tools</b><span>Gemini 3.8 Flash on Agent Platform; tools read only the eligible set</span></div>
+      <div class="step" style="--c:var(--gc-gemini); flex:1.4"><b>Context + one call</b><span>Built by the server from the eligible set; Gemini 3.8 Flash answers, 2 tools if needed</span></div>
       <div class="arrow">→</div>
-      <div class="step" style="--c:var(--gc-run)"><b>Output guards</b><span>Names, canaries, visibility</span></div>
+      <div class="step" style="--c:var(--gc-run)"><b>Sentence guard</b><span>Names, canaries, visibility, identities</span></div>
       <div class="arrow">→</div>
-      <div class="step" style="--c:var(--gc-run)"><b>Streamed answer</b><span>Server-Sent Events</span></div>
+      <div class="step" style="--c:var(--gc-run)"><b>Streamed answer</b><span>Server-Sent Events, sentence by sentence</span></div>
     </div>
   </div>
 </section>
@@ -551,29 +551,29 @@ strong { font-weight: 700; }
 <section class="slide tight" data-n="8">
   <div class="head">
     <p class="eyebrow">The agent</p>
-    <h2 class="h1">An ADK agent with five gate-aware tools, and no way to move P.</h2>
+    <h2 class="h1">Server-built context, one Gemini call, and no way to move P.</h2>
   </div>
   <div class="grid" style="grid-template-columns: 1.2fr 1fr; gap: 40px; flex: 1">
     <div class="tools">
-      <div class="tool"><code>story_so_far</code><span>Latest eligible recap plus the scenes and events after it. The first choice for “what did I miss?”</span></div>
-      <div class="tool"><code>search_moments</code><span>Embeds the question with gemini-embedding-2 and ranks only inside the eligible set.</span></div>
-      <div class="tool"><code>recent_dialogue</code><span>Lines spoken before P, with who said each one when known.</span></div>
-      <div class="tool"><code>on_screen</code><span>Who and what is in the paused frame; a tap is matched to their boxes, and labels are decided at P.</span></div>
-      <div class="tool"><code>look_closer</code><span>Gemini 3.8 Flash looks at the paused frame plus stills from the 30 s before it.</span></div>
+      <div class="tool"><code>on_screen</code><span>Run by the server: who and what is in the paused frame; a tap is matched to their boxes, and labels are decided at P.</span></div>
+      <div class="tool"><code>recent_dialogue</code><span>Run by the server: the last minute of lines before P, with who said each one when known.</span></div>
+      <div class="tool"><code>story_so_far</code><span>Run by the server: the latest eligible recap plus the scenes and events after it.</span></div>
+      <div class="tool"><code>search_moments</code><span>A tool the model may call: embeds the question with gemini-embedding-2 and ranks only inside the eligible set.</span></div>
+      <div class="tool"><code>look_closer</code><span>A tool the model may call: Gemini 3.8 Flash looks at the paused frame plus stills from the 30 s before it.</span></div>
     </div>
     <div class="grid" style="gap: 24px; align-content: start">
       <div class="card">
         <h3>P lives in session state</h3>
-        <p>The server writes P, title, language and tap into the ADK session with <span class="mono">state_delta</span>. Tools read <span class="mono">ToolContext.state</span>; no tool takes P as an argument.</p>
+        <p>The server writes P, title, language and tap into the state of each question’s ADK session when it creates it. Tools read <span class="mono">ToolContext.state</span>; no tool takes P as an argument.</p>
       </div>
       <div class="card">
         <h3>Every step is visible</h3>
-        <div class="seq"><span>gate</span><i>→</i><span>tool</span><i>→</i><span>tool_result</span><i>→</i><span>answer</span></div>
-        <p style="margin-top:12px">Streamed to the browser with Server-Sent Events.</p>
+        <div class="seq"><span>gate</span><i>→</i><span>tool</span><i>→</i><span>tool_result</span><i>→</i><span>delta</span><i>→</i><span>answer</span></div>
+        <p style="margin-top:12px">Streamed to the browser with Server-Sent Events, one guarded sentence at a time.</p>
       </div>
       <div class="card">
         <h3>Guard, retry, fall back</h3>
-        <p>If the output guard finds a forbidden term, the draft is discarded and the question is answered again in a fresh session with a do-not-use hint. If that still fails, a fixed safe answer is returned.</p>
+        <p>Each sentence is checked before it is sent, and one that fails is dropped. If nothing survives, the question is asked once more with a do-not-use note; if that fails too, a fixed safe answer is returned.</p>
       </div>
     </div>
   </div>
@@ -590,11 +590,11 @@ strong { font-weight: 700; }
     <div class="svc" style="--c:var(--gc-gemini)"><em>Gemini</em><b>gemini-embedding-2</b><span>One 1536-d space for text items and ≤ 30 s video windows with audio.</span></div>
     <div class="svc" style="--c:var(--gc-gemini)"><em>Gemini</em><b>gemini-3.5-transcribe</b><span>Word-level transcription with speaker diarization.</span></div>
     <div class="svc" style="--c:var(--gc-gemini)"><em>Agents</em><b>Gemini Enterprise Agent Platform</b><span>Serves Gemini with project IAM; reads video straight from Cloud Storage.</span></div>
-    <div class="svc" style="--c:var(--gc-gemini)"><em>Agents</em><b>Agent Development Kit</b><span>The online LlmAgent and its five gate-aware tools.</span></div>
+    <div class="svc" style="--c:var(--gc-gemini)"><em>Agents</em><b>Agent Development Kit</b><span>The online LlmAgent: one call over the server-built context, two gate-bounded tools.</span></div>
     <div class="svc" style="--c:var(--gc-run)"><em>Compute</em><b>Cloud Run service</b><span>Web app, spoiler gate, agent and output guards; capped instances and rate limits.</span></div>
     <div class="svc" style="--c:var(--gc-run)"><em>Compute</em><b>Cloud Run Jobs</b><span>Batch ingest: one film per task, cached and budgeted stages.</span></div>
     <div class="svc" style="--c:var(--gc-storage)"><em>Data</em><b>Cloud Storage</b><span>Films and versioned knowledge packs in a private bucket; video via signed URLs.</span></div>
-    <div class="svc" style="--c:var(--gc-secret)"><em>Security</em><b>Secret Manager</b><span>Every production prompt, the agent instructions and the API key. None are in the repo.</span></div>
+    <div class="svc" style="--c:var(--gc-secret)"><em>Security</em><b>Secret Manager</b><span>The production ingest prompts and the API key; neither is in the repo.</span></div>
     <div class="svc" style="--c:var(--gc-build)"><em>Build</em><b>Cloud Build</b><span>Builds the ingest image (pinned FFmpeg, Python) and the web service image.</span></div>
     <div class="svc" style="--c:var(--gc-build)"><em>Build</em><b>Artifact Registry</b><span>Stores the images that Cloud Run runs.</span></div>
     <div class="svc" style="--c:var(--gc-build)"><em>Operations</em><b>Cloud Scheduler</b><span>Triggers the upload-renewal job every 6 hours.</span></div>
@@ -614,7 +614,7 @@ strong { font-weight: 700; }
     <div class="stat"><span class="v">10<small> / 10</small></span><p>speaker attributions correct in spot checks</p></div>
     <div class="stat"><span class="v">12<small> / 12</small></span><p>character identities correct in shot entities</p></div>
     <div class="stat"><span class="v">~85<small> %</small></span><p>shot captions fully correct in spot checks</p></div>
-    <div class="stat"><span class="v">3–13<small> s</small></span><p>to a full answer (local tests), with ≤ 3 tool calls by instruction</p></div>
+    <!-- results: round 3; the final run's numbers go here --><div class="stat"><span class="v">2.2<small> s</small></span><p>server time to a full answer, p50 (p90 3.9 s), 1.15 model calls per answer (benchmark round 3)</p></div>
     <div class="stat"><span class="v">≈ $8</span><p>total Gemini cost to ingest all three films, re-runs included</p></div>
   </div>
   <p class="note">Spot checks on Sintel unless noted. Retrieval: 20 questions × 2 pause positions, scored by top-3 time overlap. Films: Sintel, Tears of Steel, Elephants Dream (Blender Foundation, CC BY).</p>
@@ -660,7 +660,7 @@ strong { font-weight: 700; }
       <ul class="bul">
         <li><b>Cloud Run Jobs</b> ingest one film per task, in parallel.</li>
         <li><b>The knowledge pack is versioned SQLite.</b> A device form (reviewed rows only, no review log) is already defined, designed for answering on a TV or phone.</li>
-        <li><b>Prompts in Secret Manager</b> change without rebuilding images.</li>
+        <li><b>Ingest prompts in Secret Manager</b> change without rebuilding images.</li>
         <li><b>Human review is specified:</b> review patches, roles and a rule that names, identities and spoiler-critical items need a human.</li>
       </ul>
     </div>
