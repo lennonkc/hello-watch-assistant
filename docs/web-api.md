@@ -11,7 +11,7 @@
 | `web/index.html` | front end | App shell: header, two tabs (`#experience`, `#architecture`), footer with film attribution |
 | `web/shared/tokens.css` | front end | Design tokens shared by both tabs (see below) |
 | `web/shared/motion.css`, `motion.js` | front end | Motion layer: entrances, tab / theme transitions, count-ups, ask-flow choreography; honours `prefers-reduced-motion` |
-| `web/experience/` | front end | Tab 1, "Live demo": one-line intro, film picker, player, ask panel |
+| `web/experience/` | front end | Tab 1, "Live demo": hero with the walkthrough video, film cards, player, ask panel, how it works |
 | `web/architecture/` | front end | Tab 2, "How it works": interactive flow diagram + Google Cloud technology map |
 
 The service serves `web/` as static files at `/`. No build step: plain HTML, CSS and ES modules, no frameworks, no

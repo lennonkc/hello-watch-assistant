@@ -1,5 +1,5 @@
-// Motion layer for every tab: entrances, tab and theme transitions, count-ups, the ask flow and the architecture
-// diagram. It only watches the DOM the app already builds (Mutation/IntersectionObserver) and animates
+// Motion layer for every tab: entrances, tab and theme transitions, count-ups, the ask flow, film-card tilt and the
+// architecture diagram. It only watches the DOM the app already builds (Mutation/IntersectionObserver) and animates
 // on top of it, so no app logic depends on it. Plain ES module, no dependencies.
 // Contract: everything is skipped under prefers-reduced-motion; animations use opacity, transform and the individual
 // translate/rotate/scale properties, mostly as partial keyframes ("from" only) so they settle on the page's own styles.
@@ -278,7 +278,7 @@ function enterPanel(panel, dir = 0) {
     } else {
       from(el, { opacity: 0, translate: `${dx}px 14px` }, { duration: 620, delay });
     }
-    el.querySelectorAll('.xp-intro__steps > li, .arch-ideas > li').forEach((li, j) =>
+    el.querySelectorAll('.xp-howto > li, .arch-ideas > li').forEach((li, j) =>
       from(li, { opacity: 0, translate: '0 10px' }, { duration: 520, delay: delay + 160 + j * 70 }));
     if (el.matches('.arch > *') && !el.matches('.arch-intro')) {
       // A section that starts on screen but runs past the fold: reveal its lower parts on scroll.
@@ -378,8 +378,9 @@ function onXp(records) {
           from(n.querySelector('.xp-q'), { opacity: 0, scale: 0.92, translate: '0 10px' }, { duration: 520, easing: tk().spring });
         } else if (c.contains('xp-step')) animStep(n);
         else if (c.contains('xp-divider')) from(n, { opacity: 0, scale: '0.6 1' }, { duration: 520 });
-        else if (c.contains('xp-film') && !c.contains('xp-film--skeleton')) {
-          from(n, { opacity: 0, translate: '0 6px' }, { duration: 420, delay: [...n.parentNode.children].indexOf(n) * 60 });
+        else if (c.contains('xp-cards__item') && n.querySelector(':scope > .xp-card:not(.xp-card--skeleton)')) {
+          from(n, { opacity: 0, translate: '0 18px', scale: 0.97 }, { duration: 620, delay: [...n.parentNode.children].indexOf(n) * 90 });
+          addGlare(n.querySelector('.xp-card'));
         } else if (c.contains('xp-evidence') || c.contains('xp-frames') || c.contains('xp-answer__foot')) {
           from(n, { opacity: 0, translate: '0 8px' }, { duration: 420 });
         } else if (c.contains('xp-notice')) {
@@ -556,6 +557,67 @@ addEventListener('beforeprint', () => {
   for (const el of document.querySelectorAll('[data-hwa-reveal]')) { revealIO.unobserve(el); el.removeAttribute('data-hwa-reveal'); }
 });
 
+// ---------- film cards: tilt toward the pointer ----------
+
+// The card rotates so the corner under the pointer presses in, the poster image shifts the other way (parallax), and
+// a soft glare follows the pointer. Mouse and pen only; touch scrolls the card strip instead.
+const tilts = new Map();
+let tiltFrame = 0;
+
+function addGlare(card) {
+  const poster = card?.querySelector('.xp-card__poster');
+  if (!poster || poster.querySelector('.hwa-glare')) return;
+  const g = document.createElement('i');
+  g.className = 'hwa-glare';
+  g.setAttribute('aria-hidden', 'true');
+  poster.append(g);
+}
+
+function tiltLoop() {
+  tiltFrame = 0;
+  for (const [card, s] of tilts) {
+    s.x += (s.tx - s.x) * 0.18;
+    s.y += (s.ty - s.y) * 0.18;
+    const ang = Math.min(6, Math.hypot(s.x, s.y) * 12);         // up to 6 degrees
+    const img = card.querySelector('.xp-card__poster img');
+    if (!s.on && Math.abs(s.x) < 0.002 && Math.abs(s.y) < 0.002) {
+      card.style.rotate = '';
+      if (img) img.style.translate = '';
+      tilts.delete(card);
+      continue;
+    }
+    card.style.rotate = ang > 0.01 ? `${s.y.toFixed(4)} ${(-s.x).toFixed(4)} 0 ${ang.toFixed(2)}deg` : '';
+    if (img) img.style.translate = `${(-s.x * 12).toFixed(2)}px ${(-s.y * 8).toFixed(2)}px`;
+    card.style.setProperty('--hwa-gx', `${((s.x + 0.5) * 100).toFixed(1)}%`);
+    card.style.setProperty('--hwa-gy', `${((s.y + 0.5) * 100).toFixed(1)}%`);
+  }
+  if (tilts.size) tiltFrame = requestAnimationFrame(tiltLoop);
+}
+
+function setupTilt(panel) {
+  const kick = () => { if (!tiltFrame) tiltFrame = requestAnimationFrame(tiltLoop); };
+  panel.addEventListener('pointermove', (e) => {
+    if (reduced || e.pointerType === 'touch') return;
+    const card = e.target.closest?.('.xp-card');
+    if (!card || card.classList.contains('xp-card--skeleton')) return;
+    const r = card.getBoundingClientRect();
+    let s = tilts.get(card);
+    if (!s) tilts.set(card, (s = { x: 0, y: 0, tx: 0, ty: 0, on: true }));
+    s.tx = Math.min(0.5, Math.max(-0.5, (e.clientX - r.left) / r.width - 0.5));
+    s.ty = Math.min(0.5, Math.max(-0.5, (e.clientY - r.top) / r.height - 0.5));
+    s.on = true;
+    card.classList.add('hwa-tilting');
+    kick();
+  }, { passive: true });
+  panel.addEventListener('pointerout', (e) => {
+    const card = e.target.closest?.('.xp-card');
+    if (!card || card.contains(e.relatedTarget)) return;
+    card.classList.remove('hwa-tilting');
+    const s = tilts.get(card);
+    if (s) { s.tx = 0; s.ty = 0; s.on = false; kick(); }
+  });
+}
+
 // ---------- boot ----------
 
 function boot() {
@@ -567,6 +629,7 @@ function boot() {
   const opts = { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'hidden', 'open'], attributeOldValue: true };
   if (xp) {
     watchMount(xp);
+    setupTilt(xp);
     new MutationObserver(onXp).observe(xp, opts);
   }
   if (ar) {
