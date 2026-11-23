@@ -11,11 +11,13 @@
 | `web/index.html` | front end | App shell: header, two tabs (`#experience`, `#architecture`), footer with film attribution |
 | `web/shared/tokens.css` | front end | Design tokens shared by both tabs (see below) |
 | `web/shared/motion.css`, `motion.js` | front end | Motion layer: entrances, tab / theme transitions, count-ups, ask-flow choreography; honours `prefers-reduced-motion` |
-| `web/experience/` | front end | Tab 1, "Live demo": film picker, player, ask panel |
+| `web/experience/` | front end | Tab 1, "Live demo": hero with the walkthrough video, film cards, player, ask panel, how it works |
 | `web/architecture/` | front end | Tab 2, "How it works": interactive flow diagram + Google Cloud technology map |
 
 The service serves `web/` as static files at `/`. No build step: plain HTML, CSS and ES modules, no frameworks, no
-external scripts, fonts or stylesheets (system fonts only). Everything must work at phone width (≥ 360 px) and in light / dark.
+external scripts, fonts or stylesheets. The brand fonts (Bricolage Grotesque for headings, Instrument Sans, JetBrains
+Mono; SIL Open Font License) are latin subsets served from `web/shared/fonts/`; other scripts use the system fonts.
+Everything must work at phone width (≥ 360 px) and in light / dark.
 
 Page links: `/?title=<id>&t=<seconds>&q=<text>&lang=en|zh` opens that film paused at `t` with the question filled
 in; `&ask=1` also sends it. An unknown id opens the first film. `/#code=…` unlocks private preview titles (see

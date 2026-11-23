@@ -90,6 +90,7 @@ const STR = {
       character_fact: 'Character facts', object: 'Objects', recap: 'Recaps',
     },
     chooseFilm: 'Choose a film', playFilm: 'Play the film', preview: 'Preview quality',
+    nowPlaying: 'Now playing', changeFilm: 'Change film',
     wholeFrame: 'Whole frame', cancel: 'Cancel',
     gateChecking: 'Checking what the assistant can see…', details: 'Details',
     gateLine: (e, l) => `Assistant can see <b class="xp-ok">${e}</b> moments · <b class="xp-locked">${l}</b> still locked`,
@@ -146,6 +147,7 @@ const STR = {
       object: '物件', recap: '回顾',
     },
     chooseFilm: '选择影片', playFilm: '播放影片', preview: '预览画质',
+    nowPlaying: '正在播放', changeFilm: '换一部',
     wholeFrame: '整个画面', cancel: '取消',
     gateChecking: '正在查看助手能看到什么…', details: '详情',
     gateLine: (e, l) => `助手能看到 <b class="xp-ok">${e}</b> 条内容 · <b class="xp-locked">${l}</b> 条仍然锁着`,
@@ -265,8 +267,21 @@ class Experience {
     r.classList.add('xp');
     r.innerHTML = '';
 
-    this.films = h('div', { class: 'xp-films', role: 'group' },
-      [0, 1, 2].map(() => h('span', { class: 'xp-film xp-film--skeleton', 'aria-hidden': 'true' })));
+    // Film picker: one card per film above the stage (the cards tilt toward the pointer, see web/shared/motion.js).
+    this.films = h('div', { class: 'xp-cards', role: 'group' },
+      [0, 1, 2].map(() => h('div', { class: 'xp-cards__item', 'aria-hidden': 'true' },
+        h('span', { class: 'xp-card xp-card--skeleton' },
+          h('span', { class: 'xp-card__poster' }), h('span', { class: 'xp-card__body' }, h('span'), h('span'))))));
+    this.pickerHead = h('h2', { id: 'xp-picker-h', class: 'xp-section-h' });
+    this.picker = h('section', { class: 'xp-picker', 'aria-labelledby': 'xp-picker-h' }, this.pickerHead, this.films);
+
+    // Above the player: which film is on, and a way back up to the cards.
+    this.nowTitle = h('span', { class: 'xp-now__title' });
+    this.nowTags = h('span', { class: 'xp-now__tags' });
+    this.changeBtn = h('button', {
+      type: 'button', class: 'xp-now__change', onclick: () => this.scrollTo(this.picker),
+    }, h('span', { html: icon('film') }), h('span', {}));
+    this.now = h('div', { class: 'xp-now' }, this.nowTitle, this.nowTags, this.changeBtn);
 
     // Player: the picture (video + overlays + tap layer) above its own controls, so the whole paused picture can
     // take a tap and nothing of the native controls sits on top of it.
@@ -353,11 +368,11 @@ class Experience {
       this.thread, this.live);
 
     this.stage = h('section', { class: 'xp-stage', 'aria-labelledby': 'xp-stage-h' },
-      h('h1', { id: 'xp-stage-h', class: 'visually-hidden' }, 'Live demo: pause the film and ask about it'),
-      h('div', { class: 'xp-main' }, this.films, this.player, this.gate),
+      h('h2', { id: 'xp-stage-h', class: 'visually-hidden' }, 'Live demo: pause the film and ask about it'),
+      h('div', { class: 'xp-main' }, this.now, this.player, this.gate),
       this.panel);
 
-    r.append(this.stage, this.renderAbout());
+    r.append(this.renderHero(), this.picker, this.stage, this.renderAbout());
     r.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && this.pick) { this.cancelPick(); this.input.focus(); }
     });
@@ -374,6 +389,9 @@ class Experience {
     const s = this.s;
     this.stage.setAttribute('lang', this.lang === 'zh' ? 'zh-CN' : 'en');
     this.films.setAttribute('aria-label', s.chooseFilm);
+    this.pickerHead.textContent = s.chooseFilm;
+    this.changeBtn.lastChild.textContent = s.changeFilm;
+    for (const b of this.films.querySelectorAll('.xp-card__now')) b.textContent = s.nowPlaying;
     this.bigPlay.setAttribute('aria-label', s.playFilm);
     this.wholeBtn.textContent = s.wholeFrame;
     this.cancelBtn.textContent = s.cancel;
@@ -391,12 +409,45 @@ class Experience {
     this.tapNoteText.textContent = s.tapNote;
     this.tapClear.textContent = s.clear;
     if (this.thread.querySelector('.xp-empty')) this.renderEmptyThread();
-    for (const b of this.films.querySelectorAll('.xp-badge--preview')) b.textContent = s.preview;
+    for (const b of this.root.querySelectorAll('.xp-badge--preview')) b.textContent = s.preview;
     if (!this.hint.hidden && !this.hint.classList.contains('is-warn')) { this.hint.hidden = true; this.updateHint(); }
     this.updateLock();
   }
 
-  /** Below the fold: what the demo is, how it keeps answers spoiler-free, and where that is measured. */
+  /** First screen: what this is, the three steps, and the walkthrough video beside them. */
+  renderHero() {
+    const steps = [
+      ['film', 'Pick a film', 'and press play'],
+      ['pause', 'Pause anywhere', 'the story locks there'],
+      ['tap', 'Ask or tap', 'someone on screen'],
+    ];
+    return h('section', { class: 'xp-hero', 'aria-labelledby': 'xp-hero-h' },
+      h('div', { class: 'xp-hero__copy' },
+        h('p', { class: 'xp-eyebrow' }, 'Live demo'),
+        h('h1', { id: 'xp-hero-h', class: 'xp-title xp-title--hero' }, 'Pause anywhere. Ask anything.',
+          h('span', {}, ' Spoilers stay locked.')),
+        h('p', { class: 'xp-lede' },
+          'The assistant is only given what the film has shown up to the moment you pause. Everything later stays ' +
+          'locked on the server, and every answer is checked before you see it.'),
+        h('ol', { class: 'xp-howto', 'aria-label': 'How to try it' },
+          steps.map(([ic, head, sub], i) => h('li', {},
+            h('span', { class: 'xp-howto__icon', html: icon(ic) }),
+            h('span', { class: 'xp-howto__text' }, h('small', {}, `Step ${i + 1}`), h('b', {}, head), h('span', {}, sub))))),
+        h('div', { class: 'xp-hero__cta' },
+          h('button', { type: 'button', class: 'xp-cta', onclick: () => this.scrollTo(this.picker) },
+            'Try it now', h('span', { html: icon('down') })),
+          h('a', { class: 'xp-cta xp-cta--ghost', href: `https://www.youtube.com/watch?v=${TEASER.id}`, target: '_blank', rel: 'noopener' },
+            h('span', { html: icon('play') }), 'Watch on YouTube'))),
+      this.renderTeaser());
+  }
+
+  /** Smooth scroll to a section, below the sticky header (scroll-margin-top in the stylesheet). */
+  scrollTo(el, smooth = true) {
+    const still = !smooth || matchMedia('(prefers-reduced-motion: reduce)').matches;
+    el?.scrollIntoView({ behavior: still ? 'auto' : 'smooth', block: 'start' });
+  }
+
+  /** Below the demo: how answers are kept to what the viewer has seen, and where that is measured. */
   renderAbout() {
     const points = [
       ['lock', 'Time-gated retrieval, before the model',
@@ -409,30 +460,21 @@ class Experience {
       ['chart', 'Measured, not promised',
         'Spoiler leaks, accuracy and speed are measured on a fixed set of questions at fixed positions in each film.'],
     ];
-    const steps = [
-      ['film', 'Pick a film', 'and press play'],
-      ['pause', 'Pause anywhere', 'that moment is the limit'],
-      ['tap', 'Tap or ask', 'someone on screen, or anything so far'],
-    ];
     return h('section', { class: 'xp-about', 'aria-labelledby': 'xp-about-h' },
-      h('div', { class: 'xp-about__copy' },
-        h('p', { class: 'xp-eyebrow' }, 'How it works'),
-        h('h2', { id: 'xp-about-h', class: 'xp-title' }, 'Pause anywhere.', h('span', {}, ' Ask about what you’ve seen.')),
-        h('ol', { class: 'xp-howto', 'aria-label': 'How to try it' },
-          steps.map(([ic, head, sub], i) => h('li', {},
-            h('span', { class: 'xp-howto__icon', html: icon(ic) }),
-            h('span', { class: 'xp-howto__text' }, h('small', {}, `Step ${i + 1}`), h('b', {}, head), h('span', {}, sub))))),
-        h('ul', { class: 'xp-points' }, points.map(([ic, head, body]) => h('li', {},
-          h('span', { class: 'xp-points__icon', html: icon(ic) }),
-          h('span', {}, h('b', {}, head), h('span', {}, body))))),
+      h('div', { class: 'xp-about__head' },
+        h('div', {},
+          h('p', { class: 'xp-eyebrow' }, 'How it works'),
+          h('h2', { id: 'xp-about-h', class: 'xp-title' }, 'Locked before the model.', h('span', {}, ' Checked after it.'))),
         h('p', { class: 'xp-about__links' },
           h('a', { class: 'xp-cta', href: BENCH_URL, target: '_blank', rel: 'noopener' },
             h('span', { html: icon('chart') }), 'Benchmark scorecard'),
           h('a', { class: 'xp-cta xp-cta--ghost', href: '#architecture' }, 'Architecture'))),
-      this.renderTeaser());
+      h('ul', { class: 'xp-points' }, points.map(([ic, head, body]) => h('li', {},
+        h('span', { class: 'xp-points__icon', html: icon(ic) }),
+        h('b', {}, head), h('span', {}, body)))));
   }
 
-  /** Demo video. A film frame as poster until clicked, so YouTube is only contacted when the viewer asks for it. */
+  /** Demo video. A local copy of its cover until clicked, so YouTube is only contacted when the viewer asks for it. */
   renderTeaser() {
     const frame = h('div', { class: 'xp-teaser__frame' });
     const play = () => {
@@ -444,15 +486,18 @@ class Experience {
       this.video?.pause();
     };
     frame.append(h('button', { type: 'button', class: 'xp-teaser__poster', onclick: play, 'aria-label': `Play video: ${TEASER.title} (YouTube)` },
-      this.teaserImg = h('img', { alt: '', loading: 'lazy', decoding: 'async', hidden: true }),
+      h('img', { src: new URL('../brand/teaser.jpg', import.meta.url).href, alt: '', decoding: 'async', fetchpriority: 'high' }),
       h('span', { class: 'xp-teaser__play', html: icon('play') })));
     return h('figure', { class: 'xp-teaser' }, frame,
       h('figcaption', { class: 'xp-teaser__cap' },
-        h('b', {}, 'Walkthrough video'), h('span', {}, 'Plays from YouTube')));
+        h('b', {}, 'See it in action'), h('span', {}, 'A walkthrough of this demo · plays from YouTube')));
   }
 
   renderEmptyThread() {
-    this.thread.replaceChildren(h('div', { class: 'xp-empty' }, h('p', {}, h('b', {}, this.s.emptyHead), this.s.emptyBody)));
+    this.thread.replaceChildren(h('div', { class: 'xp-empty' },
+      h('span', { class: 'xp-empty__icon', html: icon('pause') }),
+      h('p', { class: 'xp-empty__title' }, this.s.emptyHead.trim().replace(/[.。]$/, '')),
+      h('p', { class: 'xp-empty__body' }, this.s.emptyBody)));
   }
 
   // ---------- titles ----------
@@ -474,9 +519,6 @@ class Experience {
       return;
     }
     this.renderFilms();
-    const first = this.titles[0];
-    this.teaserImg.src = frameUrl(first.id, first.poster_t ?? 60);
-    this.teaserImg.hidden = false;
     const wanted = params.get('title');
     const match = wanted && this.titles.find((t) => t.id === wanted || t.title === wanted);
     const t0 = Number(params.get('t'));
@@ -484,22 +526,39 @@ class Experience {
       at: Number.isFinite(t0) && t0 > 0 ? t0 : null,
       ask: Boolean(match) && params.get('ask') === '1' && Boolean(params.get('q')),
     });
+    // A deep link to a film or a question opens on the player, not on the introduction above it.
+    if (match || params.get('q')) requestAnimationFrame(() => this.scrollTo(this.stage, false));
   }
 
   renderFilms() {
+    const s = this.s;
     this.films.replaceChildren(...this.titles.map((t) => {
       const img = h('img', { src: frameUrl(t.id, t.poster_t ?? 60), alt: '', loading: 'lazy', decoding: 'async' });
       img.addEventListener('error', () => img.remove(), { once: true });
-      return h('button', {
-        type: 'button', class: 'xp-film', 'data-id': t.id, 'aria-pressed': 'false',
-        title: t.synopsis || t.title, onclick: () => this.selectTitle(t),
-      }, h('span', { class: 'xp-film__thumb' }, img), h('span', { class: 'xp-film__name' }, t.title),
-      t.playback === 'preview' ? h('span', { class: 'xp-badge xp-badge--preview' }, this.s.preview) : null);
+      const card = h('button', {
+        type: 'button', class: 'xp-card', 'data-id': t.id, 'aria-pressed': 'false',
+        onclick: () => this.selectTitle(t, { scroll: true }),
+      },
+        h('span', { class: 'xp-card__poster' }, img,
+          t.duration_s ? h('span', { class: 'xp-card__dur' }, fmt(t.duration_s)) : null,
+          h('span', { class: 'xp-card__now' }, s.nowPlaying)),
+        h('span', { class: 'xp-card__body' },
+          h('span', { class: 'xp-card__title' }, t.title),
+          t.synopsis ? h('span', { class: 'xp-card__syn' }, t.synopsis) : null,
+          h('span', { class: 'xp-card__tags' },
+            t.license ? h('span', { class: 'xp-card__lic' }, String(t.license).replace(/-/g, ' ')) : null,
+            t.playback === 'preview' ? h('span', { class: 'xp-badge xp-badge--preview' }, s.preview) : null)));
+      return h('div', { class: 'xp-cards__item' }, card);
     }));
   }
 
-  selectTitle(t, { at = null, ask = false } = {}) {
-    if (!t || (this.title && this.title.id === t.id)) return;
+  selectTitle(t, { at = null, ask = false, scroll = false } = {}) {
+    if (!t) return;
+    if (this.title && this.title.id === t.id) {
+      if (scroll) this.scrollTo(this.stage);
+      return;
+    }
+    if (scroll) this.scrollTo(this.stage);
     this.stopStream();
     this.cancelPick();
     this.clearTap();
@@ -507,7 +566,11 @@ class Experience {
     if (!this.sessions.has(t.id)) this.sessions.set(t.id, newId());
     this.lastAskP = null;
     this.at = at != null ? Math.min(at, t.duration_s || at) : null;
-    for (const b of this.films.querySelectorAll('.xp-film')) b.setAttribute('aria-pressed', String(b.dataset.id === t.id));
+    for (const b of this.films.querySelectorAll('.xp-card')) b.setAttribute('aria-pressed', String(b.dataset.id === t.id));
+    this.nowTitle.textContent = t.title;
+    this.nowTags.replaceChildren(
+      t.license ? h('span', { class: 'xp-card__lic' }, String(t.license).replace(/-/g, ' ')) : '',
+      t.playback === 'preview' ? h('span', { class: 'xp-badge xp-badge--preview' }, this.s.preview) : '');
     this.player.classList.toggle('is-fresh', this.at == null);
     this.video.poster = frameUrl(t.id, this.at ?? t.poster_t ?? 60);
     // Until the video's metadata arrives (slow network), take the picture's shape from the poster frame, so the box

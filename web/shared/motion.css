@@ -37,6 +37,18 @@
 }
 :root:not(.hwa-m) .hwa-tab-ink { display: none; }
 
+/* ---------- film cards: tilt glare (motion.js) ---------- */
+
+:root.hwa-m .xp-cards__item { perspective: 1100px; }
+.hwa-glare {
+  position: absolute; inset: 0; z-index: 1; pointer-events: none; opacity: 0;
+  background: radial-gradient(60% 70% at var(--hwa-gx, 50%) var(--hwa-gy, 30%), rgb(255 255 255 / .28), transparent 65%);
+  mix-blend-mode: soft-light;
+  transition: opacity var(--dur, .28s) var(--ease-out, ease);
+}
+:root.hwa-m .xp-card.hwa-tilting .hwa-glare { opacity: 1; }
+:root:not(.hwa-m) .hwa-glare { display: none; }
+
 /* ---------- pick mode ---------- */
 
 :root.hwa-m .xp-player.is-picking .xp-cross { animation: hwa-breathe 1.6s var(--ease-out, ease) infinite alternate; }
