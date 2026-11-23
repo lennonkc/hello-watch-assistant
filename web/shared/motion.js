@@ -278,7 +278,7 @@ function enterPanel(panel, dir = 0) {
     } else {
       from(el, { opacity: 0, translate: `${dx}px 14px` }, { duration: 620, delay });
     }
-    el.querySelectorAll('.xp-howto > li, .arch-ideas > li').forEach((li, j) =>
+    el.querySelectorAll('.xp-intro__steps > li, .arch-ideas > li').forEach((li, j) =>
       from(li, { opacity: 0, translate: '0 10px' }, { duration: 520, delay: delay + 160 + j * 70 }));
     if (el.matches('.arch > *') && !el.matches('.arch-intro')) {
       // A section that starts on screen but runs past the fold: reveal its lower parts on scroll.

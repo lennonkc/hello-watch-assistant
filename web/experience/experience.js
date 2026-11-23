@@ -353,11 +353,10 @@ class Experience {
       this.thread, this.live);
 
     this.stage = h('section', { class: 'xp-stage', 'aria-labelledby': 'xp-stage-h' },
-      h('h1', { id: 'xp-stage-h', class: 'visually-hidden' }, 'Live demo: pause the film and ask about it'),
       h('div', { class: 'xp-main' }, this.films, this.player, this.gate),
       this.panel);
 
-    r.append(this.stage, this.renderAbout());
+    r.append(this.renderIntro(), this.stage, this.renderAbout());
     r.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && this.pick) { this.cancelPick(); this.input.focus(); }
     });
@@ -396,7 +395,22 @@ class Experience {
     this.updateLock();
   }
 
-  /** Below the fold: what the demo is, how it keeps answers spoiler-free, and where that is measured. */
+  /** Above the player: what the page is in one line, and the three steps to try it. */
+  renderIntro() {
+    const steps = [['film', 'Pick a film'], ['pause', 'Pause anywhere'], ['tap', 'Tap or ask']];
+    return h('div', { class: 'xp-intro' },
+      h('div', { class: 'xp-intro__copy' },
+        h('h1', { id: 'xp-stage-h', class: 'xp-intro__title' },
+          'Pause anywhere. ', h('span', {}, 'Ask about what you’ve seen.')),
+        h('p', { class: 'xp-intro__sub' },
+          'Answers use only what the film has shown up to your pause. Later scenes stay locked on the server.')),
+      h('ol', { class: 'xp-intro__steps', 'aria-label': 'How to try it' },
+        steps.map(([ic, label], i) => h('li', {},
+          h('span', { class: 'xp-intro__icon', html: icon(ic) }),
+          h('span', { class: 'xp-intro__step' }, h('small', {}, String(i + 1).padStart(2, '0')), label)))));
+  }
+
+  /** Below the fold: how answers are kept to what the viewer has seen, and where that is measured. */
   renderAbout() {
     const points = [
       ['lock', 'Time-gated retrieval, before the model',
@@ -409,19 +423,10 @@ class Experience {
       ['chart', 'Measured, not promised',
         'Spoiler leaks, accuracy and speed are measured on a fixed set of questions at fixed positions in each film.'],
     ];
-    const steps = [
-      ['film', 'Pick a film', 'and press play'],
-      ['pause', 'Pause anywhere', 'that moment is the limit'],
-      ['tap', 'Tap or ask', 'someone on screen, or anything so far'],
-    ];
     return h('section', { class: 'xp-about', 'aria-labelledby': 'xp-about-h' },
       h('div', { class: 'xp-about__copy' },
         h('p', { class: 'xp-eyebrow' }, 'How it works'),
-        h('h2', { id: 'xp-about-h', class: 'xp-title' }, 'Pause anywhere.', h('span', {}, ' Ask about what you’ve seen.')),
-        h('ol', { class: 'xp-howto', 'aria-label': 'How to try it' },
-          steps.map(([ic, head, sub], i) => h('li', {},
-            h('span', { class: 'xp-howto__icon', html: icon(ic) }),
-            h('span', { class: 'xp-howto__text' }, h('small', {}, `Step ${i + 1}`), h('b', {}, head), h('span', {}, sub))))),
+        h('h2', { id: 'xp-about-h', class: 'xp-title' }, 'Locked before the model.', h('span', {}, ' Checked after it.')),
         h('ul', { class: 'xp-points' }, points.map(([ic, head, body]) => h('li', {},
           h('span', { class: 'xp-points__icon', html: icon(ic) }),
           h('span', {}, h('b', {}, head), h('span', {}, body))))),
@@ -432,7 +437,7 @@ class Experience {
       this.renderTeaser());
   }
 
-  /** Demo video. A film frame as poster until clicked, so YouTube is only contacted when the viewer asks for it. */
+  /** Demo video. A local copy of its cover until clicked, so YouTube is only contacted when the viewer asks for it. */
   renderTeaser() {
     const frame = h('div', { class: 'xp-teaser__frame' });
     const play = () => {
@@ -444,7 +449,7 @@ class Experience {
       this.video?.pause();
     };
     frame.append(h('button', { type: 'button', class: 'xp-teaser__poster', onclick: play, 'aria-label': `Play video: ${TEASER.title} (YouTube)` },
-      this.teaserImg = h('img', { alt: '', loading: 'lazy', decoding: 'async', hidden: true }),
+      h('img', { src: new URL('../brand/teaser.jpg', import.meta.url).href, alt: '', loading: 'lazy', decoding: 'async' }),
       h('span', { class: 'xp-teaser__play', html: icon('play') })));
     return h('figure', { class: 'xp-teaser' }, frame,
       h('figcaption', { class: 'xp-teaser__cap' },
@@ -452,7 +457,10 @@ class Experience {
   }
 
   renderEmptyThread() {
-    this.thread.replaceChildren(h('div', { class: 'xp-empty' }, h('p', {}, h('b', {}, this.s.emptyHead), this.s.emptyBody)));
+    this.thread.replaceChildren(h('div', { class: 'xp-empty' },
+      h('span', { class: 'xp-empty__icon', html: icon('pause') }),
+      h('p', { class: 'xp-empty__title' }, this.s.emptyHead.trim().replace(/[.。]$/, '')),
+      h('p', { class: 'xp-empty__body' }, this.s.emptyBody)));
   }
 
   // ---------- titles ----------
@@ -474,9 +482,6 @@ class Experience {
       return;
     }
     this.renderFilms();
-    const first = this.titles[0];
-    this.teaserImg.src = frameUrl(first.id, first.poster_t ?? 60);
-    this.teaserImg.hidden = false;
     const wanted = params.get('title');
     const match = wanted && this.titles.find((t) => t.id === wanted || t.title === wanted);
     const t0 = Number(params.get('t'));
@@ -494,6 +499,7 @@ class Experience {
         type: 'button', class: 'xp-film', 'data-id': t.id, 'aria-pressed': 'false',
         title: t.synopsis || t.title, onclick: () => this.selectTitle(t),
       }, h('span', { class: 'xp-film__thumb' }, img), h('span', { class: 'xp-film__name' }, t.title),
+      t.duration_s ? h('span', { class: 'xp-film__dur' }, fmt(t.duration_s)) : null,
       t.playback === 'preview' ? h('span', { class: 'xp-badge xp-badge--preview' }, this.s.preview) : null);
     }));
   }
