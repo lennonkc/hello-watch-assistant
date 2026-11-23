@@ -251,3 +251,75 @@ def test_rejudge_grades_stored_results_without_asking(tmp_path, monkeypatch, cap
     monkeypatch.setenv("BENCH_REJUDGE_RUNS", "nope")
     with pytest.raises(J.OpsError, match="no stored run"):
         J.rejudge()
+
+
+class FakeRun:
+    """`gcloud run services describe / update-traffic` over an in-memory traffic list (status.traffic shape)."""
+
+    def __init__(self, traffic, drop_tagged_traffic=False):
+        self.traffic, self.drop, self.calls = copy.deepcopy(traffic), drop_tagged_traffic, []
+
+    def __call__(self, *args, timeout=3600):
+        self.calls.append(list(args))
+        ok = lambda out="": subprocess.CompletedProcess(args, 0, out, "")
+        if args[:3] == ("run", "services", "describe"):
+            return ok(json.dumps({"metadata": {"name": args[3]}, "status": {"traffic": self.traffic}}))
+        if args[:3] == ("run", "services", "update-traffic") and "--remove-tags" in args:
+            tag = args[args.index("--remove-tags") + 1]
+            kept = []
+            for t in self.traffic:
+                if t.get("tag") == tag:
+                    if self.drop or not t.get("percent"):
+                        continue
+                    t = {k: v for k, v in t.items() if k not in ("tag", "url")}
+                kept.append(t)
+            self.traffic = kept
+            return ok()
+        if args[:3] == ("run", "services", "update-traffic") and "--to-revisions" in args:
+            self.traffic = [{"revisionName": r, "percent": int(p)}
+                            for r, p in (x.split("=") for x in args[args.index("--to-revisions") + 1].split(","))]
+            return ok()
+        return subprocess.CompletedProcess(args, 3, "", "unexpected call")
+
+
+@pytest.fixture
+def run_env(monkeypatch):
+    for k, v in {"PROJECT": "proj", "REGION": "us-west1", "SERVICE": "svc", "TAG": "next"}.items():
+        monkeypatch.setenv(k, v)
+
+
+def test_untag_removes_the_tag_of_the_serving_revision_and_keeps_its_traffic(run_env, monkeypatch, capsys):
+    fake = FakeRun([{"revisionName": "svc-00018-lut", "percent": 100, "tag": "next", "url": "https://next---svc"}])
+    monkeypatch.setattr(J, "gcloud", fake)
+    assert J.untag() == 0
+    assert fake.traffic == [{"revisionName": "svc-00018-lut", "percent": 100}]
+    assert ["--remove-tags", "next"] == [a for c in fake.calls for a in c if a in ("--remove-tags", "next")]
+    out = capsys.readouterr().out
+    assert "tag next removed from svc-00018-lut; traffic unchanged: svc-00018-lut 100%" in out
+    assert out.rstrip().endswith("--update-tags next=svc-00018-lut")
+
+
+def test_untag_of_a_staged_revision_leaves_production_alone(run_env, monkeypatch):
+    fake = FakeRun([{"revisionName": "svc-00017-old", "percent": 100},
+                    {"revisionName": "svc-00018-lut", "percent": 0, "tag": "next", "url": "https://next---svc"}])
+    monkeypatch.setattr(J, "gcloud", fake)
+    assert J.untag() == 0
+    assert fake.traffic == [{"revisionName": "svc-00017-old", "percent": 100}]
+
+
+def test_untag_without_the_tag_changes_nothing(run_env, monkeypatch, capsys):
+    fake = FakeRun([{"revisionName": "svc-00018-lut", "percent": 100}])
+    monkeypatch.setattr(J, "gcloud", fake)
+    assert J.untag() == 0
+    assert [c[:3] for c in fake.calls] == [["run", "services", "describe"]]
+    assert "no tag next: nothing to remove" in capsys.readouterr().out
+
+
+def test_untag_puts_the_split_back_when_gcloud_changed_it(run_env, monkeypatch):
+    fake = FakeRun([{"revisionName": "svc-00015-zec", "percent": 10},
+                    {"revisionName": "svc-00018-lut", "percent": 90, "tag": "next", "url": "https://next---svc"}],
+                   drop_tagged_traffic=True)
+    monkeypatch.setattr(J, "gcloud", fake)
+    with pytest.raises(J.OpsError, match="was put back to svc-00015-zec=10,svc-00018-lut=90"):
+        J.untag()
+    assert J._split(fake.traffic) == [("svc-00015-zec", 10), ("svc-00018-lut", 90)]

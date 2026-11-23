@@ -1463,9 +1463,66 @@ def bench_prep() -> int:
     return 0
 
 
+# ── untag ────────────────────────────────────────────────────────────
+
+def _split(traffic: list[dict]) -> list[tuple[str, int]]:
+    """[(revision, percent)] of the entries that carry traffic, sorted: what a tag change must leave alone."""
+    out: dict[str, int] = {}
+    for t in traffic:
+        pct = int(t.get("percent") or 0)
+        if pct:
+            rev = t.get("revisionName") or ("LATEST" if t.get("latestRevision") else "?")
+            out[rev] = out.get(rev, 0) + pct
+    return sorted(out.items())
+
+
+def _traffic_lines(traffic: list[dict]) -> None:
+    for t in traffic:
+        rev = t.get("revisionName") or ("LATEST" if t.get("latestRevision") else "?")
+        say(f"  {rev:<40} {int(t.get('percent') or 0):>4}%  tag={t.get('tag') or '-':<8} {t.get('url') or ''}")
+
+
+def untag() -> int:
+    """Removes the TAG traffic tag, so its URL (https://TAG---<service host>) stops answering; the traffic split
+    stays as it is (checked after, and put back if gcloud changed it). The next deploy-staging tags again."""
+    tag = env("TAG", "next")
+    project, region, service = env("PROJECT"), env("REGION", "us-west1"), env("SERVICE", "hello-watch")
+    traffic = _svc().get("status", {}).get("traffic", [])
+    say("traffic before:")
+    _traffic_lines(traffic)
+    tagged = [t for t in traffic if t.get("tag") == tag]
+    if not tagged:
+        say(f"no tag {tag}: nothing to remove")
+        return 0
+    rev = tagged[0].get("revisionName") or "?"
+    before = _split(traffic)
+    r = gcloud("run", "services", "update-traffic", service, "--project", project, "--region", region,
+               "--remove-tags", tag, "--quiet", timeout=600)
+    if r.returncode:
+        raise OpsError(f"update-traffic --remove-tags {tag}: {_err(r)}")
+    traffic = _svc().get("status", {}).get("traffic", [])
+    say("traffic after:")
+    _traffic_lines(traffic)
+    if _split(traffic) != before:
+        want = ",".join(f"{k}={v}" for k, v in before)
+        say(f"WARN: the split changed; putting it back: --to-revisions {want}")
+        r = gcloud("run", "services", "update-traffic", service, "--project", project, "--region", region,
+                   "--to-revisions", want, "--quiet", timeout=600)
+        if r.returncode:
+            raise OpsError(f"traffic split changed and could not be restored ({_err(r)}): run gcloud run services "
+                           f"update-traffic {service} --project {project} --region {region} --to-revisions {want}")
+        raise OpsError(f"traffic split changed and was put back to {want}; tag {tag} state: see traffic above")
+    if any(t.get("tag") == tag for t in traffic):
+        raise OpsError(f"tag {tag} is still there")
+    say(f"tag {tag} removed from {rev}; traffic unchanged: " + ", ".join(f"{k} {v}%" for k, v in before))
+    say(f"to put it back: gcloud run services update-traffic {service} --project {project} --region {region} "
+        f"--update-tags {tag}={rev}")
+    return 0
+
+
 JOBS = {"inspect-packs": inspect_packs, "publish-public-packs": publish_public_packs,
         "publish-private-title": publish_private_title, "bench-show": bench_show, "logs": logs,
-        "rejudge": rejudge, "bench-prep": bench_prep}
+        "rejudge": rejudge, "bench-prep": bench_prep, "untag": untag}
 
 
 def main(argv: list[str]) -> int:

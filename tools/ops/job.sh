@@ -1,7 +1,7 @@
 #!/bin/bash
 # One-off operations, run by `tools/ops/run.sh job` with JOB=<name>[,<name>…] in tools/ops/params.env:
 #
-#   inspect-packs | publish-public-packs | publish-private-title | bench-show | logs | rejudge   (tools/ops/jobs.py)
+#   inspect-packs | publish-public-packs | publish-private-title | bench-show | logs | rejudge | untag   (tools/ops/jobs.py)
 #
 # Several names run one after the other and stop at the first failure. run.sh has built the .venv and exported
 # OPS_ROOT, OPS_VENV_PY, the machine-local paths and the discovered BUCKET / PROJECT / SERVICE_ACCOUNT. Each job's
@@ -15,7 +15,7 @@ cd "$ROOT"
 if [ -f tools/ops/params.env ]; then
   . ./tools/ops/params.env
 fi
-NAMES="inspect-packs | publish-public-packs | publish-private-title | bench-show | logs | rejudge"
+NAMES="inspect-packs | publish-public-packs | publish-private-title | bench-show | logs | rejudge | untag"
 JOBS=$(printf '%s' "${JOB:-}" | tr ',' ' ')
 if [ -z "$JOBS" ]; then
   printf 'ERROR: set JOB in tools/ops/params.env (%s)\n' "$NAMES"
@@ -23,7 +23,7 @@ if [ -z "$JOBS" ]; then
 fi
 for j in $JOBS; do
   case "$j" in
-    inspect-packs|publish-public-packs|publish-private-title|bench-show|logs|rejudge) ;;
+    inspect-packs|publish-public-packs|publish-private-title|bench-show|logs|rejudge|untag) ;;
     *) printf 'ERROR: unknown JOB %s (%s)\n' "$j" "$NAMES"; exit 1 ;;
   esac
 done
